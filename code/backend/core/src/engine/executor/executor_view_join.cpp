@@ -5,6 +5,7 @@
 // FROM list and joins, the view's WHERE with the one of the statement, the view's column names replaced by `table.column`. INSERT INTO v (cols) VALUES ... puts the row in the
 // base table the columns belong to. The errors are MySQL's: 1393 (columns of two tables), 1394 (INSERT without a list of columns), 1348 (a column that is an expression),
 // 1288 / 1471 (a view with an outer join), 1395 (REPLACE, DELETE), 1423 (a column of the table that has no default).
+// A column of the view that is `a.k + b.x AS s`, read in the WHERE or in a new value, is the expression put in its place (R86), as MySQL does.
 // Not here: WITH CHECK OPTION on a join view (refused with a message of its own), a join with USING or NATURAL, a derived table, a table used twice with the same name.
 
 #include "engine/executor/executor.hpp"
@@ -28,6 +29,24 @@ const ColumnDef* column_named(const TableSchema& schema, const std::string& name
 std::string not_supported(const char* what) {
     return std::string("Writing through a join view ") + what + " is not supported in this version";
 }
+
+// The columns of an expression named as the join view's tables name them ("key.column", R86): `base` answers for a name written in the select list ("" for one that is on no
+// table or on two). False when such a name is met: the expression is not kept.
+template <class F>
+struct JoinColumnNames {
+    const F& base;
+    bool col(ArithExpr&, ArithExpr::Col& c) const {
+        const std::string ref = base(c.name);
+        if (ref.empty()) return false;
+        c.name = ref;
+        return true;
+    }
+    bool literal(CondExpr::Leaf&, ConditionValue::Literal& l) const { // (a value that is not quoted: a number, NULL, or a column)
+        const std::string ref = base(l.value);
+        if (!ref.empty()) l.value = ref;
+        return true;
+    }
+};
 } // namespace
 
 std::optional<Executor::JoinViewTarget> Executor::resolve_join_view_target(const SharedDatabase& s, const std::string& name) {
@@ -55,7 +74,7 @@ std::optional<Executor::JoinViewTarget> Executor::resolve_join_view_target(const
         target.check_option = check || inner->check_option;
         below = inner->columns;
         std::optional<CondExpr> mine = sel->condition;
-        if (mine) rename_cond_columns(*mine, below);
+        if (mine && !rewrite_view_columns(*mine, below, target.expressions)) return std::nullopt; // (a column of the view below that is an expression read in this view's WHERE)
         target.condition = merge_conditions(target.condition, mine);
     } else {
         if (sel->joins.empty()) return std::nullopt; // (one table: resolve_view_target)
@@ -123,6 +142,11 @@ std::optional<Executor::JoinViewTarget> Executor::resolve_join_view_target(const
             target.columns.emplace_back(aliased->alias, column_below(aliased->name));
         } else if (auto* expr = std::get_if<SelectColumn::Expr>(&c.data)) {
             target.columns.emplace_back(expr->alias.value_or(""), "");
+            if (expr->alias) { // (the expression with the names of the tables below, for a write that reads this column: R86)
+                ArithExpr copy = expr->expr;
+                const bool kept = nested ? rewrite_view_columns(copy, below, target.expressions) : walk_view_columns(copy, JoinColumnNames<decltype(base_ref)>{base_ref});
+                if (kept) target.expressions.emplace_back(*expr->alias, std::move(copy));
+            }
         } else if (auto* func = std::get_if<SelectColumn::Func>(&c.data)) {
             target.columns.emplace_back(func->alias.value_or(""), "");
         } else if (auto* when = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
@@ -148,13 +172,11 @@ StringResult Executor::exec_join_view_update(SharedDatabase& s, const std::strin
             return StringResult::Err("ERROR 1393 (HY000): Can not modify more than one base table through a join view '" + view + "'");
         }
         base_key = key;
-        if (names_expression_column(expr, target.columns)) return StringResult::Err(not_supported("with a column that is an expression read in the new value"));
+        if (!rewrite_view_columns(expr, target.columns, target.expressions)) return StringResult::Err(not_supported("with a column that is an expression read in the new value"));
         column = entry->second;
-        rename_arith_columns(expr, target.columns);
     }
     if (condition) {
-        if (names_expression_column(*condition, target.columns)) return StringResult::Err(not_supported("with a column that is an expression read in the WHERE"));
-        rename_cond_columns(*condition, target.columns);
+        if (!rewrite_view_columns(*condition, target.columns, target.expressions)) return StringResult::Err(not_supported("with a column that is an expression read in the WHERE"));
     }
     return exec_multi_update(s, {target.tables.front().second}, target.joins, std::move(assignments), merge_conditions(target.condition, condition));
 }

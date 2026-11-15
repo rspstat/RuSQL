@@ -903,6 +903,41 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) row.erase(v->name);
         }
+        { // an index loses the column it read, and one that has no column left goes with it, as in MySQL (it was left on a column the table no longer had, R86)
+            bool changed = false;
+            for (auto it = s.index_meta.begin(); it != s.index_meta.end();) {
+                if (it->second.first == table && it->second.second == v->name) {
+                    s.indexes.erase(it->first);
+                    s.disk.delete_btree_index(it->first);
+                    it = s.index_meta.erase(it);
+                    changed = true;
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = s.hash_index_meta.begin(); it != s.hash_index_meta.end();) {
+                if (it->second.first == table && it->second.second == v->name) {
+                    s.hash_indexes.erase(it->first);
+                    it = s.hash_index_meta.erase(it);
+                    changed = true;
+                } else {
+                    ++it;
+                }
+            }
+            for (auto it = s.composite_indexes.begin(); it != s.composite_indexes.end();) {
+                auto& columns = it->second.columns;
+                if (it->second.table == table && std::find(columns.begin(), columns.end(), v->name) != columns.end()) {
+                    columns.erase(std::remove(columns.begin(), columns.end(), v->name), columns.end());
+                    changed = true;
+                    if (columns.empty()) {
+                        it = s.composite_indexes.erase(it);
+                        continue;
+                    }
+                }
+                ++it;
+            }
+            if (changed) persist_index_meta(s);
+        }
         rebuild_indexes();
         s.disk.save_schema(table, *s.catalog.get_table(table));
         s.buffer_pool.write_through(table, s.tables.at(table), s.disk); // (committed rows only: see BufferPool::write_through)
@@ -1389,6 +1424,17 @@ static bool has_database_folder(const SharedDatabase& s, const std::string& key)
     return false;
 }
 
+void Executor::stamp_created(SharedDatabase& s, const std::string& table) {
+    TableSchema* schema = s.catalog.get_table_mut(table);
+    if (!schema) return;
+    schema->created = time_now_text(0, false, true);
+    s.disk.save_schema(table, *schema);
+}
+
+bool Executor::is_system_schema(const SharedDatabase& s, const std::string& db) {
+    return to_lower_copy(db) == "mysql" && !has_database_folder(s, "mysql");
+}
+
 StringResult Executor::exec_create_database(SharedDatabase& s, const std::string& name, bool if_not_exists) {
     std::string key = to_lower_copy(name);
     affected_rows_ = 1; // (the OK packet of CREATE DATABASE says 1, also when IF NOT EXISTS finds it there)
@@ -1494,7 +1540,10 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
     s.databases.erase(key);
 
     if (current_db == key) {
-        current_db = s.databases.empty() ? std::string() : *s.databases.begin();
+        current_db.clear(); // (another schema of the user's, the first by name; the system schema `mysql` is never the one, R86)
+        for (const std::string& d : s.databases) {
+            if (!is_system_schema(s, d) && (current_db.empty() || d < current_db)) current_db = d;
+        }
     }
 
     affected_rows_ = static_cast<std::int64_t>(table_keys.size() + dropped_views); // (the OK packet of DROP DATABASE counts the tables and views it took away)
@@ -1504,6 +1553,13 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
 StringResult Executor::exec_create_index(SharedDatabase& s, const std::string& index_name, const std::string& table,
                                           const std::vector<std::string>& columns, bool using_hash) {
     if (!s.tables.count(table)) return StringResult::Err("Table '" + table + "' not found");
+    if (const TableSchema* schema = s.catalog.get_table(table)) { // (an index on a column the table has not: MySQL error 1072, R86)
+        for (const std::string& column : columns) {
+            if (std::none_of(schema->columns.begin(), schema->columns.end(), [&](const ColumnDef& c) { return same_name(c.name, column); })) {
+                return StringResult::Err("ERROR 1072 (42000): Key column '" + column + "' doesn't exist in table");
+            }
+        }
+    }
     {
         // an index name is used once on a table, whatever the case (MySQL error 1061)
         const std::string wanted = table + "_" + index_name;
@@ -1606,7 +1662,7 @@ std::optional<std::string> Executor::index_table_without_on(const SharedDatabase
     return std::nullopt;
 }
 
-StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table) {
+StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table, bool if_exists) {
     auto has_suffix = [&](const std::string& key) { return index_key_matches(key, index_name, table); };
 
     for (auto it = s.index_meta.begin(); it != s.index_meta.end(); ++it) {
@@ -1632,7 +1688,8 @@ StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& ind
         persist_index_meta(s);
         return StringResult::Ok("Composite index '" + index_name + "' dropped.");
     }
-    return StringResult::Ok("Index '" + index_name + "' does not exist, skipped.");
+    if (if_exists) return StringResult::Ok("Index '" + index_name + "' does not exist, skipped.");
+    return StringResult::Err("ERROR 1091 (42000): Can't DROP '" + index_name + "'; check that column/key exists"); // (R86: MySQL refuses one that is not there; IF EXISTS is RuSQL's own)
 }
 
 const RoutineSource* Executor::view_meta(const SharedDatabase& s, const std::string& view) {

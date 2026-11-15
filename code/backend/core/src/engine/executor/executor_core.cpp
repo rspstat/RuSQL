@@ -35,6 +35,16 @@ std::string alter_actions_error(const TableSchema& schema, const std::string& ta
 // Password hashing helpers (native TCP auth: SHA-256; MySQL wire protocol: SHA1)
 // ---------------------------------------------------------------------------
 namespace {
+// The schema a session starts in: the first one by name ("rusql" when there is none). The empty system schema `mysql` is never the one (R86)
+std::string default_database(const std::unordered_set<std::string>& databases, bool mysql_is_system) {
+    std::string pick;
+    for (const std::string& d : databases) {
+        if (mysql_is_system && d == "mysql") continue;
+        if (pick.empty() || d < pick) pick = d;
+    }
+    return pick.empty() ? std::string("rusql") : pick;
+}
+
 // The table an INSERT / UPDATE / DELETE writes (its triggers may fail the statement), or null for any other statement
 const std::string* dml_target_of(const Statement& stmt) {
     if (auto* v = std::get_if<Statement::Insert>(&stmt.data)) return &v->table;
@@ -199,6 +209,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     }
     // The system schema every MySQL server has (R84): `mysqldump --all-databases` dumps the schemas the server lists and starts with `mysql` -- from a server that lists none
     // by that name it writes an EMPTY dump, with no error. RuSQL keeps its accounts and privileges in files of its own, so the schema holds no tables; it cannot be made or dropped.
+    const bool mysql_is_system = databases.count("mysql") == 0; // (a `mysql` a user made before R84 has a folder: it is theirs)
     databases.insert("mysql");
 
     // Indexes are derived data and are rebuilt from the table rows at every start. They used to be loaded from
@@ -357,8 +368,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
     auto triggers = disk.load_triggers<std::unordered_map<std::string, TriggerDef>>();
     auto user_functions = disk.load_functions<std::unordered_map<std::string, UserFunctionDef>>();
 
-    std::string current_db_val =
-        databases.empty() ? std::string("rusql") : *std::min_element(databases.begin(), databases.end());
+    std::string current_db_val = default_database(databases, mysql_is_system);
     auto txn_io = std::make_shared<TxnIoShared>();
 
     SharedDatabase db_value{
@@ -470,7 +480,7 @@ Executor Executor::new_session(std::shared_ptr<RwLock<SharedDatabase>> shared_db
     std::shared_ptr<TxnIoShared> txn_io_val;
     {
         auto s = shared_db->read();
-        current_db_val = s->databases.empty() ? std::string("rusql") : *std::min_element(s->databases.begin(), s->databases.end());
+        current_db_val = default_database(s->databases, is_system_schema(*s, "mysql"));
         data_dir_val = s->data_dir;
         session_id_val = s->next_session_id->fetch_add(1);
         txn_io_val = s->txn_io;
@@ -2194,17 +2204,29 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         }
         auto done = exec_alter(s, v->table, v->action);
         std::string table = v->table; // (an action that renames the table: the ones after it name the new one)
+        bool remade = done.is_ok() && !std::holds_alternative<AlterAction::RenameTable>(v->action.data); // (MySQL's CREATE_TIME says the table was made again: a rename alone keeps it)
         if (auto* rename = std::get_if<AlterAction::RenameTable>(&v->action.data); rename && done.is_ok()) table = rename->to;
         for (auto& action : v->more) {
             if (done.is_err()) break;
             done = exec_alter(s, table, action);
+            if (done.is_ok() && !std::holds_alternative<AlterAction::RenameTable>(action.data)) remade = true;
             if (auto* rename = std::get_if<AlterAction::RenameTable>(&action.data); rename && done.is_ok()) table = rename->to;
         }
+        if (remade) stamp_created(s, table);
         return done;
     }
-    if (auto* v = std::get_if<Statement::CreateIndex>(&stmt.data))
-        return exec_create_index(s, v->index_name, v->table, v->columns, v->using_hash);
-    if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) return exec_drop_index(s, v->index_name, v->table);
+    if (auto* v = std::get_if<Statement::CreateIndex>(&stmt.data)) {
+        auto done = exec_create_index(s, v->index_name, v->table, v->columns, v->using_hash);
+        if (done.is_ok()) stamp_created(s, v->table);
+        return done;
+    }
+    if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) {
+        const auto owner = v->table ? v->table : index_table_without_on(s, v->index_name);
+        const std::size_t before = s.index_meta.size() + s.hash_index_meta.size() + s.composite_indexes.size();
+        auto done = exec_drop_index(s, v->index_name, v->table, v->if_exists);
+        if (done.is_ok() && owner && s.index_meta.size() + s.hash_index_meta.size() + s.composite_indexes.size() < before) stamp_created(s, *owner);
+        return done;
+    }
     if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) return exec_create_view(s, v->name, *v->query, v->raw_sql, std::move(v->definer), std::move(v->algorithm), std::move(v->security));
     if (auto* v = std::get_if<Statement::DropView>(&stmt.data)) return exec_drop_view(s, v->name);
     if (auto* v = std::get_if<Statement::ShowTables>(&stmt.data)) return exec_show_tables(s, v->database, v->like);

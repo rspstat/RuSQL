@@ -189,7 +189,7 @@ TEST_CASE("SHOW CREATE VIEW and SHOW INDEX", "[executor][dcl]") {
 
     auto view_ddl = ex.execute_sql("SHOW CREATE VIEW v_emp");
     REQUIRE(view_ddl.is_ok());
-    REQUIRE(view_ddl.value().find("CREATE VIEW") != std::string::npos);
+    REQUIRE(view_ddl.value().find("VIEW `v_emp` AS") != std::string::npos);
 
     auto idx = ex.execute_sql("SHOW INDEX FROM employee");
     REQUIRE(idx.is_ok());

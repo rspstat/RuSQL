@@ -283,6 +283,9 @@ public:
     // this after a successful AUTH handshake; defaults to "root" for the CLI/in-process
     // embedding, which has no network auth step of its own). Read by USER()/CURRENT_USER().
     std::string auth_user = "root";
+    // Whether SHOW DATABASES / information_schema.schemata list the empty system schema `mysql` (R86): a MySQL-protocol session does (a dump tool and a client read the schema list of a
+    // MySQL server, which has it); the native protocol (the app, the CLI, MCP) does not -- the user never made it
+    bool lists_system_schema = false;
     // The roles that are active in this session (SET ROLE; the default roles of the account at login: activate_default_roles). Privileges: executor_privileges.cpp.
     std::vector<std::string> active_roles_;
     void activate_default_roles(); // after a login: the roles SET DEFAULT ROLE made the default ones of the account
@@ -888,11 +891,17 @@ private:
     StringResult exec_drop_database(SharedDatabase& s, const std::string& name, bool if_exists);
     StringResult exec_create_index(SharedDatabase& s, const std::string& index_name, const std::string& table,
                                     const std::vector<std::string>& columns, bool using_hash);
-    StringResult exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table = std::nullopt);
+    StringResult exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table = std::nullopt, bool if_exists = false);
     // `definer` / `algorithm` / `security`: what the CREATE wrote (empty: not written), kept with the time in SharedDatabase::routine_sources under "view:db.name" (R85)
     StringResult exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql, std::string definer, std::string algorithm, std::string security);
     // What was kept about a view when it was made (the account, the time, ALGORITHM, SQL SECURITY); null for one made before R85
     static const RoutineSource* view_meta(const SharedDatabase& s, const std::string& view);
+    // `CREATE ALGORITHM=.. DEFINER=.. SQL SECURITY .. VIEW `v` AS <body>` as MySQL writes it (both protocols' SHOW CREATE VIEW, R86)
+    static std::string view_create_text(const SharedDatabase& s, const std::string& view, const std::string& body);
+    // The table was made again, as far as MySQL's CREATE_TIME says (ALTER TABLE, CREATE | DROP INDEX, OPTIMIZE; RENAME and TRUNCATE keep it): the time is now (R86)
+    static void stamp_created(SharedDatabase& s, const std::string& table);
+    // The system schema `mysql`: always there (a dump with --all-databases starts with it), never a schema a session starts in
+    static bool is_system_schema(const SharedDatabase& s, const std::string& db);
     StringResult exec_drop_view(SharedDatabase& s, const std::string& name);
     void persist_views_for_db(const SharedDatabase& s, const std::string& db) const;
     static void index_insert_row(SharedDatabase& s, const std::string& table, const Row& row);
@@ -1112,6 +1121,7 @@ private:
         std::vector<Join> joins;
         std::optional<CondExpr> condition;
         std::vector<std::pair<std::string, std::string>> columns;
+        std::vector<std::pair<std::string, ArithExpr>> expressions; // a column that is `a.k + b.x AS s`: (its name, the expression with "key.column" names), R86
         bool outer = false;
         bool check_option = false;
     };
@@ -1490,7 +1500,7 @@ private:
                              std::vector<std::string> when_not_matched_values);
 
     // ── Phase 8f: INFORMATION_SCHEMA virtual tables ──────────────────────
-    static std::vector<Row> info_schema_rows(const SharedDatabase& s, const std::string& which);
+    std::vector<Row> info_schema_rows(const SharedDatabase& s, const std::string& which) const;
     // ── Phase 8c: window functions ───────────────────────────────────────
     static std::pair<std::size_t, std::size_t> frame_bounds(std::size_t pos, std::size_t len, const std::optional<WindowFrame>& frame,
                                                               bool has_order);

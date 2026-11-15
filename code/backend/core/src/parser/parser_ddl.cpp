@@ -1337,10 +1337,12 @@ Statement Parser::parse_create_index() {
 }
 
 Statement Parser::parse_drop_index() {
+    bool if_exists = false;
     if (peek_is(TokenKind::If)) {
         advance();
         if (!peek_is(TokenKind::Exists)) throw ParseError("Expected EXISTS after IF");
         advance();
+        if_exists = true;
     }
     std::string index_name = expect_ident();
     std::optional<std::string> table;
@@ -1348,7 +1350,7 @@ Statement Parser::parse_drop_index() {
         advance();
         table = expect_table_name();
     }
-    return Statement(Statement::DropIndex{index_name, table});
+    return Statement(Statement::DropIndex{index_name, table, if_exists});
 }
 
 Statement Parser::parse_create_view() {

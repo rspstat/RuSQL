@@ -1729,6 +1729,7 @@ void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> sh
 
     // 1. Server sends Handshake. The connection id the client reads there (mysql_thread_id) is the id of the session in the process list: it is what KILL takes (R53)
     Executor exec = Executor::new_session(shared);
+    exec.lists_system_schema = true; // (a MySQL server lists the schema `mysql`: a dump tool reads the list, R86)
     const std::uint32_t conn_id = static_cast<std::uint32_t>(exec.session_id);
     auto nonce = make_nonce(conn_id);
     if (!write_packet(sock, 0, handshake_pkt(conn_id, nonce))) return;

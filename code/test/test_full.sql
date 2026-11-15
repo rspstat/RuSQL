@@ -662,6 +662,30 @@ DROP VIEW r85_temp;
 DROP VIEW r85_merge;
 DROP VIEW r85_derived;
 
+-- Join-View Expression Columns, DROP COLUMN With Indexes, CREATE_TIME After ALTER, Native SHOW CREATE VIEW, Missing Index Errors (R86)
+CREATE VIEW r86_jv AS SELECT employee.id AS eid, employee.salary * 2 AS double_salary, department.id AS did, department.name AS dname FROM employee JOIN department ON employee.department_id = department.id;
+UPDATE r86_jv SET dname = 'Engineering (r86)' WHERE double_salary > 230000 AND eid = 1;
+SELECT eid, double_salary, dname FROM r86_jv WHERE eid <= 3 ORDER BY eid;
+UPDATE r86_jv SET dname = 'Engineering' WHERE double_salary > 230000 AND eid = 1;
+SELECT eid, double_salary, dname FROM r86_jv WHERE eid <= 3 ORDER BY eid;
+DROP VIEW r86_jv;
+CREATE TABLE r86_t (a INT PRIMARY KEY, b INT, c INT);
+CREATE INDEX r86_ib ON r86_t (b);
+CREATE INDEX r86_ibc ON r86_t (b, c);
+ALTER TABLE r86_t DROP COLUMN b;
+SELECT index_name, column_name FROM information_schema.statistics WHERE table_schema = 'company' AND table_name = 'r86_t' ORDER BY index_name, seq_in_index;
+CREATE TABLE r86_copy LIKE r86_t;
+SELECT table_name, create_time IS NOT NULL AS has_time FROM information_schema.tables WHERE table_schema = 'company' AND table_name LIKE 'r86_%' ORDER BY table_name;
+CREATE VIEW r86_v AS SELECT id FROM employee;
+SHOW CREATE VIEW r86_v;
+DROP VIEW r86_v;
+CREATE INDEX r86_bad ON r86_t (nosuch);
+DROP INDEX r86_nosuch ON r86_t;
+DROP INDEX IF EXISTS r86_nosuch ON r86_t;
+SHOW DATABASES;
+DROP TABLE r86_copy;
+DROP TABLE r86_t;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

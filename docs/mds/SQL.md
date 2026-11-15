@@ -18,7 +18,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - DROP SCHEMA db : DROP DATABASE와 같음
 - USE db : 사용할 데이터베이스 선택
 - USE DATABASE db : USE와 같음
-- SHOW DATABASES : 데이터베이스 목록 조회
+- SHOW DATABASES : 데이터베이스 목록 조회(R86: 빈 시스템 스키마 `mysql`은 MySQL 프로토콜 세션(`mysql` 클라이언트 · `mysqldump` · DBeaver)에만 보이고, 앱 · CLI · MCP의 네이티브 프로토콜에는 안 보임; `information_schema.schemata`도 같음. 세션은 `mysql`에서 시작하지 않음)
 
 ## 2. 테이블 정의 — CREATE TABLE
 
@@ -63,7 +63,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ALTER TABLE t MODIFY [COLUMN] 컬럼 정의 : 컬럼 타입 · 제약 변경(값도 새 타입으로 바꾸고 인덱스를 다시 만듦). NOT NULL로 바꿀 때 NULL이 있으면 형이 그대로인 제자리 변경은 1138(`Invalid use of NULL value`), 형이 바뀌면 1265(`Data truncated for column ... at row N`; R80)
 - ALTER TABLE t CHANGE [COLUMN] 옛이름 새이름 타입... : 컬럼 이름과 정의를 함께 변경
 - ALTER TABLE t RENAME COLUMN a TO b : 컬럼 이름 변경
-- ALTER TABLE t DROP [COLUMN] col : 컬럼 삭제
+- ALTER TABLE t DROP [COLUMN] col : 컬럼 삭제(R86: 그 열을 읽는 인덱스에서 열을 빼고, 열이 하나도 안 남은 인덱스는 같이 사라짐 — 전에는 없는 열을 가리키는 인덱스가 남았음)
 - ALTER TABLE t ALTER [COLUMN] col SET DEFAULT 값 : 기본값 지정
 - ALTER TABLE t ALTER [COLUMN] col DROP DEFAULT : 기본값 제거
 - ALTER TABLE t ADD [UNIQUE] INDEX | KEY [이름] (cols) : 인덱스 추가
@@ -86,14 +86,14 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ## 4. 인덱스 · 뷰 · 별칭
 
-- CREATE INDEX 이름 ON t (a [ASC|DESC], b, ...) : 단일 · 복합 인덱스 생성
+- CREATE INDEX 이름 ON t (a [ASC|DESC], b, ...) : 단일 · 복합 인덱스 생성(R86: 표에 없는 열이면 오류 1072 — 전에는 빈 인덱스가 만들어짐)
 - CREATE UNIQUE INDEX 이름 ON t (cols) : 유일 인덱스 생성
 - CREATE INDEX 이름 USING HASH | BTREE ON t (cols) : 인덱스 종류 지정(HASH는 해시 인덱스, 그 밖은 B+Tree)
-- DROP INDEX [IF EXISTS] 이름 [ON t] : 인덱스 삭제
+- DROP INDEX [IF EXISTS] 이름 [ON t] : 인덱스 삭제(R86: 없는 인덱스는 오류 1091 — 전에는 "skipped"로 조용히 넘어갔음; `IF EXISTS`(MySQL에는 없는 RuSQL의 확장)를 쓰면 그대로 넘어감; 인덱스를 만들거나 지우면 표의 `CREATE_TIME`이 새로 정해짐)
 - CREATE [OR REPLACE] [ALGORITHM = x] [DEFINER = x] [SQL SECURITY x] VIEW v AS SELECT ... : 뷰 생성 · 덮어쓰기(R85: 쓴 `DEFINER` · `ALGORITHM`(`UNDEFINED` · `MERGE` · `TEMPTABLE`) · `SQL SECURITY`와 만든 시각을 기억해 `SHOW CREATE VIEW`(MySQL 프로토콜) · `information_schema.views`가 말함; **`ALGORITHM = TEMPTABLE` 뷰는 쓰기를 못 받음 — `IS_UPDATABLE` `NO`, `UPDATE` · `DELETE` 1288, `INSERT` 1471**; 안 쓴 것은 만든 세션의 계정 · `UNDEFINED` · `DEFINER`)
 - DROP VIEW [IF EXISTS] v : 뷰 삭제
 - INSERT / UPDATE / DELETE 대상으로 뷰 사용 : 한 표의 행을 그대로 보여 주는 뷰(JOIN · DISTINCT · GROUP BY · 집계 · LIMIT 없음, 뷰 위의 뷰도 됨)는 쓰기도 가능. 열 이름을 바꾼 뷰(`id AS ident`)는 뷰의 이름으로 `SET`·`WHERE`를 쓰고, 열 목록 없는 `INSERT INTO v VALUES (...)`는 뷰의 열을 따른다(R71). 식으로 만든 열을 쓰면 오류 1348(UPDATE) · 1471(INSERT), 쓸 수 없는 뷰는 1288(UPDATE · DELETE) · 1471(INSERT), 조인 뷰의 DELETE는 1395, 뷰가 가린 NOT NULL 열은 1423
-- 조인 뷰(`CREATE VIEW v AS SELECT ... FROM a JOIN b ON ...`, 쉼표 조인과 조인 뷰 위의 뷰 포함)에 UPDATE · INSERT (R80): UPDATE는 **한 기본 표의 열만** 바꿀 때 되고(다중 표 UPDATE로 풀어 그 표의 행마다 한 번씩, 뷰의 WHERE와 문장의 WHERE가 함께 적용; 새 값은 다른 표의 열을 읽어도 됨), 두 표의 열이면 1393, 식으로 만든 열이면 1348, ORDER BY · LIMIT는 1221. INSERT는 **열 목록이 있어야** 하고(1394) 한 기본 표의 열만(1393), 그 표에 들어가며 뷰의 WHERE는 막지 않는다; 식으로 만든 열이 든 뷰는 1471, 기본값 없는 NOT NULL 열이 빠지면 1423, REPLACE는 1395, `ON DUPLICATE KEY UPDATE`는 뷰의 열 이름으로. 바깥 조인(LEFT / RIGHT)이 든 뷰는 UPDATE · DELETE가 1288, INSERT가 1471, 안쪽 조인 뷰의 DELETE는 1395. 아직 안 되는 것: `WITH CHECK OPTION`이 든 조인 뷰와 식으로 만든 열을 새 값 · WHERE에서 읽는 문장(둘 다 메시지로 거절), USING · NATURAL 조인이나 파생 표가 든 뷰, 같은 표를 두 번 쓴 뷰(쓰기가 거절됨)
+- 조인 뷰(`CREATE VIEW v AS SELECT ... FROM a JOIN b ON ...`, 쉼표 조인과 조인 뷰 위의 뷰 포함)에 UPDATE · INSERT (R80): UPDATE는 **한 기본 표의 열만** 바꿀 때 되고(다중 표 UPDATE로 풀어 그 표의 행마다 한 번씩, 뷰의 WHERE와 문장의 WHERE가 함께 적용; 새 값은 다른 표의 열을 읽어도 됨), 두 표의 열이면 1393, 식으로 만든 열이면 1348, ORDER BY · LIMIT는 1221. INSERT는 **열 목록이 있어야** 하고(1394) 한 기본 표의 열만(1393), 그 표에 들어가며 뷰의 WHERE는 막지 않는다; 식으로 만든 열이 든 뷰는 1471, 기본값 없는 NOT NULL 열이 빠지면 1423, REPLACE는 1395, `ON DUPLICATE KEY UPDATE`는 뷰의 열 이름으로. 바깥 조인(LEFT / RIGHT)이 든 뷰는 UPDATE · DELETE가 1288, INSERT가 1471, 안쪽 조인 뷰의 DELETE는 1395. R86: 식으로 만든 열(`ja.x * 2 AS dbl`, `ja.x + jb.y AS s`, `CASE`)을 **새 값 · WHERE에서 읽는 문장도 되고**(뷰의 식을 그 자리에 넣어 행을 찾음; 조인 뷰 위의 뷰도), 쓰려는 열이 식이면 여전히 1348. 아직 안 되는 것: `WITH CHECK OPTION`이 든 조인 뷰(메시지로 거절), USING · NATURAL 조인이나 파생 표가 든 뷰, 같은 표를 두 번 쓴 뷰(쓰기가 거절됨)
 - CREATE VIEW v AS SELECT ... WITH [CASCADED | LOCAL] CHECK OPTION : 뷰가 보여 주지 않을 행을 INSERT · UPDATE하면 오류 1369(CASCADED는 아래 뷰의 조건까지; R71)
 - CREATE SYNONYM 이름 FOR 대상 : 테이블 별칭 생성
 - CREATE OR REPLACE SYNONYM 이름 FOR 대상 : 별칭 덮어쓰기
@@ -429,7 +429,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 - SHOW TABLES [FROM db] [LIKE 'pattern'] : 테이블 목록
 - DESCRIBE t : 테이블 구조
 - SHOW CREATE TABLE t : 테이블을 만드는 CREATE 문(열에 쓴 `CHECK`도, 이름순으로; 이름 없는 `CHECK`는 `표_chk_번호`; R83)
-- SHOW CREATE VIEW v : 뷰를 만드는 CREATE 문
+- SHOW CREATE VIEW v : 뷰를 만드는 CREATE 문(R86: 네이티브 프로토콜도 MySQL 프로토콜처럼 `CREATE ALGORITHM=… DEFINER=… SQL SECURITY … VIEW `v` AS …`를 씀)
 - SHOW INDEX FROM t : 인덱스 목록
 - SHOW GRANTS [FOR 'user'@'host'] : 권한 목록
 - SHOW ROLES : 역할 목록
@@ -461,7 +461,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 ### information_schema (SELECT로 조회)
 
-- information_schema.tables / columns / statistics : 테이블 · 컬럼 · 인덱스 정보(R85: `tables.CREATE_TIME`은 표 · 뷰를 만든 시각 — R85 전에 만든 표 · 뷰는 NULL, `ALTER` · `TRUNCATE`는 안 바꿈, `UPDATE_TIME`은 NULL; R60: `columns`는 뷰의 열도 냄 — 그대로 가져온 열은 그 열의 타입, 계산한 열은 TEXT; `tables`의 `AVG_ROW_LENGTH`·`DATA_LENGTH`·`INDEX_LENGTH`는 InnoDB가 세는 16 KB 쪽 수를 행에서 추정한 값이라 작은 표는 MySQL과 같고 큰 표는 몇 % 어긋남)
+- information_schema.tables / columns / statistics : 테이블 · 컬럼 · 인덱스 정보(R85: `tables.CREATE_TIME`은 표 · 뷰를 만든 시각 — R85 전에 만든 표 · 뷰는 NULL, `UPDATE_TIME`은 NULL; R86: `ALTER TABLE`(이름 바꾸기만 하는 것은 빼고) · `CREATE INDEX` · `DROP INDEX` · `OPTIMIZE TABLE`이 끝나면 표의 시각이 그때로 바뀜(MySQL이 표를 다시 만들기 때문), `RENAME` · `TRUNCATE` · `ANALYZE` · 쓰기 · 실패한 문장은 안 바꿈; R60: `columns`는 뷰의 열도 냄 — 그대로 가져온 열은 그 열의 타입, 계산한 열은 TEXT; `tables`의 `AVG_ROW_LENGTH`·`DATA_LENGTH`·`INDEX_LENGTH`는 InnoDB가 세는 16 KB 쪽 수를 행에서 추정한 값이라 작은 표는 MySQL과 같고 큰 표는 몇 % 어긋남)
 - information_schema.schemata (schemas) : 데이터베이스 목록
 - information_schema.key_column_usage / table_constraints / referential_constraints : 키 · 제약 · 외래 키 정보(R83: `UNIQUE` 키의 열도 — 두 열짜리 포함 — 나옴)
 - information_schema.check_constraints : `CHECK` 제약(이름 · 조건; 이름이 없으면 `표_chk_번호`; R83)

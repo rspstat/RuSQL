@@ -280,7 +280,7 @@ std::optional<std::string> Executor::info_schema_bare(const std::string& qualifi
     return lower;
 }
 
-std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::string& which) {
+std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::string& which) const {
     std::string lower = which;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
 
@@ -288,6 +288,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
 
     if (lower == "schemata" || lower == "schemas") {
         for (auto& db : s.databases) {
+            if (!lists_system_schema && is_system_schema(s, db)) continue; // (the native protocol does not list the empty system schema, R86)
             Row r;
             r["CATALOG_NAME"] = "def";
             r["SCHEMA_NAME"] = db;

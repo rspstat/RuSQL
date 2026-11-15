@@ -73,43 +73,6 @@ inline void rename_cond_columns(CondExpr& e, const ViewColumnMap& map) {
     }
 }
 
-// Whether a condition / an expression names a column of the view that is an expression (nothing of a table below it to be read as: it would come out NULL)
-inline bool names_expression_column(const CondExpr& e, const ViewColumnMap& map);
-
-inline bool names_expression_column(const ArithExpr& e, const ViewColumnMap& map) {
-    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
-        if (col->outer != 0) return false;
-        const auto* entry = view_column_entry(map, col->name);
-        return entry && entry->second.empty();
-    }
-    if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
-        return std::any_of(f->args.begin(), f->args.end(), [&](const ArithExpr& a) { return names_expression_column(a, map); });
-    }
-    if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) return names_expression_column(*p->cond, map);
-    return false;
-}
-
-inline bool names_expression_column(const CondExpr& e, const ViewColumnMap& map) {
-    if (auto* a = std::get_if<CondExpr::And>(&e.data)) return names_expression_column(*a->lhs, map) || names_expression_column(*a->rhs, map);
-    if (auto* o = std::get_if<CondExpr::Or>(&e.data)) return names_expression_column(*o->lhs, map) || names_expression_column(*o->rhs, map);
-    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return names_expression_column(*n->inner, map);
-    if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
-        if (names_expression_column(leaf->condition.left, map)) return true;
-        if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return names_expression_column(value->expr, map);
-        if (auto* literal = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
-            if (literal->quoted || literal->outer != 0) return false;
-            const auto* entry = view_column_entry(map, literal->value);
-            return entry && entry->second.empty();
-        }
-    }
-    return false;
-}
-
 // A column of a view that is `k + 1 AS k1` (R85): (its name, the expression, written with the columns of the table below). A write that reads that column puts the expression in
 // its place, as MySQL does (`WHERE k1 = 11` is `WHERE k + 1 = 11`).
 using ViewExpressions = std::vector<std::pair<std::string, ArithExpr>>;
@@ -123,80 +86,99 @@ inline const ArithExpr* view_expression(const ViewExpressions& expressions, cons
     return nullptr;
 }
 
-inline bool rewrite_view_columns(CondExpr& e, const ViewColumnMap& map, const ViewExpressions& expressions);
+// The columns of an expression / a condition, one by one (R86). `v.col(node, col)` is asked for every column (not one of an outer query): `node` is the expression that holds it, and
+// it may be put another expression in its place. `v.literal(leaf, literal)` is asked for every value that is not quoted (it may be the name of a column: `WHERE ident = k1`). The
+// answer is false when any question was answered false.
+template <class V>
+bool walk_view_columns(CondExpr& e, const V& v);
 
-// The names of the view's columns in an expression become the table's, and a column that is an expression becomes the expression. False when a column of an expression is named
-// that has no expression to put in its place (a function, a CASE): nothing can be done with it.
-inline bool rewrite_view_columns(ArithExpr& e, const ViewColumnMap& map, const ViewExpressions& expressions) {
+template <class V>
+bool walk_view_columns(ArithExpr& e, const V& v) {
     if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
         if (col->outer != 0) return true;
-        const auto* entry = view_column_entry(map, col->name);
-        if (!entry) return true;
-        if (!entry->second.empty()) {
-            col->name = entry->second;
-            return true;
-        }
-        if (const ArithExpr* expr = view_expression(expressions, col->name)) {
-            ArithExpr copy = *expr;
-            e = std::move(copy);
-            return true;
-        }
-        return false;
+        return v.col(e, *col);
     }
     auto both = [&](ArithExpr& a, ArithExpr& b) {
-        const bool left = rewrite_view_columns(a, map, expressions);
-        const bool right = rewrite_view_columns(b, map, expressions);
+        const bool left = walk_view_columns(a, v);
+        const bool right = walk_view_columns(b, v);
         return left && right;
     };
-    if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return both(*v->lhs, *v->rhs);
-    if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return both(*v->lhs, *v->rhs);
-    if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return both(*v->lhs, *v->rhs);
-    if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return both(*v->lhs, *v->rhs);
-    if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) return both(*v->lhs, *v->rhs);
+    if (auto* x = std::get_if<ArithExpr::Add>(&e.data)) return both(*x->lhs, *x->rhs);
+    if (auto* x = std::get_if<ArithExpr::Sub>(&e.data)) return both(*x->lhs, *x->rhs);
+    if (auto* x = std::get_if<ArithExpr::Mul>(&e.data)) return both(*x->lhs, *x->rhs);
+    if (auto* x = std::get_if<ArithExpr::Div>(&e.data)) return both(*x->lhs, *x->rhs);
+    if (auto* x = std::get_if<ArithExpr::Cmp>(&e.data)) return both(*x->lhs, *x->rhs);
     if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
         bool all = true;
-        for (auto& a : f->args) all = rewrite_view_columns(a, map, expressions) && all;
+        for (auto& a : f->args) all = walk_view_columns(a, v) && all;
         return all;
     }
-    if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) return rewrite_view_columns(*p->cond, map, expressions);
+    if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) return walk_view_columns(*p->cond, v);
     return true;
 }
 
-inline bool rewrite_view_columns(CondExpr& e, const ViewColumnMap& map, const ViewExpressions& expressions) {
+template <class V>
+bool walk_view_columns(CondExpr& e, const V& v) {
     if (auto* a = std::get_if<CondExpr::And>(&e.data)) {
-        const bool left = rewrite_view_columns(*a->lhs, map, expressions);
-        const bool right = rewrite_view_columns(*a->rhs, map, expressions);
+        const bool left = walk_view_columns(*a->lhs, v);
+        const bool right = walk_view_columns(*a->rhs, v);
         return left && right;
     }
     if (auto* o = std::get_if<CondExpr::Or>(&e.data)) {
-        const bool left = rewrite_view_columns(*o->lhs, map, expressions);
-        const bool right = rewrite_view_columns(*o->rhs, map, expressions);
+        const bool left = walk_view_columns(*o->lhs, v);
+        const bool right = walk_view_columns(*o->rhs, v);
         return left && right;
     }
-    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return rewrite_view_columns(*n->inner, map, expressions);
+    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return walk_view_columns(*n->inner, v);
     if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
-        bool ok = rewrite_view_columns(leaf->condition.left, map, expressions);
+        bool ok = walk_view_columns(leaf->condition.left, v);
         if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) {
-            ok = rewrite_view_columns(value->expr, map, expressions) && ok;
+            ok = walk_view_columns(value->expr, v) && ok;
         } else if (auto* literal = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
-            // (a value that is not quoted may be the name of a column: `WHERE ident = k1`)
-            if (!literal->quoted && literal->outer == 0) {
-                if (const auto* entry = view_column_entry(map, literal->value)) {
-                    if (!entry->second.empty()) {
-                        literal->value = entry->second;
-                    } else if (const ArithExpr* expr = view_expression(expressions, literal->value)) {
-                        ArithExpr copy = *expr;
-                        leaf->condition.value.data = ConditionValue::Arith{std::move(copy)};
-                    } else {
-                        ok = false;
-                    }
-                }
-            }
+            if (!literal->quoted && literal->outer == 0) ok = v.literal(*leaf, *literal) && ok;
         }
         return ok;
     }
     return true;
 }
+
+// The names of the view's columns in an expression become the table's, and a column that is an expression becomes the expression
+struct ViewColumnRewriter {
+    const ViewColumnMap& map;
+    const ViewExpressions& expressions;
+    bool col(ArithExpr& node, ArithExpr::Col& col) const {
+        const auto* entry = view_column_entry(map, col.name);
+        if (!entry) return true;
+        if (!entry->second.empty()) {
+            col.name = entry->second;
+            return true;
+        }
+        if (const ArithExpr* expr = view_expression(expressions, col.name)) {
+            ArithExpr copy = *expr;
+            node = std::move(copy);
+            return true;
+        }
+        return false;
+    }
+    bool literal(CondExpr::Leaf& leaf, ConditionValue::Literal& literal) const {
+        const auto* entry = view_column_entry(map, literal.value);
+        if (!entry) return true;
+        if (!entry->second.empty()) {
+            literal.value = entry->second;
+            return true;
+        }
+        if (const ArithExpr* expr = view_expression(expressions, literal.value)) {
+            ArithExpr copy = *expr;
+            leaf.condition.value.data = ConditionValue::Arith{std::move(copy)};
+            return true;
+        }
+        return false;
+    }
+};
+
+// False when a column of an expression is named that has no expression to put in its place (a function, a CASE): nothing can be done with it.
+inline bool rewrite_view_columns(ArithExpr& e, const ViewColumnMap& map, const ViewExpressions& expressions) { return walk_view_columns(e, ViewColumnRewriter{map, expressions}); }
+inline bool rewrite_view_columns(CondExpr& e, const ViewColumnMap& map, const ViewExpressions& expressions) { return walk_view_columns(e, ViewColumnRewriter{map, expressions}); }
 
 // What stops a write through a view whatever it reads (R85): DISTINCT, GROUP BY, HAVING, LIMIT, an aggregate or a window function in the select list, an outer join. MySQL's
 // IS_UPDATABLE says NO for each of them

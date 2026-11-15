@@ -3393,6 +3393,37 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
 ① 조인 뷰의 표현식 열을 `WHERE` · 새 값에 쓰는 쓰기는 아직 거절(R80부터). ② `ALTER TABLE` · `TRUNCATE`가 표의 만든 시각을 안 바꾸고 표의 `UPDATE_TIME`은 NULL. ③ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다(뷰는 MySQL의 기본값 `root@localhost` · `UNDEFINED` · `DEFINER`, 시각은 NULL). ④ 네이티브 프로토콜의 `SHOW CREATE VIEW`는 `ALGORITHM`을 안 쓴다(MySQL 프로토콜만 R85 모양). ⑤ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑥ `mysql` 스키마는 비어 있고 앱의 데이터베이스 목록에 보인다. ⑦ `--tab`(서버 파일 쓰기), `--hex-blob`의 UTF-8이 아닌 바이트. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
 
+### 11월 15일 — R86: R85의 남은 것 (조인 뷰의 표현식 열 · 표의 `CREATE_TIME`이 움직이는 때 · 네이티브 `SHOW CREATE VIEW` · 빈 `mysql` 스키마 숨김) + 코퍼스가 찾아낸 인덱스 버그 셋
+
+**왜 이 항목인가**: R85 보고의 다음 제안에 대해 사용자가 "**R85 남은 것 진행**"이라고 했다(진행방식은 그대로: 개발 → 전체 시험 → `test_full.sql` → 문서 전부(개정 HWPX · 통합문서 포함) → 커밋 · 푸시 `commit`). 범위는 `RECOMMAND.md` 8번 표 "R85 남은 모서리" 줄에서 할 수 있는 것 — ① 조인 뷰의 표현식 열을 읽는 쓰기, ② `ALTER TABLE`이 표의 만든 시각을 바꾸는 것, ③ 네이티브 프로토콜의 `SHOW CREATE VIEW`, ④ 빈 `mysql` 스키마가 앱의 데이터베이스 목록에 보이는 것. 하지 않은 것: 표의 `UPDATE_TIME`(쓸 때마다 시각을 남겨야 해서 성능 동결과 부딪힘), R84 · R85 전에 만든 루틴 · 뷰 · 표의 기록(되살릴 수 없음), `--tab`, `--hex-blob`.
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **넷을 새로 만듦**, 점수판 61 → 65개)
+- 새 코퍼스 `join_view_expr_r86` **40문장 차이 0**(R85 빌드로는 34개가 달랐다), `create_time_r86` **19문장 차이 0**(3개가 달랐다), `index_drop_column_r86` **16문장 차이 0**, `system_schema_r86` **6문장 차이 0**(MySQL 프로토콜 쪽; 네이티브 쪽은 C++ 시험이 본다). 점수판 ****65개 코퍼스 5,337문장 차이 0****.
+- C++ 시험 **1,007 → 1,016 케이스**(`test_r86_leftovers.cpp` 9 케이스; R84의 시스템 스키마 시험 한 케이스 · 옛 `SHOW CREATE VIEW` 시험 한 줄을 새 동작에 맞춰 고침).
+
+**① 조인 뷰의 표현식 열** — `CREATE VIEW jx AS SELECT ja.id AS aid, ja.x * 2 AS dbl, jb.id AS bid, jb.y FROM ja JOIN jb ON jb.aid = ja.id`에서 `UPDATE jx SET y = 1 WHERE dbl = 40` · `SET y = dbl WHERE bid = 1` · `ja.x + jb.y AS s` · `CASE WHEN … AS big` · 조인 뷰 위의 뷰(자기 WHERE가 아래 뷰의 식을 읽는 것 포함) · 쉼표 조인이 **MySQL처럼 행을 찾는다**(R80부터 "지원하지 않음"으로 거절하던 것). 방법은 R85의 단일 표 뷰와 같다 — 뷰의 식을 "표.열" 이름으로 고쳐 `JoinViewTarget::expressions`에 두고, 문장이 그 열을 읽으면 그 자리에 넣는다. 이를 위해 `view_rename.hpp`에 식 · 조건의 열을 하나씩 도는 `walk_view_columns`를 두고 R85의 `rewrite_view_columns`는 그 위의 얇은 껍질로 바꿨다(R80의 `names_expression_column` 폐기). 쓰려는 열이 식이면 여전히 1348, 두 표를 건드리면 1393, DELETE 1395, INSERT 1471(그대로).
+
+**② 표의 `CREATE_TIME`이 움직이는 때** — 진짜 MySQL에서 열여섯 문장을 재서 맞췄다: `ALTER TABLE`(모든 동작 — `ADD`/`DROP COLUMN`, `ADD INDEX`, `MODIFY`, `COMMENT`, `ENGINE` — 이름 바꾸기만은 빼고; `RENAME TO …, ADD COLUMN …`처럼 같이 쓰면 바뀜) · `CREATE INDEX` · `DROP INDEX` · `OPTIMIZE TABLE`이 끝나면 새로 정해지고, `RENAME`(두 꼴) · **`TRUNCATE`** · `ANALYZE` · 쓰기 · 실패한 문장은 그대로. **R85에서 "ALTER · TRUNCATE가 다시 만든다"고 쓴 것 중 `TRUNCATE`는 틀린 말이었다**(R85 기록에 적은 측정이 잘못이었음 — 이번에 3초 쉬고 `TIMESTAMPDIFF`로 다시 쟀다). `Executor::stamp_created`가 `TableSchema::created`를 지금으로 하고 스키마 파일에 저장해 다시 켜도 유지된다.
+
+**③ 네이티브 `SHOW CREATE VIEW`** — 앱 · CLI · MCP도 `CREATE ALGORITHM=… DEFINER=… SQL SECURITY … VIEW `v` AS …`를 쓴다(전에는 `CREATE VIEW `v` AS …`). 두 프로토콜이 `Executor::view_create_text`를 함께 쓴다.
+
+**④ 빈 시스템 스키마 `mysql`** — R84가 `mysqldump --all-databases`를 위해 넣은 빈 `mysql` 스키마가 앱의 데이터베이스 목록 · MCP `list_databases`에 보이던 것을, **MySQL 프로토콜 세션의 `SHOW DATABASES` · `information_schema.schemata`에만** 보이게 했다(`Executor::lists_system_schema`, `mysql.cpp`가 켬). **R84부터 있던 숨은 버그도 고쳤다**: 사용자의 데이터베이스가 하나도 없거나 현재 데이터베이스를 `DROP`하면 세션이 `mysql`에 서서 `CREATE TABLE`이 거기로 갈 수 있었다 — 세션의 시작 데이터베이스는 이제 사용자의 스키마 중 이름이 앞선 것. 사용자가 R84 전에 `mysql`을 만들어 폴더가 있으면 그 스키마는 사용자의 것으로 그대로 보인다.
+
+**⑤ 코퍼스가 찾아낸 것 셋(함께 고침)**
+- `CREATE INDEX i ON t (없는열)`이 오류 없이 빈 인덱스를 만들던 것 → MySQL의 1072.
+- `DROP INDEX 없는이름`이 "skipped"로 조용히 넘어가던 것 → MySQL의 1091(`IF EXISTS`는 RuSQL의 확장이라 그대로 넘어감: `Statement::DropIndex::if_exists`).
+- **`ALTER TABLE … DROP COLUMN`이 그 열을 읽는 인덱스를 그대로 두던 것**: 없는 열을 가리키는 인덱스가 남았다(`SHOW INDEX`에 보이고, 시험 `test_mysql_conformance`가 ①의 1072 검사 뒤에 `CREATE TABLE … LIKE`가 이 인덱스를 복사하다 실패하면서 드러냈다). MySQL처럼 인덱스에서 열을 빼고, 열이 하나도 안 남으면 인덱스를 지운다.
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `join_view_expr_r86` 34/40 → **0**, `create_time_r86` 3/19 → **0**, `index_drop_column_r86` → **0**, `system_schema_r86` 0 → 0. 관련 옛 코퍼스 `join_view_writes` · `views_updatable_r84` 차이 0 그대로(`schema_change`의 `--proto` 영향 행 12개는 R85 빌드와 같은 것 — 점수판 설정에서는 비교하지 않음).
+- C++ 시험: 전체 **1,016 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(셋 다 1,524,798 assertions). 첫 실행에서 옛 시험 셋이 붉어졌고 모두 의도한 변화였다: 시스템 스키마 시험(네이티브에서는 안 보임), `DROP INDEX IF EXISTS` 시험(그래서 `if_exists` 표시를 파서에 더함), 적합성 시험(위의 DROP COLUMN 인덱스).
+- 심은 버그: 새 코드에 하나씩 심어 `[r86]` 시험이 붉어지는지 봄 — **44개** 가운데 처음에 32개를 잡았고, 살아남은 12개 중 7개는 시험을 더해 잡았다(함수의 인자 · 비교의 오른쪽 식 · 뺄셈의 오른쪽 · 따옴표 안의 열 이름 같은 글자 · 오른쪽에 쓴 식 열 · 나중 세션의 시작 스키마 · 이름 바꾸기 둘이 한 문장에 든 경우). 5개는 결과가 달라질 길이 없어 뺐다(조인 뷰 식의 열 이름이 `표.열` 꼴이 아니어도 같은 열로 풀림 둘 · 모호한 열은 `CREATE VIEW`가 이미 거절하니 닿을 수 없음 · 서브쿼리 안은 걷지 않으니 바깥 질의의 열 검사에 닿을 수 없음 · 식이 안 남은 열이 만들어질 길이 없는 방어 분기). **39개 잡음 · 5개 뺌**.
+- `test_full.sql`: R86 구역(조인 뷰의 식 열을 읽는 `UPDATE`, `DROP COLUMN` 뒤의 인덱스, `CREATE_TIME`, 네이티브 `SHOW CREATE VIEW`, 1072 · 1091)을 더해 CLI로 돌려 **의도한 오류 8개만**(전 6개 + 1072 + 1091).
+- 검증 도구 · 퍼저(최종 빌드): 두 세션 도구 `two_sessions.py` 596단계 차이 0, 검산 도구 12개(`verify_*.py`) 위반 0, 빌드 비교 `diff_builds.py`(R85 빌드와, 무작위 SELECT 6,000개) 차이 0, 충돌 후 복구 퍼저 다섯(시드 7700, 6회) · `fuzz_crash_fk` 시드 7701 · 동시성 퍼저 10회 불일치 0.
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
+① `SHOW DATABASES LIKE '…'` · `WHERE`는 1064로 거절(그냥 `SHOW DATABASES`는 됨). ② 표를 다시 만드는 `ALTER TABLE`(`MODIFY`)은 영향 행 0(MySQL은 복사한 행 수) — `schema_change` 코퍼스의 12개가 이것이고 점수판은 이 항목을 비교하지 않는다; 표의 `UPDATE_TIME`은 NULL. ③ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ④ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑤ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑥ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑦ **`DROP COLUMN`이 `UNIQUE KEY (a, b)`의 열은 아직 안 뺀다**(이번 작업 중 발견, 양쪽을 재서 확인: 진짜 MySQL은 `UNIQUE (a)`로 줄여 `(1,1)` 뒤의 `(1,2)`를 1062로 막고, RuSQL은 `(a, b)`로 남겨 둔 채 둘 다 받아들인다 — 제약이 지켜지지 않는 조용한 차이. 인덱스(`CREATE INDEX`)만 고쳤다; 다음 후보 1순위). ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

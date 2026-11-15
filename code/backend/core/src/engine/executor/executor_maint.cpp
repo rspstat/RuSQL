@@ -357,6 +357,10 @@ StringResult Executor::exec_table_maintenance(const std::string& sql, const std:
                 say(table, "status", "Operation failed");
                 continue;
             }
+            {
+                auto w = shared->write();
+                stamp_created(*w, table); // (the table was recreated: MySQL's CREATE_TIME is now, R86)
+            }
             say(table, "note", "Table does not support optimize, doing recreate + analyze instead");
             say(table, "status", "OK");
             continue;

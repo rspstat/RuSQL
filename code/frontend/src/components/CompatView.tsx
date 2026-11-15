@@ -23,12 +23,13 @@ const KNOWN: { en: string; ko: string }[] = [
   { en: "PI() alone shows six decimals as in MySQL, but an expression made from it (PI() + 0) shows all its digits (MySQL: six)", ko: "PI() 단독은 MySQL처럼 소수 여섯 자리지만 PI()에서 만든 식(PI() + 0)은 전체 자릿수 (MySQL: 여섯 자리)" },
   { en: "A FLOAT given to a text function shows the stored digits (CONCAT(f, '') is 3.1415927, MySQL: 3.14159)", ko: "FLOAT를 글자 함수에 넣으면 저장된 자릿수 (CONCAT(f, '')가 3.1415927, MySQL: 3.14159)" },
   { en: "A column that two tables of a chain of USING joins both have is not refused as ambiguous (MySQL: error 1052)", ko: "이어지는 USING 조인에서 두 표가 다 가진 열을 모호하다고 거절하지 않음 (MySQL: 오류 1052)" },
-  { en: "SHOW TABLE STATUS: Create_time and Update_time are NULL, and the sizes of a large table are an estimate in 16 KB pages", ko: "SHOW TABLE STATUS: Create_time·Update_time은 NULL이고 큰 표의 크기는 16 KB 쪽으로 추정한 값" },
+  { en: "SHOW TABLE STATUS and information_schema.tables: Update_time is NULL (no write is stamped), and the sizes of a large table are an estimate in 16 KB pages", ko: "SHOW TABLE STATUS · information_schema.tables: Update_time은 NULL(쓸 때마다 시각을 남기지 않음)이고 큰 표의 크기는 16 KB 쪽으로 추정한 값" },
   { en: "SHOW ENGINES lists MyISAM, MEMORY ... as MySQL does, but RuSQL has one InnoDB-like engine (ENGINE= is accepted and ignored) and no XA statements", ko: "SHOW ENGINES는 MySQL처럼 MyISAM·MEMORY 등을 보이지만 RuSQL의 엔진은 InnoDB 방식 하나뿐(ENGINE=은 받아서 무시)이고 XA 문장은 없음" },
   { en: "long_query_time is one value for the whole server (no per-session value), and SET slow_query_log without GLOBAL is accepted", ko: "long_query_time은 서버 전체에 하나(세션 값 없음)이고 GLOBAL 없는 SET slow_query_log도 받음" },
   { en: "A view that mixes an aggregate with a plain column is refused when it is created (MySQL refuses when it is selected)", ko: "집계와 일반 열이 섞인 뷰는 만들 때 거절 (MySQL은 조회할 때 거절)" },
   { en: "Privileges: a GRANT reaches an open connection at once (MySQL: the privileges of a database from the next USE), SHOW FULL COLUMNS leaves its Privileges column empty, and there is no mysql.user table", ko: "권한: GRANT가 열려 있는 연결에 바로 반영됨 (MySQL: 데이터베이스 수준은 다음 USE부터), SHOW FULL COLUMNS의 Privileges 열은 비어 있고, mysql.user 표는 없음" },
-  { en: "A view over a join takes UPDATE and INSERT, but not with WITH CHECK OPTION or when the new value or the WHERE reads a column of the view that is an expression: those are refused with a message (MySQL writes through them)", ko: "조인 뷰의 UPDATE·INSERT는 되지만 WITH CHECK OPTION이 있거나 새 값·WHERE가 식으로 만든 뷰 열을 읽으면 메시지로 거절함 (MySQL은 쓰기가 됨)" },
+  { en: "A view over a join takes UPDATE and INSERT, but not with WITH CHECK OPTION: that is refused with a message (MySQL writes through it)", ko: "조인 뷰의 UPDATE·INSERT는 되지만 WITH CHECK OPTION이 있으면 메시지로 거절함 (MySQL은 쓰기가 됨)" },
+  { en: "SHOW DATABASES takes no LIKE or WHERE (a plain SHOW DATABASES works), and an ALTER TABLE that rebuilds the table (MODIFY) reports 0 affected rows where MySQL reports the rows it copied", ko: "SHOW DATABASES는 LIKE · WHERE를 못 받고(그냥 SHOW DATABASES는 됨), 표를 다시 만드는 ALTER TABLE(MODIFY)은 MySQL이 복사한 행 수를 말하는 자리에 영향 행 0을 말함" },
 ];
 
 function pct(part: number, whole: number): string {

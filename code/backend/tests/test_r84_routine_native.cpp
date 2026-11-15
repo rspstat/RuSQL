@@ -408,6 +408,7 @@ TEST_CASE("R84: the system schema mysql is listed (mysqldump --all-databases sta
     TempDataDir dir("test_r84_system_data");
     Executor ex(dir.path);
     ok(ex, "CREATE DATABASE app");
+    ex.lists_system_schema = true; // (a session of the MySQL protocol: it lists the schema `mysql`, the native one does not since R86)
     CHECK(flat(ex, "SHOW DATABASES") == "app;mysql");
     CHECK(flat(ex, "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name").find("mysql") != std::string::npos);
     ok(ex, "USE mysql");

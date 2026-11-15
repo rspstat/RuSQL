@@ -1443,6 +1443,7 @@ StringResult Executor::exec_show_databases(const SharedDatabase& s) const {
     std::vector<std::string> dbs;
     const bool all = !privileges_apply(s) || Who(s, auth_user, account_host(s), current_db, active_roles_).global("SHOW DATABASES");
     for (const std::string& d : s.databases) {
+        if (!lists_system_schema && is_system_schema(s, d)) continue; // (the native protocol does not list the empty system schema, R86)
         if (all || may_see(s, d, "")) dbs.push_back(d);
     }
     std::sort(dbs.begin(), dbs.end());

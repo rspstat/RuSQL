@@ -743,7 +743,7 @@ struct Statement {
         std::vector<std::string> columns;
         bool using_hash = false;
     };
-    struct DropIndex { std::string index_name; std::optional<std::string> table; }; // DROP INDEX name [ON table]
+    struct DropIndex { std::string index_name; std::optional<std::string> table; bool if_exists = false; }; // DROP INDEX [IF EXISTS] name [ON table]
     struct CreateView { std::string name; StatementPtr query; std::string raw_sql; std::string definer, algorithm, security; /* ALGORITHM = x, DEFINER = u@h, SQL SECURITY x as written (R85); empty: not written */ }; // raw_sql ends with WITH CASCADED | LOCAL CHECK OPTION where the view has one
     struct DropView { std::string name; };
     struct ShowTables { std::optional<std::string> database; std::optional<std::string> like; }; // SHOW TABLES [FROM db] [LIKE 'pattern']

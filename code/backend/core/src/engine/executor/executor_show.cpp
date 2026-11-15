@@ -287,6 +287,13 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
     return StringResult::Ok(ddl);
 }
 
+std::string Executor::view_create_text(const SharedDatabase& s, const std::string& view, const std::string& body) {
+    const RoutineSource* made = view_meta(s, view); // (what the CREATE wrote: R85; a view made before has MySQL's defaults)
+    return "CREATE ALGORITHM=" + (made && !made->algorithm.empty() ? made->algorithm : std::string("UNDEFINED")) + " DEFINER=" +
+           (made && !made->definer.empty() ? made->definer : std::string("`root`@`localhost`")) + " SQL SECURITY " + (made && !made->security.empty() ? made->security : std::string("DEFINER")) +
+           " VIEW `" + bare_name(view) + "` AS " + body;
+}
+
 StringResult Executor::show_create_view_mysql(const std::string& name) {
     Statement named = Statement(Statement::ShowCreateView{name});
     resolve_names(named);
@@ -295,12 +302,7 @@ StringResult Executor::show_create_view_mysql(const std::string& name) {
     if (!s->views.count(view)) return StringResult::Err("Table '" + view + "' doesn't exist");
     std::string select_text;
     if (auto raw = s->view_raw_sql.find(view); raw != s->view_raw_sql.end()) select_text = raw->second;
-    std::string body = select_text;
-    // (the stored text may start with SELECT or already with the whole CREATE)
-    const RoutineSource* made = view_meta(*s, view); // (what the CREATE wrote: R85; a view made before has MySQL's defaults)
-    return StringResult::Ok("CREATE ALGORITHM=" + (made && !made->algorithm.empty() ? made->algorithm : std::string("UNDEFINED")) + " DEFINER=" +
-                            (made && !made->definer.empty() ? made->definer : std::string("`root`@`localhost`")) + " SQL SECURITY " + (made && !made->security.empty() ? made->security : std::string("DEFINER")) +
-                            " VIEW `" + bare_name(view) + "` AS " + body);
+    return StringResult::Ok(view_create_text(*s, view, select_text));
 }
 
 // The type a function returns the way SHOW CREATE FUNCTION writes it: lower case, with the character set a text type has ("int", "varchar(30) CHARSET utf8mb4")
@@ -636,8 +638,7 @@ StringResult Executor::exec_show_create_view(const SharedDatabase& s, const std:
     std::string select_sql = "<view definition not available>";
     if (auto it = s.view_raw_sql.find(q_view); it != s.view_raw_sql.end()) select_sql = it->second;
 
-    std::string ddl = "CREATE VIEW `" + bare + "` AS " + select_sql;
-    return StringResult::Ok("View: " + bare + "\nCreate View: " + ddl);
+    return StringResult::Ok("View: " + bare + "\nCreate View: " + view_create_text(s, q_view, select_sql));
 }
 
 StringResult Executor::exec_show_index(const SharedDatabase& s, const std::string& table) const {
