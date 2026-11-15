@@ -915,6 +915,7 @@ struct Statement {
         std::vector<std::tuple<std::string, std::string, std::string>> params; // (IN/OUT/INOUT, name, type)
         std::vector<Statement> body;
         std::string source; // the text after the name, as it was written (SHOW CREATE PROCEDURE gives it back)
+        std::string definer; // DEFINER = user@host as `user`@`host`; empty when it was not written (the account that runs the statement is the definer)
     };
     struct CallProcedure { std::string name; std::vector<std::string> args; };
     struct CreateTrigger {
@@ -924,6 +925,7 @@ struct Statement {
         std::string table;
         std::vector<Statement> body;
         std::string source; // the body as it was written (what comes after FOR EACH ROW)
+        std::string definer; // as CreateProcedure::definer
     };
     struct DropTrigger { std::string name; bool if_exists = false; };
     struct DropProcedure { std::string name; bool if_exists = false; };
@@ -932,7 +934,7 @@ struct Statement {
     struct ShowProcessList {};
     // param_types / return_type: the types as they were written ("DECIMAL(8,2)"), empty for a type that is not read; the values given to the parameters and the
     // value returned are made to fit them
-    struct CreateFunction { std::string name; std::vector<std::string> params; std::string body; std::vector<std::string> param_types; std::string return_type; std::string source; /* the text after the name, as written */ };
+    struct CreateFunction { std::string name; std::vector<std::string> params; std::string body; std::vector<std::string> param_types; std::string return_type; std::string source; /* the text after the name, as written */ std::string definer; /* as CreateProcedure::definer */ std::string typed_name; /* the name as it was written (name is in lower case) */ };
     struct DropFunction { std::string name; bool if_exists = false; };
     // 저장 프로시저 제어문
     struct ProcDeclare { std::string name, typ; std::optional<std::string> default_value; };

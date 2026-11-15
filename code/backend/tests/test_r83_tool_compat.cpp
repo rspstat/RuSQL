@@ -321,10 +321,12 @@ TEST_CASE("R83: the new information_schema tables show an account what it may se
     ok(root, "CREATE TABLE u (id INT PRIMARY KEY)");
     ok(root, "CREATE TRIGGER tr_u BEFORE INSERT ON u FOR EACH ROW SET NEW.id = NEW.id");
     ok(root, "CREATE USER 'one'@'%' IDENTIFIED BY 'pw'");
-    ok(root, "GRANT SELECT ON v.t TO 'one'@'%'");
+    ok(root, "GRANT SELECT, TRIGGER ON v.t TO 'one'@'%'"); // (R84, measured on MySQL 8.4: a trigger is shown to the account that holds TRIGGER on its table, a routine to one that may run, change or make it)
     ok(root, "CREATE USER 'low'@'%' IDENTIFIED BY 'pw'");
     ok(root, "CREATE USER 'none'@'%' IDENTIFIED BY 'pw'");
-    ok(root, "GRANT SELECT ON v.* TO 'low'@'%'");
+    ok(root, "CREATE USER 'sel'@'%' IDENTIFIED BY 'pw'");
+    ok(root, "GRANT SELECT, TRIGGER, EXECUTE ON v.* TO 'low'@'%'");
+    ok(root, "GRANT SELECT ON v.* TO 'sel'@'%'");
     auto session = [&](const std::string& user) {
         Executor ex = Executor::new_session(root.get_shared());
         ex.auth_user = user;
@@ -332,7 +334,7 @@ TEST_CASE("R83: the new information_schema tables show an account what it may se
         ex.current_db = "v";
         return ex;
     };
-    Executor low = session("low"), none = session("none"), one = session("one");
+    Executor low = session("low"), none = session("none"), one = session("one"), sel = session("sel");
     CHECK(flat(root, "SELECT routine_schema FROM information_schema.routines ORDER BY routine_schema") == "v;w");
     CHECK(flat(low, "SELECT routine_schema FROM information_schema.routines ORDER BY routine_schema") == "v");
     CHECK(flat(low, "SELECT trigger_schema FROM information_schema.triggers ORDER BY trigger_schema") == "v;v"); // (tr_v and tr_u; nothing of w)
@@ -340,6 +342,10 @@ TEST_CASE("R83: the new information_schema tables show an account what it may se
     // a grant on one table shows the triggers of that table and not the ones of the table next to it
     CHECK(flat(one, "SELECT trigger_name FROM information_schema.triggers ORDER BY trigger_name") == "tr_v");
     CHECK(flat(low, "SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = 'v' ORDER BY trigger_name") == "tr_u;tr_v");
+    // SELECT on the database shows its check constraints and neither its routines nor its triggers
+    CHECK(flat(sel, "SELECT constraint_schema FROM information_schema.check_constraints ORDER BY constraint_schema") == "v");
+    CHECK(flat(sel, "SELECT routine_schema FROM information_schema.routines").empty());
+    CHECK(flat(sel, "SELECT trigger_schema FROM information_schema.triggers").empty());
     CHECK(flat(none, "SELECT routine_schema FROM information_schema.routines").empty());
     CHECK(flat(none, "SELECT trigger_schema FROM information_schema.triggers").empty());
     CHECK(flat(none, "SELECT constraint_schema FROM information_schema.check_constraints").empty());

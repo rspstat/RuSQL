@@ -8,6 +8,7 @@
 
 #include <cctype>
 
+#include "engine/now_text.hpp"
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
@@ -37,11 +38,18 @@ typename Map::iterator find_named(Map& named, const std::string& name) {
     return std::find_if(named.begin(), named.end(), [&](const auto& entry) { return to_lower_str(entry.first) == wanted; });
 }
 
-// The place SharedDatabase::routine_sources keeps what a routine was written as (R83); a routine made again has the new text, one with none has no text
-void keep_source(SharedDatabase& s, const char* kind, const std::string& name, const std::string& database, std::string source) {
+// The account a routine is made by: the one its DEFINER = clause names, else the account of the session that makes it (`root`@`localhost` for the CLI and the app's root)
+std::string definer_or_session(const Executor& ex, const SharedDatabase& s, std::string written) {
+    if (!written.empty()) return written;
+    return "`" + ex.auth_user + "`@`" + ex.account_host(s) + "`";
+}
+
+// The place SharedDatabase::routine_sources keeps what a routine was written as (R83), by whom and when (R84); a routine made again has the new text, one with none has no text.
+// A trigger's time has two places after the second (MySQL's TIMESTAMP(2)), a routine's none.
+void keep_source(SharedDatabase& s, const char* kind, const std::string& name, const std::string& database, std::string source, std::string definer, std::string typed_name = "") {
     const std::string key = std::string(kind) + ":" + to_lower_str(name);
     if (source.empty()) s.routine_sources.erase(key);
-    else s.routine_sources[key] = {database, std::move(source)};
+    else s.routine_sources[key] = RoutineSource{database, std::move(source), std::move(definer), time_now_text(std::string(kind) == "trigger" ? 2 : 0, false, true), std::move(typed_name)};
     s.disk.save_routine_sources(s.routine_sources);
 }
 void forget_source(SharedDatabase& s, const char* kind, const std::string& name) {
@@ -51,11 +59,11 @@ void forget_source(SharedDatabase& s, const char* kind, const std::string& name)
 
 StringResult Executor::exec_create_procedure(SharedDatabase& s, std::string name,
                                               std::vector<std::tuple<std::string, std::string, std::string>> params,
-                                              std::vector<Statement> body, std::string source) {
+                                              std::vector<Statement> body, std::string source, std::string definer) {
     if (auto same = find_named(s.procedures, name); same != s.procedures.end()) s.procedures.erase(same); // (CREATE OR REPLACE keeps one)
     s.procedures[name] = ProcedureDef{std::move(params), std::move(body)};
     s.disk.save_procedures(s.procedures);
-    keep_source(s, "procedure", name, current_db, std::move(source));
+    keep_source(s, "procedure", name, current_db, std::move(source), definer_or_session(*this, s, std::move(definer)));
     return StringResult::Ok("Procedure '" + name + "' created.");
 }
 
@@ -286,7 +294,8 @@ StringResult Executor::exec_drop_procedure(SharedDatabase& s, std::string name, 
 }
 
 StringResult Executor::exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body,
-                                            const std::vector<std::string>& param_types, const std::string& return_type, std::string source) {
+                                            const std::vector<std::string>& param_types, const std::string& return_type, std::string source, std::string definer,
+                                            std::string typed_name) {
     // with the types of the parameters and of the result (the values are made to fit them when it is called), the body is kept in a frame that holds them
     const bool typed = !return_type.empty() || std::any_of(param_types.begin(), param_types.end(), [](const std::string& t) { return !t.empty(); });
     if (typed) {
@@ -295,7 +304,7 @@ StringResult Executor::exec_create_function(SharedDatabase& s, std::string name,
     if (auto same = find_named(s.user_functions, name); same != s.user_functions.end()) s.user_functions.erase(same);
     s.user_functions[name] = UserFunctionDef{std::move(params), std::move(body)};
     s.disk.save_functions(s.user_functions);
-    keep_source(s, "function", name, current_db, std::move(source));
+    keep_source(s, "function", name, current_db, std::move(source), definer_or_session(*this, s, std::move(definer)), typed_name == name ? std::string() : std::move(typed_name));
     return StringResult::Ok("Function '" + name + "' created.");
 }
 
@@ -312,13 +321,13 @@ StringResult Executor::exec_drop_function(SharedDatabase& s, std::string name, b
 }
 
 StringResult Executor::exec_create_trigger(SharedDatabase& s, std::string name, TriggerTiming timing, TriggerEvent event, std::string table,
-                                            std::vector<Statement> body, std::string source) {
+                                            std::vector<Statement> body, std::string source, std::string definer) {
     std::string timing_str = timing == TriggerTiming::Before ? "BEFORE" : "AFTER";
     std::string event_str = event == TriggerEvent::Insert ? "INSERT" : (event == TriggerEvent::Update ? "UPDATE" : "DELETE");
     if (auto same = find_named(s.triggers, name); same != s.triggers.end()) s.triggers.erase(same);
     s.triggers[name] = TriggerDef{table, timing_str, event_str, std::move(body)};
     s.disk.save_triggers(s.triggers);
-    keep_source(s, "trigger", name, table.find('.') == std::string::npos ? current_db : table.substr(0, table.find('.')), std::move(source));
+    keep_source(s, "trigger", name, table.find('.') == std::string::npos ? current_db : table.substr(0, table.find('.')), std::move(source), definer_or_session(*this, s, std::move(definer)));
     return StringResult::Ok("Trigger '" + name + "' created.");
 }
 

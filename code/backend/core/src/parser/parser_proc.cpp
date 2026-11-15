@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <utility>
 
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
@@ -76,6 +77,7 @@ void Parser::skip_routine_characteristics() {
 }
 
 Statement Parser::parse_create_procedure() {
+    std::string definer = std::exchange(create_definer_, std::string()); // (a CREATE TABLE in the body would read its own)
     std::string name = expect_ident();
     const std::size_t source_from = pos_; // (what follows the name is kept as it was written: SHOW CREATE PROCEDURE gives it back)
     std::vector<std::tuple<std::string, std::string, std::string>> params;
@@ -133,7 +135,7 @@ Statement Parser::parse_create_procedure() {
     }
     skip_routine_characteristics();
     std::vector<Statement> body = parse_proc_body();
-    return Statement(Statement::CreateProcedure{name, params, std::move(body), source_between(source_from, pos_)});
+    return Statement(Statement::CreateProcedure{name, params, std::move(body), source_between(source_from, pos_), std::move(definer)});
 }
 
 // ── CREATE FUNCTION ─────────────────────────────────────────
@@ -168,7 +170,9 @@ std::optional<ColumnDef> Parser::declared_column(const std::string& name, const 
 
 Statement Parser::parse_create_function() {
     // CREATE FUNCTION name(p1, p2, ...) RETURNS type RETURN <expr>
-    std::string name = to_lower(expect_ident());
+    std::string definer = std::exchange(create_definer_, std::string());
+    const std::string typed_name = expect_ident(); // (the engine looks a function up in lower case; SHOW CREATE FUNCTION says the name as it was written)
+    std::string name = to_lower(typed_name);
     const std::size_t source_from = pos_;
     std::vector<std::string> params, param_types;
     std::string return_type;
@@ -221,7 +225,7 @@ Statement Parser::parse_create_function() {
     }
     nlohmann::json j = expr;
     std::string body = j.dump();
-    return Statement(Statement::CreateFunction{name, params, body, param_types, return_type, source_between(source_from, pos_)});
+    return Statement(Statement::CreateFunction{name, params, body, param_types, return_type, source_between(source_from, pos_), std::move(definer), typed_name});
 }
 
 Statement Parser::parse_drop_function() {
@@ -238,6 +242,7 @@ Statement Parser::parse_drop_function() {
 
 // ── CREATE TRIGGER ──────────────────────────────────────────
 Statement Parser::parse_create_trigger() {
+    std::string definer = std::exchange(create_definer_, std::string());
     std::string name = expect_ident();
     TriggerTiming timing;
     {
@@ -262,7 +267,7 @@ Statement Parser::parse_create_trigger() {
     if (peek_is(TokenKind::Row)) advance();
     const std::size_t source_from = pos_;
     std::vector<Statement> body = parse_proc_body();
-    return Statement(Statement::CreateTrigger{name, timing, event, table, std::move(body), source_between(source_from, pos_)});
+    return Statement(Statement::CreateTrigger{name, timing, event, table, std::move(body), source_between(source_from, pos_), std::move(definer)});
 }
 
 /// Parse BEGIN ... END block or a single statement as a procedure/trigger body

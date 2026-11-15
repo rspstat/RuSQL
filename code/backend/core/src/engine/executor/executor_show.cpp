@@ -5,7 +5,9 @@
 #include "engine/executor/executor.hpp"
 #include "engine/check_names.hpp"
 #include "engine/fk_name.hpp"
+#include "engine/routine_privilege.hpp"
 #include "engine/routine_text.hpp"
+#include "engine/show_filter.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -311,8 +313,9 @@ static std::string returns_as_mysql(const std::string& typed) {
     return out;
 }
 
-// SHOW CREATE PROCEDURE / FUNCTION / TRIGGER (R83): the text of the statement that made the routine, as MySQL writes it (what mysqldump --routines --triggers puts in a dump)
-StringResult Executor::show_create_routine_mysql(const std::string& kind, const std::string& name) {
+// SHOW CREATE PROCEDURE / FUNCTION / TRIGGER (R83): the text of the statement that made the routine, as MySQL writes it (what mysqldump --routines --triggers puts in a dump).
+// `stored_name`: when given, it is set to the name the routine is stored under
+StringResult Executor::show_create_routine_mysql(const std::string& kind, const std::string& name, std::string* stored_name) {
     auto s = shared->read();
     const char* label = kind == "procedure" ? "PROCEDURE" : kind == "function" ? "FUNCTION" : "TRIGGER";
     auto lower = [](std::string text) {
@@ -324,12 +327,12 @@ StringResult Executor::show_create_routine_mysql(const std::string& kind, const 
         if (kind == "trigger") return StringResult::Err("ERROR 1360 (HY000): Trigger does not exist");
         return StringResult::Err(std::string("ERROR 1305 (42000): ") + label + " " + name + " does not exist");
     };
-    auto source_of = [&](const std::string& found) -> std::optional<std::string> {
+    auto entry_of = [&](const std::string& found) -> const RoutineSource* {
         auto it = s->routine_sources.find(kind + ":" + lower(found));
-        if (it == s->routine_sources.end()) return std::nullopt;
-        return it->second.second;
+        return it == s->routine_sources.end() ? nullptr : &it->second;
     };
-    const std::string definer = "`root`@`localhost`";
+    // (one made before R84 has no account kept: root@localhost is what MySQL's dump of a database made with the default account says)
+    auto definer_of = [](const RoutineSource& entry) { return entry.definer.empty() ? std::string("`root`@`localhost`") : entry.definer; };
     auto no_text = [&](const std::string& found) {
         return StringResult::Err(std::string("ERROR 1305 (42000): ") + label + " " + found + " was made before its text was kept; create it again");
     };
@@ -341,17 +344,20 @@ StringResult Executor::show_create_routine_mysql(const std::string& kind, const 
             for (auto& entry : s->user_functions) if (lower(entry.first) == wanted) found = entry.first;
         }
         if (found.empty()) return missing();
-        auto source = source_of(found);
-        if (!source) return no_text(found);
-        const RoutineParts parts = split_routine_source(*source, kind == "function");
-        return StringResult::Ok(routine_create_text(definer, label, found, *source, kind == "function" && !parts.returns.empty() ? returns_as_mysql(parts.returns) : std::string()));
+        const RoutineSource* entry = entry_of(found);
+        if (entry && !entry->name.empty()) found = entry->name; // (a function is kept under its name in lower case)
+        if (stored_name) *stored_name = found;
+        if (!entry) return no_text(found);
+        const RoutineParts parts = split_routine_source(entry->text, kind == "function");
+        return StringResult::Ok(routine_create_text(definer_of(*entry), label, found, entry->text, kind == "function" && !parts.returns.empty() ? returns_as_mysql(parts.returns) : std::string()));
     }
     for (auto& [trigger, def] : s->triggers) {
         if (lower(trigger) != wanted) continue;
-        auto source = source_of(trigger);
-        if (!source) return no_text(trigger);
-        return StringResult::Ok("CREATE DEFINER=" + definer + " TRIGGER `" + trigger + "` " + std::get<1>(def) + " " + std::get<2>(def) + " ON `" + bare_name(std::get<0>(def)) +
-                                "` FOR EACH ROW " + *source);
+        if (stored_name) *stored_name = trigger;
+        const RoutineSource* entry = entry_of(trigger);
+        if (!entry) return no_text(trigger);
+        return StringResult::Ok("CREATE DEFINER=" + definer_of(*entry) + " TRIGGER `" + trigger + "` " + std::get<1>(def) + " " + std::get<2>(def) + " ON `" + bare_name(std::get<0>(def)) +
+                                "` FOR EACH ROW " + entry->text);
     }
     return missing();
 }
@@ -368,6 +374,150 @@ StringResult Executor::show_create_database_mysql(const std::string& database, b
     if (found.empty()) return StringResult::Err("ERROR 1049 (42000): Unknown database '" + database + "'");
     return StringResult::Ok(std::string("CREATE DATABASE ") + (if_not_exists ? "/*!32312 IF NOT EXISTS*/ " : "") + "`" + found +
                             "` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */");
+}
+
+// ... with the privilege check of the session's account (R84). The routine has to be there first (MySQL tells that before it asks for a right)
+StringResult Executor::show_create_routine_checked(const std::string& kind, const std::string& database, const std::string& name) {
+    std::string found = name;
+    auto text = show_create_routine_mysql(kind, name, &found);
+    if (text.is_err()) return text;
+    auto lower = [](std::string word) {
+        for (char& c : word) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return word;
+    };
+    auto s = shared->read();
+    if (kind == "trigger") {
+        // the right is on the table the trigger is on
+        std::string table;
+        for (auto& [trigger, def] : s->triggers) if (lower(trigger) == lower(found)) table = std::get<0>(def);
+        Statement::CreateTrigger probe;
+        probe.name = found;
+        probe.table = table.find('.') == std::string::npos && !database.empty() ? database + "." + table : table;
+        if (check_privileges(*s, Statement(std::move(probe)))) return StringResult::Err("ERROR 1227 (42000): Access denied; you need (at least one of) the TRIGGER privilege(s) for this operation");
+        return text;
+    }
+    std::string db = database;
+    if (db.empty()) {
+        auto kept = s->routine_sources.find(kind + ":" + lower(found));
+        db = kept != s->routine_sources.end() ? kept->second.database : current_db;
+    }
+    // (an account that may not see it is told it is not there: MySQL does not say a routine exists to one that may not use it)
+    if (check_show_routine(*s, db, found)) return StringResult::Err(std::string("ERROR 1305 (42000): ") + (kind == "procedure" ? "PROCEDURE " : "FUNCTION ") + name + " does not exist");
+    // (it is shown a routine it may run but not its text unless it holds SHOW_ROUTINE or SELECT on everything or made it: the text is NULL, as MySQL's is)
+    if (!routine_text_shown(*this, *s, kind, found)) return StringResult::Ok(EXECUTOR_NULL_VALUE);
+    return text;
+}
+
+StringResult Executor::show_create_database_checked(const std::string& database, bool if_not_exists) {
+    {
+        auto s = shared->read();
+        if (auto denied = check_privileges(*s, Statement(Statement::Use{database}))) return StringResult::Err(*denied);
+    }
+    return show_create_database_mysql(database, if_not_exists);
+}
+
+namespace {
+// The words and names of a SHOW statement, read from the left
+class ShowReader {
+public:
+    explicit ShowReader(const std::string& text) : text_(text) {}
+
+    // the next word when it is `expected` (in any case); the reader moves past it
+    bool word(const char* expected) {
+        skip_space();
+        std::size_t end = pos_;
+        while (end < text_.size() && (std::isalnum(static_cast<unsigned char>(text_[end])) || text_[end] == '_')) end++;
+        if (end == pos_ || show_sql::upper(text_.substr(pos_, end - pos_)) != expected) return false;
+        pos_ = end;
+        return true;
+    }
+
+    // `db`.`name`, db.name or name (backticks or none): `database` is empty when there is one part
+    bool name(std::string& database, std::string& out) {
+        std::string first, second;
+        if (!part(first)) return false;
+        if (pos_ < text_.size() && text_[pos_] == '.') {
+            pos_++;
+            if (!part(second)) return false;
+            database = first;
+            out = second;
+        } else {
+            database.clear();
+            out = first;
+        }
+        return true;
+    }
+
+    // what is left, without the white space around it and the ; at the end
+    std::string rest() {
+        skip_space();
+        std::string tail = text_.substr(pos_);
+        while (!tail.empty() && (tail.back() == ';' || std::isspace(static_cast<unsigned char>(tail.back())))) tail.pop_back();
+        return tail;
+    }
+
+private:
+    void skip_space() {
+        while (pos_ < text_.size() && std::isspace(static_cast<unsigned char>(text_[pos_]))) pos_++;
+    }
+    bool part(std::string& out) {
+        skip_space();
+        if (pos_ < text_.size() && text_[pos_] == '`') {
+            const std::size_t close = text_.find('`', pos_ + 1);
+            if (close == std::string::npos) return false;
+            out = text_.substr(pos_ + 1, close - pos_ - 1);
+            pos_ = close + 1;
+            return !out.empty();
+        }
+        std::size_t end = pos_;
+        while (end < text_.size() && (std::isalnum(static_cast<unsigned char>(text_[end])) || text_[end] == '_' || text_[end] == '$')) end++;
+        if (end == pos_) return false;
+        out = text_.substr(pos_, end - pos_);
+        pos_ = end;
+        return true;
+    }
+
+    const std::string& text_;
+    std::size_t pos_ = 0;
+};
+} // namespace
+
+// SHOW CREATE DATABASE | SCHEMA [IF NOT EXISTS] name, SHOW CREATE PROCEDURE | FUNCTION | TRIGGER [db.]name, SHOW TRIGGERS [FROM db] [LIKE | WHERE ...] and SHOW PROCEDURE |
+// FUNCTION STATUS [LIKE | WHERE ...] in the native protocol (R84). The CREATE text comes as SHOW CREATE TABLE's does there (the statement itself); the other three are the SELECTs
+// of the MySQL protocol layer (engine/show_filter.hpp), run as they are.
+std::optional<StringResult> Executor::show_routine_native(const std::string& sql_text) {
+    ShowReader in(sql_text);
+    if (!in.word("SHOW")) return std::nullopt;
+    if (in.word("CREATE")) {
+        std::string database, name;
+        if (in.word("DATABASE") || in.word("SCHEMA")) {
+            bool if_not_exists = false;
+            if (in.word("IF")) {
+                if (!in.word("NOT") || !in.word("EXISTS")) return std::nullopt;
+                if_not_exists = true;
+            }
+            if (!in.name(database, name) || !database.empty() || !in.rest().empty()) return std::nullopt;
+            return show_create_database_checked(name, if_not_exists);
+        }
+        for (const std::string kind : {"procedure", "function", "trigger"}) {
+            if (!in.word(show_sql::upper(kind).c_str())) continue;
+            if (!in.name(database, name) || !in.rest().empty()) return std::nullopt;
+            return show_create_routine_checked(kind, database, name);
+        }
+        return std::nullopt; // (TABLE and VIEW are the parser's)
+    }
+    if (in.word("TRIGGERS")) {
+        std::string database;
+        if (in.word("FROM") || in.word("IN")) {
+            std::string unused;
+            if (!in.name(unused, database) || !unused.empty()) return std::nullopt;
+        }
+        return execute_sql_inner(show_sql::filtered(show_sql::triggers_select(database), in.rest(), "Table"));
+    }
+    const bool procedure = in.word("PROCEDURE");
+    const bool function = !procedure && in.word("FUNCTION");
+    if ((procedure || function) && in.word("STATUS")) return execute_sql_inner(show_sql::filtered(show_sql::routine_status_select(function), in.rest(), "Name"));
+    return std::nullopt;
 }
 
 StringResult Executor::exec_show_create_table(const SharedDatabase& s, const std::string& table) const {

@@ -6,6 +6,7 @@
 // INFORMATION_SCHEMA, FROM `_dual_`, SELECT-list subqueries).
 
 #include "engine/executor/executor.hpp"
+#include "engine/routine_privilege.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -1707,6 +1708,27 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                                                   return !may_see(s, schema->second, schemata || table == r.end() ? std::string() : table->second);
                                               }),
                                rows.end());
+                }
+                if (privileges_apply(s) && (bare == "routines" || bare == "parameters" || bare == "triggers")) {
+                    // (a routine is shown to an account that may run, change or make it; a trigger to one that holds TRIGGER on its table; the text of a routine to fewer: R84)
+                    rows.erase(std::remove_if(rows.begin(), rows.end(),
+                                              [&](const Row& r) {
+                                                  if (bare == "triggers") {
+                                                      Statement::CreateTrigger probe;
+                                                      probe.name = r.at("TRIGGER_NAME");
+                                                      probe.table = r.at("EVENT_OBJECT_SCHEMA") + "." + r.at("EVENT_OBJECT_TABLE");
+                                                      return check_privileges(s, Statement(std::move(probe))).has_value();
+                                                  }
+                                                  const bool routine = bare == "routines";
+                                                  return check_show_routine(s, r.at(routine ? "ROUTINE_SCHEMA" : "SPECIFIC_SCHEMA"), r.at(routine ? "ROUTINE_NAME" : "SPECIFIC_NAME")).has_value();
+                                              }),
+                               rows.end());
+                    if (bare == "routines") {
+                        for (Row& r : rows) {
+                            std::string kind = r.at("ROUTINE_TYPE") == "FUNCTION" ? "function" : "procedure";
+                            if (!routine_text_shown(*this, s, kind, r.at("ROUTINE_NAME"))) r["ROUTINE_DEFINITION"] = EXECUTOR_NULL_VALUE;
+                        }
+                    }
                 }
                 if (bare == "row_versions") { // (which versions this reader sees: its own snapshot decides)
                     const SnapshotCtx reader = current_read_ctx(s);

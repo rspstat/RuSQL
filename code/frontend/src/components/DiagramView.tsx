@@ -129,7 +129,7 @@ const SIDE_MODULES: Item[] = [
 ];
 
 const TXN: Item[] = [
-  { t: L("Row-level MVCC", "행 단위 MVCC"), s: L("version chains, snapshot reads, VACUUM", "버전 체인, 스냅샷 읽기, VACUUM") },
+  { t: L("Row-level MVCC", "행 단위 MVCC"), s: L("version chains, snapshot reads, VACUUM that keeps what an open snapshot reads", "버전 체인, 스냅샷 읽기, 열린 스냅샷이 읽는 것을 남기는 VACUUM") },
   { t: L("4 isolation levels", "격리 수준 4단계"), s: L("READ UNCOMMITTED to SERIALIZABLE", "READ UNCOMMITTED ~ SERIALIZABLE") },
   {
     t: L("Lock manager", "락 매니저"),

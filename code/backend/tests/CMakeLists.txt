@@ -34,6 +34,7 @@ add_executable(engine_tests
     test_r80_views_errors.cpp
     test_r82_wrong_answers.cpp
     test_r83_tool_compat.cpp
+    test_r84_routine_native.cpp
     test_executor_misc.cpp
     test_server_stmt_split.cpp
     test_concurrency.cpp

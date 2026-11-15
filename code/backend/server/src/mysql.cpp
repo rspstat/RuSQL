@@ -5,6 +5,7 @@
 #include "engine/collation.hpp"
 #include "engine/parser/lexer.hpp"
 #include "engine/result_text.hpp"
+#include "engine/show_filter.hpp"
 
 #define NOMINMAX
 #include <winsock2.h>
@@ -1289,10 +1290,7 @@ StringResult show_columns(Executor& exec, TableRef ref, bool full) {
 // SHOW ... [LIKE 'pattern' | WHERE condition] (R83): the rows of `select` (written with the column names SHOW has) that what follows the statement's name asks for;
 // `like_column`: the column a LIKE is matched against
 StringResult show_filtered(Executor& exec, const std::string& select, const std::string& tail, const char* like_column) {
-    const std::string up_tail = to_upper_str(tail);
-    if (up_tail.rfind("WHERE ", 0) == 0) return exec_inner(exec, "SELECT * FROM (" + select + ") AS shown WHERE " + tail.substr(6));
-    if (up_tail.rfind("LIKE ", 0) == 0) return exec_inner(exec, "SELECT * FROM (" + select + ") AS shown WHERE `" + like_column + "` LIKE " + trim_copy(tail.substr(5)));
-    return exec_inner(exec, select);
+    return exec_inner(exec, engine::show_sql::filtered(select, tail, like_column)); // (the SELECTs of the routine SHOWs are engine/show_filter.hpp's: the native protocol runs them too)
 }
 
 // ── MySQL-specific compatibility shims ─────────────────────────
@@ -1401,11 +1399,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
     // SHOW PROCEDURE / FUNCTION STATUS [LIKE 'pattern' | WHERE condition]: the routines of every database, read from information_schema.routines (R83)
     if (up.rfind("SHOW FUNCTION STATUS", 0) == 0 || up.rfind("SHOW PROCEDURE STATUS", 0) == 0) {
         const bool function = up.rfind("SHOW FUNCTION STATUS", 0) == 0;
-        const std::string select = std::string("SELECT ROUTINE_SCHEMA AS `Db`, ROUTINE_NAME AS `Name`, ROUTINE_TYPE AS `Type`, EXTERNAL_LANGUAGE AS `Language`, DEFINER AS `Definer`, "
-                                               "LAST_ALTERED AS `Modified`, CREATED AS `Created`, SECURITY_TYPE AS `Security_type`, ROUTINE_COMMENT AS `Comment`, "
-                                               "CHARACTER_SET_CLIENT AS `character_set_client`, COLLATION_CONNECTION AS `collation_connection`, DATABASE_COLLATION AS `Database Collation` "
-                                               "FROM information_schema.routines WHERE ROUTINE_TYPE = ") + (function ? "'FUNCTION'" : "'PROCEDURE'");
-        return show_filtered(exec, select, trim_copy(q.substr(std::string(function ? "SHOW FUNCTION STATUS" : "SHOW PROCEDURE STATUS").size())), "Name");
+        return show_filtered(exec, engine::show_sql::routine_status_select(function), trim_copy(q.substr(std::string(function ? "SHOW FUNCTION STATUS" : "SHOW PROCEDURE STATUS").size())), "Name");
     }
 
     if (up.rfind("SHOW TABLE STATUS", 0) == 0) {
@@ -1503,14 +1497,11 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                 tail = ref->rest;
             }
         }
-        const std::string select = std::string("SELECT TRIGGER_NAME AS `Trigger`, EVENT_MANIPULATION AS `Event`, EVENT_OBJECT_TABLE AS `Table`, ACTION_STATEMENT AS `Statement`, "
-                                               "ACTION_TIMING AS `Timing`, CREATED AS `Created`, SQL_MODE AS `sql_mode`, DEFINER AS `Definer`, CHARACTER_SET_CLIENT AS `character_set_client`, "
-                                               "COLLATION_CONNECTION AS `collation_connection`, DATABASE_COLLATION AS `Database Collation` FROM information_schema.triggers WHERE TRIGGER_SCHEMA = ") +
-                                  (db ? sql_quoted(*db) : std::string("DATABASE()"));
-        return show_filtered(exec, select, tail, "Table");
+        return show_filtered(exec, engine::show_sql::triggers_select(db.value_or(std::string())), tail, "Table");
     }
 
-    // SHOW CREATE DATABASE [IF NOT EXISTS] db, SHOW CREATE PROCEDURE | FUNCTION | TRIGGER name (R83): the statement that made it, in one row (what mysqldump reads)
+    // SHOW CREATE DATABASE [IF NOT EXISTS] db, SHOW CREATE PROCEDURE | FUNCTION | TRIGGER name (R83): the statement that made it, in one row (what mysqldump reads). The text
+    // and the privilege check are the engine's (the native protocol answers the same statements with the text alone, R84).
     if (up.rfind("SHOW CREATE DATABASE ", 0) == 0 || up.rfind("SHOW CREATE SCHEMA ", 0) == 0) {
         std::string tail = trim_copy(q.substr(q.find(' ', 12) + 1));
         bool if_not_exists = false;
@@ -1519,8 +1510,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
             tail = trim_copy(tail.substr(std::string("IF NOT EXISTS ").size()));
         }
         if (auto ref = read_table_ref(tail)) {
-            if (auto denied = denied_by_privileges(exec, Statement(Statement::Use{ref->table}))) return StringResult::Err(*denied);
-            auto text = exec.show_create_database_mysql(ref->table, if_not_exists);
+            auto text = exec.show_create_database_checked(ref->table, if_not_exists);
             if (text.is_err()) return text;
             return StringResult::Ok(box_table({"Database", "Create Database"}, {{ref->table, text.value()}}));
         }
@@ -1531,7 +1521,7 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
         auto ref = read_table_ref(trim_copy(q.substr(prefix.size())));
         if (!ref) break;
         const std::string lower_kind = kind == std::string("PROCEDURE") ? "procedure" : kind == std::string("FUNCTION") ? "function" : "trigger";
-        auto text = exec.show_create_routine_mysql(lower_kind, ref->table);
+        auto text = exec.show_create_routine_checked(lower_kind, ref->db ? *ref->db : std::string(), ref->table);
         if (text.is_err()) return text;
         // (the text opens with CREATE DEFINER=... KIND `name`: the name the routine is stored under)
         std::string found = ref->table;
@@ -1539,25 +1529,16 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
             const std::size_t from = open + std::string(kind).size() + 2;
             if (auto close = text.value().find('`', from); close != std::string::npos) found = text.value().substr(from, close - from);
         }
-        // the account needs the right to make such a routine in the database (MySQL asks for less: EXECUTE or SHOW_ROUTINE; this is the same or stricter)
-        if (lower_kind == "trigger") {
-            std::string table = "";
-            if (auto on = text.value().find(" ON `"); on != std::string::npos) {
-                if (auto close = text.value().find('`', on + 5); close != std::string::npos) table = text.value().substr(on + 5, close - on - 5);
-            }
-            Statement::CreateTrigger probe;
-            probe.name = found;
-            probe.table = ref->db ? *ref->db + "." + table : table;
-            if (auto denied = denied_by_privileges(exec, Statement(std::move(probe)))) return StringResult::Err(*denied);
-        } else {
-            Statement::CreateProcedure probe;
-            probe.name = ref->db ? *ref->db + "." + found : found;
-            if (auto denied = denied_by_privileges(exec, Statement(std::move(probe)))) return StringResult::Err(*denied);
-        }
         const std::string mode = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION";
         if (lower_kind == "trigger") {
+            std::string created = "NULL"; // (one made before R84 has no time kept)
+            {
+                auto s = exec.get_shared()->read();
+                std::string key = "trigger:" + to_lower_str(found);
+                if (auto kept = s->routine_sources.find(key); kept != s->routine_sources.end() && !kept->second.created.empty()) created = kept->second.created;
+            }
             return StringResult::Ok(box_table({"Trigger", "sql_mode", "SQL Original Statement", "character_set_client", "collation_connection", "Database Collation", "Created"},
-                                              {{found, mode, text.value(), "utf8mb4", "utf8mb4_0900_ai_ci", "utf8mb4_0900_ai_ci", "NULL"}}));
+                                              {{found, mode, text.value(), "utf8mb4", "utf8mb4_0900_ai_ci", "utf8mb4_0900_ai_ci", created}}));
         }
         const std::string title = lower_kind == "procedure" ? "Procedure" : "Function";
         return StringResult::Ok(box_table({title, "sql_mode", "Create " + title, "character_set_client", "collation_connection", "Database Collation"},

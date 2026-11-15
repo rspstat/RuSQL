@@ -9,7 +9,7 @@
 |---|---|
 | 무엇 | MySQL 호환 프로토콜을 쓰는 **자체 RDBMS 엔진**(C++) + 데스크톱 클라이언트(Tauri/React) + Claude 연동(MCP) |
 | 1학기 → 2학기 | Rust 프로토타입 → **C++ 전면 재작성**, "기능 추가"에서 **정합성·동시성·성능을 실제로 파고드는 심화**로 |
-| 규모 | 테스트 **993 케이스 / 1,522,352 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 12개(CDP) |
+| 규모 | 테스트 **1,002 케이스 / 1,524,264 assertions** (2학기 초 218 케이스 / 3,080 assertions), MCP 단위 시험 57건 · 프런트 라이브러리 시험 26건 · 앱 화면 시험 12개(CDP) |
 | 엔진 구성 | 파서 → 비용 기반 플래너 → 실행기, MVCC·행 단위 락·데드락 감지, redo 로그 기반 내구성, B+Tree·해시·복합 인덱스 |
 
 ## 2학기에 만든 것 (엔진)
@@ -24,6 +24,7 @@
 - **권한이 실제로 강제됨(R78)**: `root`가 아닌 계정의 모든 문장을 실행 전에 그 계정의 `GRANT`(전역 · 데이터베이스 · 표 · 열)와 켜 둔 역할에 비춰 확인하고 MySQL의 오류 번호(1142 · 1143 · 1044 · 1227 …)로 거절한다. `ALTER USER` · `RENAME USER` · `SET PASSWORD` · `SET ROLE` · 기본 역할 · `CURRENT_ROLE()` · 열 권한이 생기고 `SHOW GRANTS`가 MySQL과 같은 글자로 나온다. 진짜 MySQL과 300여 문장을 견줘 90개 차이 → 0. 같이 크래시 퍼저가 찾은 `ROLLBACK TO`의 행 사라짐(`REPLACE`가 지운 옛 버전까지 같이 지우던 것)도 고쳤다.
 - **조용한 오답 다섯의 정정(R82)**: 오류 없이 틀린 값을 돌려주거나 저장하던 것을 고쳤다 — 16진 · 비트 리터럴(`0x4142` · `X'41'` · `0b101` · `b'101'`)이 숫자 글자가 아니라 그 **바이트**(숫자를 물으면 정수: `0x41 + 0`은 65), 열 · 표 `COMMENT`가 사라지지 않고 `SHOW CREATE TABLE` · `information_schema` · `BACKUP` · 재시작에 남음, `LATERAL` 서브쿼리가 `SELECT *`에서 빠지던 것, `SHA2`의 224 · 384 · 512, `MEDIUMINT` · `TINYTEXT` … `LONGTEXT` · `*BLOB` · `CHAR(n)`이 INT · TEXT · VARCHAR로 저장되던 것(범위 · 크기 한계 · 끝 공백). 진짜 MySQL과 87문장을 견줘 61개 차이 → 0, 점수판 57개 코퍼스. 같이 값의 첫 바이트가 1이면 `INSERT`가 죽던 것도 고쳤다.
 - **`mysqldump`로 RuSQL 백업 · 스키마 읽는 도구 · 문자열 별칭 · `SELECT` 수식어(R83)**: 진짜 `mysqldump`(옵션 일곱 묶음)로 RuSQL을 떠서 진짜 MySQL에 적재하면 거절되는 문장 없이 행 · 뷰 · 루틴 · 트리거 · 열 설명이 같아졌다(전에는 첫 문장에서 실패) — `LOCK TABLES … READ LOCAL`, `SELECT /*!40001 SQL_NO_CACHE */`, `SET sql_mode = ''`(`ONLY_FULL_GROUP_BY` 끄기), `SHOW CREATE DATABASE | PROCEDURE | FUNCTION | TRIGGER`(루틴이 만들 때 쓴 글자를 저장), `SHOW TRIGGERS` · `SHOW PROCEDURE | FUNCTION STATUS`, `information_schema`의 `routines` · `parameters` · `triggers` · `check_constraints`와 `UNIQUE` 키 · 뷰의 정의 · 갱신 가능 여부. 손으로 쓴 SQL의 `AS 'Total'` · `id 'a2'` · `SQL_NO_CACHE` · `HIGH_PRIORITY` · `STRAIGHT_JOIN`도 받는다. 진짜 MySQL과 81문장을 견줘 43개 차이 → 0, 점수판 58개 코퍼스.
+- **R83의 남은 모서리(R84)**: ① `SHOW CREATE DATABASE | PROCEDURE | FUNCTION | TRIGGER` · `SHOW TRIGGERS` · `SHOW PROCEDURE | FUNCTION STATUS`가 앱 · CLI · MCP의 네이티브 프로토콜에서도 됨, ② 루틴 · 트리거가 **만든 계정(`DEFINER=` 또는 만든 세션)과 시각**을 저장하고 함수 이름은 쓴 그대로 보임, ③ **누가 루틴을 보는가**를 진짜 MySQL처럼(실행 · 변경 · 생성 권한이나 `SHOW_ROUTINE` · 만든 계정만 행을 보고, 글자는 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정만; 루틴 하나에만 권한이 있는 계정도 데이터베이스에 들어감), ④ 뷰의 `IS_UPDATABLE`과 쓰기 거절 오류 번호(1288 · 1471 · 1348)를 MySQL처럼, ⑤ `mysqldump` 남은 옵션을 시험: **`--single-transaction`이 쓰기와 겹치면 덤프에서 행이 통째로 빠지던 진짜 버그**(자동 VACUUM의 기준선이 열린 스냅숏이 읽는 옛 버전을 지움)를 찾아 고침, **`--all-databases`가 오류 없이 빈 덤프를 쓰던 것**(`mysql` 스키마가 없어서)을 고침, `--where`는 됨, `--tab`은 서버 파일 쓰기(`SELECT … INTO OUTFILE`)라 아직 안 됨. 코퍼스 `routines_r84` 78문장 · `views_updatable_r84` 77문장 차이 0, 점수판 60개 코퍼스 5,195문장 차이 0.
 - **인덱스 제안 · 쓰기 문장의 계획 · 연결 상한(R70)**: `SUGGEST INDEX`가 문장을 블록으로 읽어(CTE · 파생 표 · 하위 질의 — 상관 포함 — · UNION · OR의 가지) 어느 부분의 제안인지 말하고, `EXPLAIN UPDATE`·`DELETE`는 아무것도 실행하지 않고 그 문장이 찾는 행의 계획을 보여 주며, `SET GLOBAL max_connections`(기본 151)가 가득 차면 두 프로토콜 모두 오류 1040으로 새 연결을 거절한다.
 
 ## 2학기에 만든 것 (앱·연동)

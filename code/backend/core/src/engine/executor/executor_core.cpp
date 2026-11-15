@@ -197,6 +197,9 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
         databases.insert(lower);
     }
+    // The system schema every MySQL server has (R84): `mysqldump --all-databases` dumps the schemas the server lists and starts with `mysql` -- from a server that lists none
+    // by that name it writes an EMPTY dump, with no error. RuSQL keeps its accounts and privileges in files of its own, so the schema holds no tables; it cannot be made or dropped.
+    databases.insert("mysql");
 
     // Indexes are derived data and are rebuilt from the table rows at every start. They used to be loaded from
     // `.idx` files written when the index was CREATEd (never refreshed by later INSERT/UPDATE/DELETE), so after a
@@ -398,7 +401,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         .redo_dirty = std::make_shared<Mutex<std::unordered_set<std::string>>>(),
     };
     redo_log_ = db_value.redo_log;
-    db_value.routine_sources = db_value.disk.load_routine_sources<std::unordered_map<std::string, std::pair<std::string, std::string>>>();
+    db_value.routine_sources = db_value.disk.load_routine_sources<std::unordered_map<std::string, RoutineSource>>();
     db_value.slow_log->set_directory(dir);
     // (a table file holds committed work only: see BufferPool::write_through)
     db_value.buffer_pool.set_open_transactions([ids = db_value.active_txn_ids] { return *ids->lock(); });
@@ -1702,6 +1705,7 @@ StringResult Executor::run_sql_text(const std::string& sql_text) {
         words >> show >> scope;
         if (scope == "GLOBAL" || scope == "SESSION") words >> status; else status = scope;
         if (status == "STATUS") return exec_show_status(sql_text); // (the counters need no lock of the database)
+        if (auto shown = show_routine_native(sql_text)) return std::move(*shown); // SHOW CREATE PROCEDURE | FUNCTION | TRIGGER | DATABASE, SHOW TRIGGERS, SHOW PROCEDURE | FUNCTION STATUS
     }
     if (word == "TRACE") {
         const std::string rest = trim(sql);
@@ -2286,13 +2290,13 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return exec_except(s, std::move(*v->left), std::move(*v->right), v->all, v->order_by, v->limit, v->offset);
 
     if (auto* v = std::get_if<Statement::CreateProcedure>(&stmt.data))
-        return exec_create_procedure(s, v->name, v->params, std::move(v->body), std::move(v->source));
+        return exec_create_procedure(s, v->name, v->params, std::move(v->body), std::move(v->source), std::move(v->definer));
     if (auto* v = std::get_if<Statement::CallProcedure>(&stmt.data)) return exec_call_procedure(s, v->name, v->args);
     if (auto* v = std::get_if<Statement::CreateTrigger>(&stmt.data))
-        return exec_create_trigger(s, v->name, v->timing, v->event, v->table, std::move(v->body), std::move(v->source));
+        return exec_create_trigger(s, v->name, v->timing, v->event, v->table, std::move(v->body), std::move(v->source), std::move(v->definer));
     if (auto* v = std::get_if<Statement::DropTrigger>(&stmt.data)) return exec_drop_trigger(s, v->name, v->if_exists);
     if (auto* v = std::get_if<Statement::DropProcedure>(&stmt.data)) return exec_drop_procedure(s, v->name, v->if_exists);
-    if (auto* v = std::get_if<Statement::CreateFunction>(&stmt.data)) return exec_create_function(s, v->name, v->params, v->body, v->param_types, v->return_type, std::move(v->source));
+    if (auto* v = std::get_if<Statement::CreateFunction>(&stmt.data)) return exec_create_function(s, v->name, v->params, v->body, v->param_types, v->return_type, std::move(v->source), std::move(v->definer), std::move(v->typed_name));
     if (auto* v = std::get_if<Statement::DropFunction>(&stmt.data)) return exec_drop_function(s, v->name, v->if_exists);
 
     // 저장 프로시저 제어문

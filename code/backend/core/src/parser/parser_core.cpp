@@ -414,6 +414,7 @@ Statement Parser::parse_stmt() {
         case TokenKind::Update: return parse_update();
         case TokenKind::Delete: return parse_delete();
         case TokenKind::Create: {
+            create_definer_.clear();
             skip_create_attributes();
             if (peek_is(TokenKind::Unique) && peek_at_is(1, TokenKind::Index)) { advance(); advance(); return parse_create_unique_index(); }
             if (peek_is(TokenKind::Index))    { advance(); return parse_create_index(); }
@@ -641,10 +642,20 @@ void Parser::skip_create_attributes() {
         } else if (word(0, "DEFINER")) { // DEFINER = user@host | CURRENT_USER[()]
             advance();
             if (peek_is(TokenKind::Eq)) advance();
-            if (peek()) advance();
+            auto name_of = [](const Token* t) { return t->text.empty() ? t->word : t->text; };
+            std::string user, host;
+            if (const Token* t = peek()) {
+                user = name_of(t);
+                advance();
+            }
+            create_definer_.clear(); // (CURRENT_USER: the account that runs the statement)
             if (peek_is(TokenKind::At)) {
                 advance();
-                if (peek()) advance();
+                if (const Token* t = peek()) {
+                    host = name_of(t);
+                    advance();
+                }
+                if (!user.empty() && !host.empty()) create_definer_ = "`" + user + "`@`" + host + "`";
             } else if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::RParen)) {
                 advance();
                 advance();

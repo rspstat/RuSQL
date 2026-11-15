@@ -225,7 +225,7 @@ std::optional<Executor::ViewTarget> Executor::resolve_view_target(const SharedDa
         } else if (auto* when = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
             target.columns.emplace_back(when->alias.value_or(""), "");
         } else {
-            return std::nullopt; // (an aggregate, a window function, a subquery in the select list)
+            return std::nullopt; // (an aggregate, a window function, a subquery in the select list: MySQL refuses every write through such a view, 1288 / 1471)
         }
     }
     return target;
@@ -244,7 +244,8 @@ std::optional<std::string> Executor::view_write_refusal(const SharedDatabase& s,
     const std::string bare = view.substr(view.rfind('.') == std::string::npos ? 0 : view.rfind('.') + 1);
     const std::string db = view.rfind('.') == std::string::npos ? std::string() : view.substr(0, view.rfind('.'));
     const std::string what = verb;
-    const bool joins = sel && !sel->joins.empty();
+    // (a join view with DISTINCT, GROUP BY, an aggregate ... has no row of a table in it: it is refused like the view of one table is; MySQL 1288 / 1471)
+    const bool joins = sel && !sel->joins.empty() && resolve_join_view_target(s, view);
     // (a view with an outer join is not updatable at all: its DELETE is 1288 like its UPDATE, where an inner join view says "Can not delete from join view")
     const bool outer = sel && std::any_of(sel->joins.begin(), sel->joins.end(), [](const Join& j) { return j.join_type == JoinType::Left || j.join_type == JoinType::Right || j.join_type == JoinType::FullOuter; });
     if (joins && what == "DELETE" && !outer) return "ERROR 1395 (HY000): Can not delete from join view '" + db + "." + bare + "'";
@@ -642,9 +643,16 @@ StringResult Executor::exec_insert(SharedDatabase& s, std::string table, std::op
             if (auto refused = view_write_refusal(s, table, "INSERT")) return StringResult::Err(*refused);
             return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable (has JOINs, DISTINCT, GROUP BY, or subquery)");
         }
-        // a view with a column of an expression takes no INSERT (MySQL 1471)
+        // a view with a column of an expression takes no INSERT: 1348 when the INSERT writes that column (names it, or gives a value to every column), 1471 when it does not
+        for (std::size_t i = 0; i < target->columns.size(); i++) {
+            const auto& entry = target->columns[i];
+            if (!entry.second.empty()) continue;
+            bool written = !col_list;
+            if (col_list) written = std::any_of(col_list->begin(), col_list->end(), [&](const std::string& w) { return !entry.first.empty() && view_names_equal(w, entry.first); });
+            if (written) return StringResult::Err("ERROR 1348 (HY000): Column '" + entry.first + "' is not updatable");
+        }
         for (auto& entry : target->columns) {
-            if (entry.second.empty()) return StringResult::Err(*view_write_refusal(s, table, "INSERT"));
+            if (entry.second.empty()) return StringResult::Err("ERROR 1471 (HY000): The target table " + strip_db_prefix(table) + " of the INSERT is not insertable-into");
         }
         // the columns of the view are what a list names, or what a row gives when there is no list; each is a column of the table below
         std::vector<std::string> below;

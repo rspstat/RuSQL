@@ -1,6 +1,6 @@
-# RuSQL 추천 목록 — 분류별 (남은 항목만, R83 이후 · 2026-11-15)
+# RuSQL 추천 목록 — 분류별 (남은 항목만, R84 이후 · 2026-11-15)
 
-완료된 항목은 뺐습니다(R44~R80에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 2026-11-14의 R81 점검에서는 **6번 표 30줄 중 23줄 · 7번 표 4줄 · 9번 표 31줄 전부를 다시 돌려** 낡은 줄이 없음을 확인했고(한 줄의 하위 주장만 이미 같아져 있었음), 목록에 없던 새 줄 16개를 올렸고(표에서 "R81"로 표시, 재현은 `code/test/diff/corpus/tool_gaps.sql`), **그중 조용한 오답 다섯 줄(16진 리터럴 · `COMMENT` · `LATERAL` · `SHA2` · 열 형)은 같은 날 R82에서 모두 고쳤습니다**(`corpus/wrong_answers_r82.sql` 87문장 가운데 고치기 전 61개가 달랐고 지금은 0, 점수판에 올림; 남은 `tool_gaps.sql`은 48문장 중 43개가 다름). **그다음 날 R83에서 사용자가 고른 "도구 호환 묶음"을 끝냈습니다**: 진짜 `mysqldump`로 RuSQL을 떠서 진짜 MySQL에 적재 · 스키마를 읽는 도구가 보는 `information_schema` · `SHOW` · 문자열 별칭 · `SELECT` 수식어(`corpus/tool_compat_r83.sql` 81문장, 처음 43개가 달랐고 지금 0; 점수판에 올림; `tool_gaps.sql`은 22문장으로 줄었음). 점수판은 코퍼스 58개에서 차이 0이고(R83), B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
+완료된 항목은 뺐습니다(R44~R80에서 끝낸 것은 `DATE.md`에 있습니다). 항목마다 엔진에 실제로 돌려 보고(진짜 MySQL 8.4.9와 비교) 앱·MCP 코드를 찾아 이미 있거나 일부만 있는 것을 가려낸 판입니다. 2026-11-14의 R81 점검에서는 **6번 표 30줄 중 23줄 · 7번 표 4줄 · 9번 표 31줄 전부를 다시 돌려** 낡은 줄이 없음을 확인했고(한 줄의 하위 주장만 이미 같아져 있었음), 목록에 없던 새 줄 16개를 올렸고(표에서 "R81"로 표시, 재현은 `code/test/diff/corpus/tool_gaps.sql`), **그중 조용한 오답 다섯 줄(16진 리터럴 · `COMMENT` · `LATERAL` · `SHA2` · 열 형)은 같은 날 R82에서 모두 고쳤습니다**(`corpus/wrong_answers_r82.sql` 87문장 가운데 고치기 전 61개가 달랐고 지금은 0, 점수판에 올림; 남은 `tool_gaps.sql`은 48문장 중 43개가 다름). **그다음 날 R83에서 사용자가 고른 "도구 호환 묶음"을 끝냈습니다**: 진짜 `mysqldump`로 RuSQL을 떠서 진짜 MySQL에 적재 · 스키마를 읽는 도구가 보는 `information_schema` · `SHOW` · 문자열 별칭 · `SELECT` 수식어(`corpus/tool_compat_r83.sql` 81문장, 처음 43개가 달랐고 지금 0; 점수판에 올림; `tool_gaps.sql`은 22문장으로 줄었고, R84에서 뷰 4문장이 더해져 26문장). **같은 날 R84에서 "R83 남은 모서리"를 끝냈습니다**: 네이티브 프로토콜의 `SHOW CREATE PROCEDURE …`, 루틴이 만든 계정과 시각, 누가 루틴을 보는가(진짜 MySQL에서 재서 맞춤), 뷰의 `IS_UPDATABLE`과 쓰기 오류, 그리고 `mysqldump` 남은 옵션을 시험하다 찾은 **진짜 버그 둘**(`--single-transaction` 덤프에서 행이 통째로 빠지던 MVCC 버그, `--all-databases`가 오류 없이 빈 덤프를 쓰던 것) — 코퍼스 `routines_r84` 78문장 · `views_updatable_r84` 77문장 차이 0, 점수판 60개 코퍼스에서 차이 0(R84). B+Tree·MVCC 페이지는 R62에서 단순한 자동 재생으로 줄였습니다. 발표·제출물 중 포스터·소개글·메인 화면 캡처는 끝났습니다(`docs/deliverables/`). 점검에서 바뀐 것의 이력은 맨 아래 "참고"에 모았습니다.
 
 - **현재 상태:** `일부`(일부만 있음) · `없음` · `오답`(지금 조용히 틀린 값을 돌려줌) · `다름`(MySQL과 다르지만 오류로 드러남)
 - **추천도:** ★ 다섯 개. 기준은 실사용 가치 + 발표 임팩트 + 비용 대비 효과입니다. 졸업작품 마감(11월 말)까지 약 2주를 전제로 합니다. 각 분류 안에서 추천도 순입니다.
@@ -13,12 +13,12 @@
 |---|---|---|---|
 | 1. 발표·제출 대비 | 6 | 발표 PC용 설치본에 엔진 묶기, **직접**: MCP·복구 장면 리허설, 녹화 | 발표 당일 앱이 안 뜨거나 시연이 끊기는 일을 막습니다(산출물 숫자는 R83에서 갱신했고, 엔진이 또 바뀌면 다시) |
 | 2. 안정성·무결성 | 1 | 아직 `KILL`이 안 듣는 것(`ALTER`·쓰는 도중) | 큰 위험은 R63~R69에서 닫혔고 R78에서 크래시 퍼저의 마지막 불일치도 닫혔습니다. 남은 것은 드문 모양 하나입니다 |
-| 3. 품질 점검 | 4 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험, **직접**: DBeaver · Workbench로 접속해 보기(`mysqldump` · `mysqlshow`는 R83에서 됨) | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
+| 3. 품질 점검 | 4 | 마감 1주 전에 Debug 전체 + `KILL`을 섞은 크래시 시험, **직접**: DBeaver · Workbench로 접속해 보기(`mysqldump`(`--all-databases` · `--single-transaction` 포함) · `mysqlshow`는 R83 · R84에서 됨) | 마감 전에 숨은 회귀와 조용한 오답을 잡습니다 |
 | 4. 프론트 (앱) | 4 | 인덱스 제안 카드의 남은 것(큰 표), 스키마 비교의 빠진 것 | 앱만으로 큰 표에서도 인덱스를 시험해 볼 수 있습니다 |
 | 5. MCP (지금 37개 도구, resources 2개 · prompts 3개) | 1 | `suggest_indexes` 후속(열 사이의 상관 · 큰 표) | 제안이 더 많은 모양의 문장에서 맞아집니다 |
 | 6. MySQL과 다른 작은 차이 | 34 | `sql_mode`의 나머지(엄격 모드 끄기), `SHOW CREATE TABLE`의 표기(`CHECK` 글자 정규화), 변수와 큰 수(문자열 별칭 · `SELECT` 수식어는 R83에서 끝) | 옛 앱이 `SET sql_mode = ''` 뒤에 보내는 문장이 MySQL처럼 돕니다 |
 | 7. 엔진 기능 추가 | 6 | `COLLATE` 절, `FULLTEXT`, `FLUSH` · `REPAIR` · `CHECKSUM TABLE` | 대소문자를 구분하는 열이 되고, `mysqldump`의 `FLUSH TABLES`를 받습니다 |
-| 8. 백엔드 (서버·운영) | 6 | **R83 남은 것**: 앱 · MCP의 네이티브 프로토콜에도 `SHOW CREATE PROCEDURE …`, 만든 시각 · 만든 계정, 정규화한 `CHECK` · 뷰 정의; (시간이 되면) 코퍼스 비교 CI | 앱의 SQL 편집기에서도 루틴의 글자를 보고, 도구가 만든 시각 · 계정까지 봅니다 |
+| 8. 백엔드 (서버·운영) | 6 | **R84 남은 것**: 뷰 쓰기의 남은 모서리(표현식 열을 `WHERE`에 쓰는 쓰기, `TEMPTABLE` · 파생 표 뷰), 뷰의 `DEFINER` · 표의 `CREATE_TIME`, 정규화한 `CHECK` · 뷰 정의; (시간이 되면) 코퍼스 비교 CI | 도구가 보는 뷰 · 표의 메타데이터가 MySQL과 더 같아집니다 |
 | 9. SQL 문법 추가 — 보류 | 33 | `INSERT INTO t () VALUES ()`, `GROUPING()`, `SIGNAL`, `UPDATE … JOIN (SELECT …)` | 옮겨 온 MySQL 쿼리가 더 많이 그대로 돕니다 |
 
 ## 1. 발표·제출 대비
@@ -74,7 +74,7 @@ Claude가 부르는 도구.
 
 ## 6. MySQL과 다른 작은 차이
 
-진짜 MySQL 8.4.9와 비교해 남은 것들. 대부분 오류로 거절하는 쪽이거나 모양이 작아서 조용한 큰 오답은 아닙니다(점수판 코퍼스 57개는 차이 0). **"R81"로 표시한 줄은 2026-11-14 점검에서 새로 찾은 것입니다. 같은 점검의 조용한 오답 다섯(16진 리터럴 · `COMMENT` · `LATERAL` · `SHA2` · 열 형 저장)은 R82에서 고쳤고(남은 모서리가 "R82" 줄), 문자열 별칭 · `SELECT` 수식어 · `mysqldump` · 스키마 도구는 R83에서 끝냈습니다.** 재현은 `corpus/tool_gaps.sql`(점수판 밖, 22문장 중 18개가 다름), `corpus/wrong_answers_r82.sql`, `corpus/tool_compat_r83.sql`.
+진짜 MySQL 8.4.9와 비교해 남은 것들. 대부분 오류로 거절하는 쪽이거나 모양이 작아서 조용한 큰 오답은 아닙니다(점수판 코퍼스 60개는 차이 0). **"R81"로 표시한 줄은 2026-11-14 점검에서 새로 찾은 것입니다. 같은 점검의 조용한 오답 다섯(16진 리터럴 · `COMMENT` · `LATERAL` · `SHA2` · 열 형 저장)은 R82에서 고쳤고(남은 모서리가 "R82" 줄), 문자열 별칭 · `SELECT` 수식어 · `mysqldump` · 스키마 도구는 R83에서 끝냈습니다.** 재현은 `corpus/tool_gaps.sql`(점수판 밖, 26문장 중 22개가 다름), `corpus/wrong_answers_r82.sql`, `corpus/tool_compat_r83.sql`, `corpus/routines_r84.sql`, `corpus/views_updatable_r84.sql`.
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
@@ -132,7 +132,7 @@ Claude가 부르는 도구.
 
 | 항목 | 현재 상태 | 추천도 | 비용 | 효과 | 근거 |
 |---|---|---|---|---|---|
-| **도구 호환의 남은 모서리 (R83)** | 일부 — 진짜 `mysqldump`(옵션 일곱 묶음)로 RuSQL을 떠서 MySQL에 적재하면 행 · 뷰 · 루틴 · 트리거 · 열 설명이 같음; `mysqlshow` · `mysqlcheck` 됨. 남은 것: ① `SHOW CREATE PROCEDURE \| FUNCTION \| TRIGGER \| DATABASE` · `SHOW TRIGGERS` · `SHOW PROCEDURE \| FUNCTION STATUS`는 **MySQL 프로토콜에서만**(앱 · MCP의 네이티브 프로토콜에는 없음), ② 만든 시각(`CREATED` · `LAST_ALTERED` · `Modified`)은 NULL, `DEFINER`는 늘 `root@localhost`(만든 계정을 저장하지 않음), 함수 이름은 소문자로 저장, ③ R83 전에 만든 루틴은 글자가 없어 모든 데이터베이스에 나타나고 `SHOW CREATE`가 "다시 만들라"는 오류, ④ `IS_UPDATABLE`은 근사(집계가 든 조인 뷰를 `YES`로 틀릴 수 있음), ⑤ 권한: 루틴의 글자를 보려면 `CREATE ROUTINE`이 필요(MySQL은 `EXECUTE` · `SHOW_ROUTINE`도 허락), ⑥ 안 해 본 `mysqldump` 옵션: `--all-databases`(시스템 스키마), `--single-transaction`이 실제로 일관한 스냅숏인지(두 세션 시험 없음), `--tab`, `--where`, `--hex-blob`의 BLOB 안 UTF-8이 아닌 바이트(R82의 한계) | ★★ | 하~중 | 앱의 SQL 편집기에서도 루틴의 글자를 보고, 도구가 만든 시각 · 계정까지 봅니다. | ①은 `Executor::run_sql_text`에서 `SHOW CREATE PROCEDURE …`를 가로채 같은 함수(`show_create_routine_mysql`)를 부르면 됩니다(하). ②는 만들 때 시각과 계정을 `routine_sources`에 함께 저장하면 됩니다(하). ④는 뷰의 쓰기 규칙(`resolve_view_target`)을 그대로 쓰면 됩니다(하). |
+| **도구 호환의 남은 모서리 (R84)** | 일부 — 진짜 `mysqldump`(옵션 여덟 묶음: `--all-databases` 포함)로 RuSQL을 떠서 MySQL에 적재하면 행 · 뷰 · 루틴 · 트리거 · 열 설명이 같고, 쓰기와 겹쳐 뜬 `--single-transaction` 덤프도 한 시점의 모습; `SHOW CREATE PROCEDURE | FUNCTION | TRIGGER | DATABASE` · `SHOW TRIGGERS` · `SHOW … STATUS`는 두 프로토콜 모두, 루틴은 만든 계정과 시각을 가지며 MySQL처럼 권한 있는 계정에게만 보임(R84). 남은 것: ① 뷰의 표현식 열을 `WHERE` · 새 값에 쓰는 `UPDATE | DELETE`는 MySQL이 행을 찾아 바꾸는데 여기서는 "지원하지 않음"으로 거절(R84 전에는 0행으로 조용히 끝남), ② `ALGORITHM = TEMPTABLE` 뷰의 `IS_UPDATABLE`(MySQL `NO`, 여기 `YES`)과 파생 표 위의 뷰(MySQL `YES`, 여기 `NO`) — `tool_gaps` 7번, ③ R84 전에 만든 루틴은 글자 · 계정 · 시각이 없어 모든 데이터베이스에 나타나고 `SHOW CREATE`가 "다시 만들라"는 오류, ④ 뷰의 `DEFINER`(`information_schema.views` `root@%`, `SHOW CREATE VIEW` `root@localhost` 고정)와 표의 `CREATE_TIME` · `UPDATE_TIME`(NULL), ⑤ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없고, 앱의 데이터베이스 목록에 빈 `mysql`이 하나 더 보임, ⑥ `SHOW VARIABLES LIKE 'gtid_mode'`가 빈 답, ⑦ 안 해 본/안 되는 `mysqldump` 옵션: `--tab`(서버에 파일을 쓰는 `SELECT … INTO OUTFILE`; 안 함), `--hex-blob`의 BLOB 안 UTF-8이 아닌 바이트(R82의 한계) | ★★ | 하~중 | 도구가 보는 뷰 · 표의 메타데이터가 MySQL과 더 같아집니다. | ①은 식을 뷰의 정의로 풀어 넣는 식 대치기가 필요합니다(중). ④는 만들 때 시각과 계정을 뷰 · 표에도 저장하면 됩니다(하; R84에서 루틴에 한 것과 같음). |
 | 코퍼스 비교 CI | 없음 (`.github` 없음) | ★★★ | 상 | 푸시마다 MySQL과의 차이 0이 자동으로 확인되어 호환성 회귀를 바로 잡습니다. | 지금은 사람이 `make_scoreboard.py`를 돌립니다. MSVC 빌드, MySQL 컨테이너(리눅스 러너)에 리눅스 빌드 가능 여부 확인이 필요합니다. |
 | TLS | 없음 | ★★ | 상 | 암호화된 접속이 되지만 Windows에서 큰 작업이고 발표에서는 보이지 않습니다. | Windows에서 TLS 라이브러리 도입과 핸드셰이크 확장이 큽니다. |
 | `caching_sha2_password` | 없음 (`mysql_native_password`만) | ★★ | 상 | MySQL 8 기본 인증을 요구하는 최신 드라이버가 옵션 없이 접속합니다. 지금 쓰는 CLI·pymysql은 이미 됩니다. | 지금 쓰는 mysql CLI와 pymysql은 모두 접속됩니다. 일부 최신 드라이버가 옵션을 요구할 때만 문제입니다. |
@@ -200,16 +200,25 @@ Claude가 부르는 도구.
 
 ## 추천 순서 (마감까지 약 2주, R83 기준)
 
-0. **도구 호환 (R83에서 끝남):** 진짜 `mysqldump`로 RuSQL을 떠서 MySQL에 적재 · 스키마 읽는 도구가 보는 `information_schema` · `SHOW` · 문자열 별칭 · `SELECT` 수식어 · `LOCK TABLES … LOCAL` · `sql_mode`에서 `ONLY_FULL_GROUP_BY` 빼기. 남은 것은 8번 표의 "R83 남은 모서리" 한 줄과, **직접** DBeaver · Workbench를 붙여 보는 일(3번 표)입니다.
+0. **도구 호환 (R83 · R84에서 끝남):** 진짜 `mysqldump`로 RuSQL을 떠서 MySQL에 적재(`--all-databases` · `--single-transaction` 포함) · 스키마 읽는 도구가 보는 `information_schema` · `SHOW`(네이티브 프로토콜에서도) · 루틴이 만든 계정과 시각 · 권한에 따라 보이는 루틴 · 문자열 별칭 · `SELECT` 수식어 · `LOCK TABLES … LOCAL` · `sql_mode`에서 `ONLY_FULL_GROUP_BY` 빼기. 남은 것은 8번 표의 "R84 남은 모서리" 한 줄과, **직접** DBeaver · Workbench를 붙여 보는 일(3번 표)입니다.
 1. **발표·제출 — 발표 PC에서 앱이 뜨게 만들기 (중):** 설치본에 엔진 묶기와 새 PC 점검. 고장 나면 나머지가 소용없는 항목입니다.
 2. **안정성·무결성 (상, 급하지 않음):** 외래키 경합과 교차 조인 메모리는 R63에서, 윈도·`UNION`·병렬 단계·`INSERT … SELECT`·`CALL`의 중단과 쓰는 `CALL`·`VACUUM`의 redo는 R64에서, 트리거가 걸린 표·뷰·MERGE·다중 표 문장의 redo는 R65에서, 트리거 본문이 `NEW`/`OLD`를 못 읽던 오답은 R66에서, `EXPLAIN ANALYZE`·`EXECUTE`·`CREATE TABLE … AS SELECT`·`MERGE`·다중 표 문장·`CREATE INDEX`의 중단과 `GROUP BY`의 그룹 행 단계는 R67에서, `MERGE`·다중 표 문장의 이차 시간과 `ADD FOREIGN KEY`·`ADD CHECK`가 기존 행을 안 보던 무결성 구멍은 R68·R69에서 끝났습니다. 남은 것은 `ALTER` 같은 DDL의 중단 하나이고, 표를 제자리에서 바꾸는 구조라 큰 일입니다 — 마감 전에 필요하지 않습니다.
 3. **프론트·MCP — 보이는 장면 (끝남):** `slow_queries` 도구 · `kill_session` · CSV 도구 · resources · prompts(MCP 37개 도구)와 시연 대본, 앱 화면의 자동 시험(`code/test/frontend/cdp/`)은 R59·R70에서 끝났습니다. 화면 모양은 사용자 결정으로 B+Tree·MVCC 페이지만 새 모양이고 나머지 화면은 원래 디자인을 지킵니다 — 다른 화면에 새 모양을 입히는 일은 하지 않습니다.
 4. **작은 것 모음 (하):** `EXPLAIN UPDATE`·`DELETE`, 연결 수 상한(R70), 프로토콜 오류 번호(R80)는 끝났습니다. 남은 것은 몇 가지 `SHOW`(`SHOW DATABASES LIKE` · `SHOW ERRORS`)와 6번 표에서 비용이 하인 줄들(`FLOAT`의 `CONCAT` · `PI()` · 뷰 만들 때의 `ONLY_FULL_GROUP_BY` 같은 것)입니다.
 5. **품질 점검 — 마감 1주 전:** 누적 점검 한 바퀴(Debug 전체 + `KILL`을 섞은 크래시 시험 + 빌드 간 차분), 새 영역 훑기 한 번 더.
-5-1. **제출 문서 숫자 갱신 (R83에서 했음):** D01 · D05 · D06 · D07 · D08 · 통합문서 v29를 993 케이스 · 코퍼스 58개 · 5,040문장으로 고쳤습니다. 엔진이 또 바뀌면 마감 3일 전쯤 한 번 더(숫자는 `DATE.md`의 마지막 라운드와 `compatSnapshot.json`에서).
+5-1. **제출 문서 숫자 갱신 (R84에서 했음):** D01 · D05 · D06 · D07 · D08 · 통합문서 v29를 1,002 케이스 · 코퍼스 60개 · 5,195문장으로 고쳤습니다. 엔진이 또 바뀌면 마감 3일 전쯤 한 번 더(숫자는 `DATE.md`의 마지막 라운드와 `compatSnapshot.json`에서).
 6. **시간이 되면:** 최적화 전후 속도 애니메이션, 코퍼스 비교 CI, RuSQL vs MySQL 분할 화면, 스키마 비교에 뷰·트리거, `sql_mode`의 나머지(엄격 모드 끄기).
 7. **미루거나 하지 않는 것:** `FULLTEXT`, 표현식 인덱스, 감사 로그, TLS, `caching_sha2_password`, WAL 복제·XA, 테마, 그리고 SQL 문법 추가 전부("SQL 문법 추가 — 보류"; 문자열 별칭 · `SELECT` 수식어는 도구가 보내는 문장이라 R83에서 예외로 했음).
 8. **직접 하실 일:** MCP 시연 리허설(`DEMO.md` 8번), 크래시 복구 장면 리허설(`DEMO.md` 3번), 화면 녹화, 앱 화면 사람 눈 점검, DBeaver · Workbench로 접속해 보기(R81).
+
+## 참고: R84에서 끝낸 것 (2026-11-15, 사용자가 고른 "R83 남은 모서리" — "같은 진행방식으로")
+
+- **네이티브 프로토콜의 `SHOW CREATE DATABASE | PROCEDURE | FUNCTION | TRIGGER` · `SHOW TRIGGERS` · `SHOW PROCEDURE | FUNCTION STATUS`**(앱 · CLI · MCP; R83에서는 MySQL 프로토콜뿐).
+- **루틴 · 트리거가 만든 계정(`DEFINER=` 또는 만든 세션)과 시각을 저장**(루틴 초, 트리거 100분의 1초), 함수 이름은 쓴 그대로 보임.
+- **누가 루틴을 보는가를 진짜 MySQL 8.4.9에서 계정 열 개로 재서 맞춤**: 행은 실행 · 변경 · 생성 권한이나 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정에게만(없으면 1305), 글자는 그중 `SHOW_ROUTINE` · `SELECT` · 만든 계정에게만(나머지 NULL), 트리거는 `TRIGGER`(1227); 루틴 하나에만 권한이 있는 계정도 데이터베이스에 들어감. R83의 "`CREATE ROUTINE`이 있어야 보임"은 틀린 단순화였고 그 시험 한 줄도 고쳤다.
+- **뷰**: `IS_UPDATABLE`(29가지 모양 가운데 5개가 달랐음)과 쓰기를 못 받는 뷰의 오류 번호(1288 · 1471 · 1348), 표현식 열을 `WHERE`에 쓰던 쓰기가 0행으로 조용히 끝나던 것을 정직한 거절로.
+- **진짜 버그 둘**(`mysqldump` 남은 옵션을 시험하다): `--single-transaction`이 쓰기와 겹치면 덤프에서 **행이 통째로 빠짐**(자동 VACUUM의 기준선이 스냅숏이 잡힐 때 진행 중이던 트랜잭션을 놓침 → `snapshot_floors`), `--all-databases`가 **오류 없이 빈 덤프**(`mysql` 스키마가 없어서 → 빈 시스템 스키마 `mysql`).
+- 코퍼스 `routines_r84` 78문장 · `views_updatable_r84` 77문장 차이 0, 점수판 60개 · 5,195문장 차이 0. `tool_gaps.sql`은 26문장 중 22개가 다름(뷰 3가지가 더해짐). 새 도구 `dump_consistency_r84.py`, `dump_to_mysql.py`는 옵션 여덟 묶음.
 
 ## 참고: R83에서 끝낸 것 (2026-11-15, 사용자가 고른 "도구 호환 묶음": `mysqldump` 백업 · 스키마 도구 · 문자열 별칭 · `SELECT` 수식어)
 

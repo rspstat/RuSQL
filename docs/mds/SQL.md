@@ -465,8 +465,8 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 - information_schema.schemata (schemas) : 데이터베이스 목록
 - information_schema.key_column_usage / table_constraints / referential_constraints : 키 · 제약 · 외래 키 정보(R83: `UNIQUE` 키의 열도 — 두 열짜리 포함 — 나옴)
 - information_schema.check_constraints : `CHECK` 제약(이름 · 조건; 이름이 없으면 `표_chk_번호`; R83)
-- information_schema.views : 뷰 정보(R83: `VIEW_DEFINITION`은 쓴 SELECT, `IS_UPDATABLE`은 쓰기가 되는 뷰면 `YES`, `CHECK_OPTION`)
-- information_schema.routines / parameters / triggers : 저장 프로시저 · 함수 · 매개변수 · 트리거(R83: 만들 때 쓴 글자에서 본문 · 특성 · 설명을 읽음; 만든 시각은 NULL, `DEFINER`는 `root@localhost`; R83 전에 만든 루틴은 모든 데이터베이스에 나타남)
+- information_schema.views : 뷰 정보(R83: `VIEW_DEFINITION`은 쓴 SELECT, `CHECK_OPTION`; R84: `IS_UPDATABLE`을 MySQL처럼 — 한 표의 행이거나 바깥 조인이 없는 조인 뷰면 `YES`, 바깥 조인 · `DISTINCT` · `GROUP BY` · 집계 · `UNION` · 윈도 · `LIMIT`이 든 뷰는 `NO`, select 목록에 서브쿼리만 든 뷰는 쓰기는 못 받는데도 `YES`(MySQL이 그렇다); `ALGORITHM = TEMPTABLE`과 파생 표 위의 뷰는 아직 MySQL과 다름)
+- information_schema.routines / parameters / triggers : 저장 프로시저 · 함수 · 매개변수 · 트리거(R83: 만들 때 쓴 글자에서 본문 · 특성 · 설명을 읽음; R84: `CREATED` · `LAST_ALTERED`는 만든 시각(루틴은 초까지, 트리거는 100분의 1초까지), `DEFINER`는 `CREATE DEFINER=…`로 쓴 계정, 안 쓰면 만든 세션의 계정; 함수 이름은 쓴 그대로; **계정은 실행 · 변경 · 생성할 수 있는 루틴(트리거는 표의 `TRIGGER` 권한이 있는 것)만 봄, `ROUTINE_DEFINITION`은 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정만**; R83 전에 만든 루틴은 모든 데이터베이스에 나타나고 만든 시각은 NULL, `DEFINER`는 `root@localhost`)
 - information_schema.files / column_statistics : 비어 있는 표(`mysqldump`가 먼저 묻는 것; R83)
 - information_schema.character_sets / collations / engines : 문자 집합 · 정렬 규칙 · 엔진 목록
 - information_schema.processlist : 세션 목록
@@ -538,8 +538,8 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - SHOW INDEX | INDEXES | KEYS FROM t [FROM db] : 인덱스 목록(MySQL의 모양)
 - SHOW CREATE TABLE t / SHOW CREATE VIEW v : MySQL 형식의 CREATE 문(`SHOW CREATE TABLE 뷰`는 `SHOW CREATE VIEW`처럼 `View | Create View | character_set_client | collation_connection`으로 답함; R83)
 - SHOW CREATE DATABASE [IF NOT EXISTS] db : `CREATE DATABASE `db` /*!40100 DEFAULT CHARACTER SET utf8mb4 … */`(R83)
-- SHOW CREATE PROCEDURE p / FUNCTION f / TRIGGER t : 만들 때 쓴 글자를 MySQL의 모양으로(`CREATE DEFINER=`root`@`localhost` PROCEDURE `p`(매개변수)`, 특성이 한 줄씩, 본문; 형은 `RETURNS int` · `varchar(30) CHARSET utf8mb4` 식) — 계정에 데이터베이스의 `CREATE ROUTINE`(트리거는 표의 `TRIGGER`)이 있어야 보임; 없는 이름은 1305(트리거는 1360); R83 전에 만든 루틴은 글자가 없어 "다시 만들라"는 오류(R83)
-- SHOW TRIGGERS [FROM db] [LIKE '표' | WHERE ...] / SHOW PROCEDURE STATUS | FUNCTION STATUS [LIKE | WHERE ...] : 트리거 · 루틴 목록(`information_schema.triggers` · `routines`에서 읽음; 만든 시각은 NULL; R83)
+- SHOW CREATE PROCEDURE p / FUNCTION f / TRIGGER t : 만들 때 쓴 글자를 MySQL의 모양으로(`CREATE DEFINER=`계정` PROCEDURE `p`(매개변수)`, 특성이 한 줄씩, 본문; 형은 `RETURNS int` · `varchar(30) CHARSET utf8mb4` 식; 함수 이름은 쓴 그대로) — **MySQL 프로토콜(R83)과 네이티브 프로토콜(앱 · CLI · MCP, R84) 모두**(MySQL은 행 하나 — `Procedure | sql_mode | Create Procedure | …`, 네이티브는 CREATE 글자만, `SHOW CREATE TABLE`처럼). 루틴은 실행 · 변경 · 생성 권한이나 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정이어야 보이고(없는 계정에는 1305 "does not exist"), 글자는 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정에만 — 나머지는 NULL; 트리거는 표의 `TRIGGER`(없으면 1227); 없는 이름은 1305(트리거는 1360); R83 전에 만든 루틴은 글자가 없어 "다시 만들라"는 오류(R83 · R84)
+- SHOW TRIGGERS [FROM db] [LIKE '표' | WHERE ...] / SHOW PROCEDURE STATUS | FUNCTION STATUS [LIKE | WHERE ...] : 트리거 · 루틴 목록(`information_schema.triggers` · `routines`에서 읽음 — 계정이 볼 수 있는 것만; 만든 시각 · 만든 계정은 R84부터 채움; MySQL 프로토콜(R83)과 네이티브 프로토콜(R84) 모두)
 - SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태(`Create_time`·`Update_time`·`Check_time`은 NULL; 뷰도 한 행 — `Comment`가 `VIEW`, R83)
 - SHOW VARIABLES [LIKE '...'] / SHOW SESSION | GLOBAL VARIABLES : 서버 변수 목록
 - SHOW CHARACTER SET / SHOW CHARSET / SHOW COLLATION : 문자 집합 · 정렬 규칙 목록

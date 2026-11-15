@@ -622,6 +622,33 @@ SELECT table_name, constraint_name, constraint_type FROM information_schema.tabl
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_schema = 'company' ORDER BY table_name;
 SELECT collation_name, id FROM information_schema.collations WHERE collation_name IN ('utf8mb4_bin', 'utf8mb4_0900_ai_ci') ORDER BY id;
 
+-- SHOW CREATE in the Native Protocol, Who Made a Routine and When, Views That Take Writes, the mysql Schema (R84)
+CREATE PROCEDURE r84_hello(IN p INT) COMMENT 'native show' SELECT p + 1;
+CREATE FUNCTION r84_Mixed(x INT) RETURNS INT DETERMINISTIC RETURN x + 1;
+CREATE TRIGGER r84_trg BEFORE UPDATE ON department FOR EACH ROW SET NEW.name = NEW.name;
+SHOW CREATE PROCEDURE r84_hello;
+SHOW CREATE FUNCTION r84_Mixed;
+SHOW CREATE TRIGGER r84_trg;
+SHOW CREATE DATABASE company;
+SHOW TRIGGERS;
+SHOW PROCEDURE STATUS WHERE Name = 'r84_hello';
+SHOW FUNCTION STATUS LIKE 'r84%';
+SELECT routine_name, definer, created IS NOT NULL AS has_time FROM information_schema.routines WHERE routine_name LIKE 'r84%' ORDER BY routine_name;
+DROP PROCEDURE r84_hello;
+DROP FUNCTION r84_Mixed;
+DROP TRIGGER r84_trg;
+SHOW DATABASES;
+CREATE VIEW r84_plain AS SELECT id, first_name FROM employee;
+CREATE VIEW r84_group AS SELECT department_id, COUNT(*) AS n FROM employee GROUP BY department_id;
+CREATE VIEW r84_expr AS SELECT id, salary * 2 AS double_salary FROM employee;
+SELECT table_name, is_updatable FROM information_schema.views WHERE table_name LIKE 'r84_%' ORDER BY table_name;
+UPDATE r84_plain SET first_name = first_name WHERE id = 1;
+UPDATE r84_group SET n = 1;
+INSERT INTO r84_expr (id, double_salary) VALUES (999999, 1);
+DROP VIEW r84_plain;
+DROP VIEW r84_group;
+DROP VIEW r84_expr;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

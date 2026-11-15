@@ -38,6 +38,7 @@
 #include "engine/result.hpp"
 #include "engine/row.hpp"
 #include "engine/row_json.hpp"
+#include "engine/routine_source.hpp"
 #include "engine/catalog/schema.hpp"
 #include "engine/sync.hpp"
 #include "engine/table_stats.hpp"
@@ -176,6 +177,10 @@ struct SharedDatabase {
     QueryResultCache query_cache;
     std::shared_ptr<TxnIoShared> txn_io;
     std::shared_ptr<Mutex<std::unordered_set<std::uint64_t>>> active_txn_ids;
+    // The oldest transaction each open snapshot may still need (R84): transaction id -> the smallest of the transactions that were running when its snapshot was taken and of
+    // its cutoff. A transaction that began before the reader but was still running at the snapshot is no longer in active_txn_ids once it has committed, and the rows it
+    // superseded are still the ones the reader sees: the GC horizon (oldest_active_txn_id) has to stay below them, or VACUUM erases a row an open snapshot still reads.
+    std::shared_ptr<Mutex<std::unordered_map<std::uint64_t, std::uint64_t>>> snapshot_floors = std::make_shared<Mutex<std::unordered_map<std::uint64_t, std::uint64_t>>>();
     // Stage 4 (table-level concurrency): one shared_mutex per real, catalog-registered
     // table, keyed the same way as s.tables. Populated on CREATE TABLE (and at startup
     // for every table loaded from disk) and erased on DROP TABLE -- entries are only ever
@@ -225,10 +230,10 @@ struct SharedDatabase {
     std::shared_ptr<ScanOrders> scan_orders = std::make_shared<ScanOrders>();
     // how the engine opened the data (see RecoveryStats)
     RecoveryStats recovery;
-    // Where each procedure, function and trigger was made and the text it was written as (R83): "procedure:name" / "function:name" / "trigger:name" (lower case) ->
-    // (database, text after the name; for a trigger the body). SHOW CREATE PROCEDURE / FUNCTION / TRIGGER and information_schema.routines / triggers read it; a routine made
-    // before R83 has no entry (it shows in every database, and SHOW CREATE says it has no text).
-    std::unordered_map<std::string, std::pair<std::string, std::string>> routine_sources;
+    // Where each procedure, function and trigger was made, the text it was written as, who made it and when (R83, R84): "procedure:name" / "function:name" / "trigger:name"
+    // (lower case) -> RoutineSource (text after the name; for a trigger the body). SHOW CREATE PROCEDURE / FUNCTION / TRIGGER and information_schema.routines / triggers
+    // read it; a routine made before R83 has no entry (it shows in every database, and SHOW CREATE says it has no text), one made before R84 has no account and no time.
+    std::unordered_map<std::string, RoutineSource> routine_sources;
 
     // mysql_native_password challenge-response verification (nonce is a 20-byte challenge)
     // -- used by both the MySQL wire protocol listener and the native TCP protocol's own
@@ -342,8 +347,17 @@ public:
     StringResult show_create_view_mysql(const std::string& view);
     // SHOW CREATE PROCEDURE / FUNCTION / TRIGGER and SHOW CREATE DATABASE (R83): the text of the CREATE statement (what mysqldump writes into a dump). `kind`: "procedure",
     // "function" or "trigger"; for a database the second argument says IF NOT EXISTS was asked for. The error when there is no such routine / database.
-    StringResult show_create_routine_mysql(const std::string& kind, const std::string& name);
+    StringResult show_create_routine_mysql(const std::string& kind, const std::string& name, std::string* stored_name = nullptr);
     StringResult show_create_database_mysql(const std::string& database, bool if_not_exists);
+    // ... the same with the privilege check of the session's account (R84): `database` is the one written in front of the name ("" when there is none). MySQL asks for
+    // SHOW_ROUTINE or CREATE ROUTINE / ALTER ROUTINE / EXECUTE on a procedure or function, TRIGGER on the table of a trigger, some privilege on the database for SHOW CREATE
+    // DATABASE. The MySQL protocol layer and show_routine_native both answer through these.
+    StringResult show_create_routine_checked(const std::string& kind, const std::string& database, const std::string& name);
+    StringResult show_create_database_checked(const std::string& database, bool if_not_exists);
+    std::optional<std::string> check_show_routine(const SharedDatabase& s, const std::string& database, const std::string& name);
+    // SHOW CREATE DATABASE | SCHEMA | PROCEDURE | FUNCTION | TRIGGER, SHOW TRIGGERS and SHOW PROCEDURE | FUNCTION STATUS in the native protocol (the app, the CLI, MCP): the
+    // CREATE text itself as SHOW CREATE TABLE gives it, the table for the others. nullopt: not one of them (the parser reads the statement).
+    std::optional<StringResult> show_routine_native(const std::string& sql_text);
     bool implicit_txn_ = false;              // the transaction that is open was begun by a statement of a session with autocommit = 0
     // The transaction characteristics of the session (SET [SESSION] TRANSACTION ..., SET transaction_isolation = ..., SET transaction_read_only = ...). A change made while a
     // transaction is open is for the next one (the engine's level follows session_isolation_ when none is open); SET TRANSACTION (no SESSION) is for the next one only.
@@ -650,6 +664,8 @@ private:
     // could still need (min of active_txn_ids, or peek_next_id() if none are open --
     // matching "nothing has an open snapshot, anything already dead is fair game").
     static std::uint64_t oldest_active_txn_id(SharedDatabase& s);
+    // The open transaction's snapshot (once it has one) is recorded in SharedDatabase::snapshot_floors; the end of the transaction forgets it (R84)
+    void register_snapshot_floor(SharedDatabase& s);
     // True iff a dead row (_xmax != "0") can be physically purged: its deletion must have
     // committed strictly before the oldest currently open transaction's snapshot could
     // have started, i.e. _xmax < oldest_active_txn_id(s) -- replaces the old permissive
@@ -1392,7 +1408,7 @@ private:
     // ── Phase 8e: stored procedures / triggers / UDF ────────────────────
     StringResult exec_create_procedure(SharedDatabase& s, std::string name,
                                         std::vector<std::tuple<std::string, std::string, std::string>> params,
-                                        std::vector<Statement> body, std::string source);
+                                        std::vector<Statement> body, std::string source, std::string definer);
     // Runs a list of statements in procedure context; stops early once proc_signal_ is set.
     StringResult exec_proc_stmts(SharedDatabase& s, std::vector<Statement> stmts);
     StringResult exec_proc_if(SharedDatabase& s, CondExpr condition, std::vector<Statement> then_body,
@@ -1404,10 +1420,11 @@ private:
     StringResult exec_call_procedure(SharedDatabase& s, std::string name, std::vector<std::string> args);
     StringResult exec_drop_procedure(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_create_function(SharedDatabase& s, std::string name, std::vector<std::string> params, std::string body,
-                                      const std::vector<std::string>& param_types, const std::string& return_type, std::string source);
+                                      const std::vector<std::string>& param_types, const std::string& return_type, std::string source, std::string definer,
+                                      std::string typed_name);
     StringResult exec_drop_function(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_create_trigger(SharedDatabase& s, std::string name, TriggerTiming timing, TriggerEvent event, std::string table,
-                                      std::vector<Statement> body, std::string source);
+                                      std::vector<Statement> body, std::string source, std::string definer);
     StringResult exec_drop_trigger(SharedDatabase& s, std::string name, bool if_exists);
     StringResult exec_execute(SharedDatabase& s, const std::string& name, const std::vector<std::string>& using_vars);
 

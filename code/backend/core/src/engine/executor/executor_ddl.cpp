@@ -81,7 +81,10 @@ SnapshotCtx Executor::current_read_ctx(SharedDatabase& s, bool take_snapshot) {
         return SnapshotCtx{txn.current_txn_id(), std::numeric_limits<std::uint64_t>::max(), {}};
     }
     if (txn.is_active()) {
-        if (take_snapshot && txn.snapshot_pending()) txn.take_snapshot(*s.active_txn_ids->lock());
+        if (take_snapshot && txn.snapshot_pending()) {
+            txn.take_snapshot(*s.active_txn_ids->lock());
+            register_snapshot_floor(s);
+        }
         if (auto frozen = txn.frozen_ctx()) return *frozen;
     }
     return SnapshotCtx{txn.current_txn_id(), s.txn_io->peek_next_id(), *s.active_txn_ids->lock()};
@@ -94,7 +97,18 @@ std::uint64_t Executor::tagging_txn_id(SharedDatabase& s) const {
 std::uint64_t Executor::oldest_active_txn_id(SharedDatabase& s) {
     auto active = s.active_txn_ids->lock();
     if (active->empty()) return s.txn_io->peek_next_id();
-    return *std::min_element(active->begin(), active->end());
+    std::uint64_t oldest = *std::min_element(active->begin(), active->end());
+    // (a snapshot still needs what the transactions running at the time it was taken superseded, even after they have committed)
+    for (const auto& [reader, floor] : *s.snapshot_floors->lock()) oldest = std::min(oldest, floor);
+    return oldest;
+}
+
+void Executor::register_snapshot_floor(SharedDatabase& s) {
+    auto frozen = txn.frozen_ctx();
+    if (!frozen) return;
+    std::uint64_t floor = frozen->cutoff;
+    for (std::uint64_t id : frozen->in_progress) floor = std::min(floor, id);
+    (*s.snapshot_floors->lock())[txn.current_txn_id()] = floor;
 }
 
 bool Executor::is_vacuumable(const Row& row, std::uint64_t oldest_active_txn_id) {
@@ -1364,9 +1378,18 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
     return StringResult::Err("Unknown ALTER TABLE action");
 }
 
+// Whether the database has a folder in the data directory (the system schema `mysql` has none, unless a user made one before R84)
+static bool has_database_folder(const SharedDatabase& s, const std::string& key) {
+    for (const std::string& d : s.disk.list_databases()) {
+        if (to_lower_copy(d) == key) return true;
+    }
+    return false;
+}
+
 StringResult Executor::exec_create_database(SharedDatabase& s, const std::string& name, bool if_not_exists) {
     std::string key = to_lower_copy(name);
     affected_rows_ = 1; // (the OK packet of CREATE DATABASE says 1, also when IF NOT EXISTS finds it there)
+    if (key == "mysql" && !if_not_exists && !has_database_folder(s, key)) return StringResult::Err("ERROR 3552 (HY000): Access to system schema 'mysql' is rejected.");
     if (s.databases.count(key)) {
         if (if_not_exists) return StringResult::Ok("Database '" + name + "' already exists (skipped).");
         return StringResult::Err("Database '" + name + "' already exists.");
@@ -1378,6 +1401,7 @@ StringResult Executor::exec_create_database(SharedDatabase& s, const std::string
 
 StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& name, bool if_exists) {
     std::string key = to_lower_copy(name);
+    if (key == "mysql" && !has_database_folder(s, key)) return StringResult::Err("ERROR 3552 (HY000): Access to system schema 'mysql' is rejected."); // (the system schema has no folder)
     if (!s.databases.count(key)) {
         if (if_exists) return StringResult::Ok("Database '" + name + "' does not exist (skipped).");
         return StringResult::Err("Database '" + name + "' does not exist.");

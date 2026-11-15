@@ -22,6 +22,8 @@ OPTION_SETS = [
     ("--databases with a CREATE DATABASE", ["--databases", "--routines", "--triggers", "--add-drop-database"], {"data": True, "routines": True}),
     ("compact, events, order-by-primary, insert-ignore, hex-blob", ["--compact", "--events", "--routines", "--triggers", "--order-by-primary", "--insert-ignore", "--hex-blob"], {"data": True, "routines": True}),
     ("opt: add-drop-table / add-drop-trigger, set-charset, quick", ["--add-drop-table", "--add-drop-trigger", "--set-charset", "--quick", "--triggers", "--routines", "--dump-date"], {"data": True, "routines": True}),
+    # R84: the most common backup. mysqldump starts with the schema `mysql` and wrote NOTHING (no error) from a server that does not list one; the dump holds every database
+    ("--all-databases with a CREATE DATABASE for each", ["--all-databases", "--routines", "--triggers", "--single-transaction"], {"data": True, "routines": True}),
 ]
 
 
@@ -153,7 +155,7 @@ def main():
         for name, options, expect in OPTION_SETS:
             print(f"\n== {name}")
             dump = os.path.join(work, "dump.sql")
-            cmd = [MYSQLDUMP, "-h127.0.0.1", f"-P{mport}", "-uroot", "-proot", "--default-character-set=utf8mb4"] + options + ([SRC] if "--databases" not in options else [SRC])
+            cmd = [MYSQLDUMP, "-h127.0.0.1", f"-P{mport}", "-uroot", "-proot", "--default-character-set=utf8mb4"] + options + ([] if "--all-databases" in options else [SRC])
             r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
             if r.returncode != 0 or not r.stdout:
                 print(f"   mysqldump FAILED (exit {r.returncode}): {r.stderr.strip()[:1200]}")
@@ -163,7 +165,7 @@ def main():
                 if line.strip():
                     print("   mysqldump says:", line.strip()[:200])
             open(dump, "w", encoding="utf-8", newline="").write(r.stdout)
-            mdb = SRC if "--databases" in options else "rt_copy"
+            mdb = SRC if ("--databases" in options or "--all-databases" in options) else "rt_copy"
             mcur = pymysql.connect(autocommit=True, charset="utf8mb4", **REAL).cursor()
             mcur.execute(f"DROP DATABASE IF EXISTS {SRC}")
             mcur.execute("DROP DATABASE IF EXISTS rt_copy")

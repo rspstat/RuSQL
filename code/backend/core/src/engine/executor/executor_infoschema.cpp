@@ -107,7 +107,7 @@ std::string dt_full(const DataType& dt) {
 
 // the databases a routine is listed under: the one it was made in; one with no recorded source (made before R83) is listed in all of them
 std::vector<std::string> routine_databases(const SharedDatabase& s, const std::string& key) {
-    if (auto it = s.routine_sources.find(key); it != s.routine_sources.end()) return {it->second.first};
+    if (auto it = s.routine_sources.find(key); it != s.routine_sources.end()) return {it->second.database};
     std::vector<std::string> all(s.databases.begin(), s.databases.end());
     std::sort(all.begin(), all.end());
     return all;
@@ -795,7 +795,22 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             }
             r["CHECK_OPTION"] = check_option;
             // (a view of one table's rows, or a join of tables without an outer join, takes writes)
-            r["IS_UPDATABLE"] = resolve_updatable_view(s, name) || !view_write_refusal(s, name, "UPDATE") ? "YES" : "NO";
+            bool updatable = resolve_updatable_view(s, name).has_value();
+            if (!updatable) {
+                if (auto joined = resolve_join_view_target(s, name)) updatable = !joined->outer;
+            }
+            if (!updatable) {
+                // MySQL says YES for a view that is updatable but for a subquery in its select list (it takes no write, 1288 / 1471: the flag does not look at the subquery)
+                const auto* sel = std::get_if<Statement::Select>(&_.data);
+                const bool has_subquery = sel && std::any_of(sel->columns.begin(), sel->columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::Subquery>(c.data); });
+                if (has_subquery && sel->joins.empty() && !sel->distinct && (!sel->group_by || sel->group_by->empty()) && !sel->subquery && !sel->having && !sel->limit && !sel->offset &&
+                    std::none_of(sel->columns.begin(), sel->columns.end(), [](const SelectColumn& c) {
+                        return std::holds_alternative<SelectColumn::Agg>(c.data) || std::holds_alternative<SelectColumn::AggAlias>(c.data) || std::holds_alternative<SelectColumn::WinFunc>(c.data);
+                    })) {
+                    updatable = s.views.count(sel->table) ? resolve_updatable_view(s, sel->table).has_value() : s.catalog.get_table(sel->table) != nullptr;
+                }
+            }
+            r["IS_UPDATABLE"] = updatable ? "YES" : "NO";
             r["DEFINER"] = "root@%";
             r["SECURITY_TYPE"] = "DEFINER";
             r["CHARACTER_SET_CLIENT"] = "utf8mb4";
@@ -884,7 +899,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
         };
         auto source_of = [&](const std::string& key) {
             auto it = s.routine_sources.find(key);
-            return it == s.routine_sources.end() ? std::string() : it->second.second;
+            return it == s.routine_sources.end() ? std::string() : it->second.text;
         };
         for (const bool function : {false, true}) {
             std::vector<std::string> names;
@@ -893,6 +908,8 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             std::sort(names.begin(), names.end());
             for (const std::string& name : names) {
                 const std::string key = routine_key(function ? "function" : "procedure", name);
+                std::string shown = name; // (a function is kept under its name in lower case: the one it was written with is told)
+                if (auto kept_name = s.routine_sources.find(key); kept_name != s.routine_sources.end() && !kept_name->second.name.empty()) shown = kept_name->second.name;
                 const RoutineParts parts = split_routine_source(source_of(key), function);
                 std::string returns = parts.returns;
                 std::vector<std::string> param_types;
@@ -904,10 +921,10 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 for (const std::string& database : routine_databases(s, key)) {
                     if (!parameters) {
                         Row r;
-                        r["SPECIFIC_NAME"] = name;
+                        r["SPECIFIC_NAME"] = shown;
                         r["ROUTINE_CATALOG"] = "def";
                         r["ROUTINE_SCHEMA"] = database;
-                        r["ROUTINE_NAME"] = name;
+                        r["ROUTINE_NAME"] = shown;
                         r["ROUTINE_TYPE"] = function ? "FUNCTION" : "PROCEDURE";
                         if (function) fill_declared_type(r, returns);
                         else { fill_declared_type(r, ""); r["DATA_TYPE"] = ""; } // (a procedure has no type: MySQL says an empty text)
@@ -938,11 +955,13 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                         r["SQL_DATA_ACCESS"] = access;
                         r["SQL_PATH"] = EXECUTOR_NULL_VALUE;
                         r["SECURITY_TYPE"] = security;
-                        r["CREATED"] = EXECUTOR_NULL_VALUE;
-                        r["LAST_ALTERED"] = EXECUTOR_NULL_VALUE;
+                        const auto kept = s.routine_sources.find(key);
+                        const bool made_known = kept != s.routine_sources.end() && !kept->second.created.empty(); // (one made before R84 has no time: NULL)
+                        r["CREATED"] = made_known ? kept->second.created : std::string(EXECUTOR_NULL_VALUE);
+                        r["LAST_ALTERED"] = r["CREATED"]; // (nothing alters a routine here: it is made again)
                         r["SQL_MODE"] = kDefaultSqlMode;
                         r["ROUTINE_COMMENT"] = comment;
-                        r["DEFINER"] = "root@localhost";
+                        r["DEFINER"] = kept != s.routine_sources.end() && !kept->second.definer.empty() ? plain_account(kept->second.definer) : std::string("root@localhost");
                         r["CHARACTER_SET_CLIENT"] = "utf8mb4";
                         r["COLLATION_CONNECTION"] = "utf8mb4_0900_ai_ci";
                         r["DATABASE_COLLATION"] = "utf8mb4_0900_ai_ci";
@@ -953,7 +972,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                         Row r;
                         r["SPECIFIC_CATALOG"] = "def";
                         r["SPECIFIC_SCHEMA"] = database;
-                        r["SPECIFIC_NAME"] = name;
+                        r["SPECIFIC_NAME"] = shown;
                         r["ORDINAL_POSITION"] = std::to_string(position);
                         r["PARAMETER_MODE"] = mode.empty() ? std::string(EXECUTOR_NULL_VALUE) : mode;
                         r["PARAMETER_NAME"] = param_name.empty() ? std::string(EXECUTOR_NULL_VALUE) : param_name;
@@ -983,7 +1002,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             const auto& [table, timing, event, unused_body] = s.triggers.at(name);
             auto [db, bare_table] = split_name(table);
             const std::string key = routine_key("trigger", name);
-            if (db.empty() && s.routine_sources.count(key)) db = s.routine_sources.at(key).first; // (a trigger is made on a table named with its database: this is for one that was not)
+            if (db.empty() && s.routine_sources.count(key)) db = s.routine_sources.at(key).database; // (a trigger is made on a table named with its database: this is for one that was not)
             Row r;
             r["TRIGGER_CATALOG"] = "def";
             r["TRIGGER_SCHEMA"] = db;
@@ -994,16 +1013,17 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["EVENT_OBJECT_TABLE"] = bare_table;
             r["ACTION_ORDER"] = "1";
             r["ACTION_CONDITION"] = EXECUTOR_NULL_VALUE;
-            r["ACTION_STATEMENT"] = s.routine_sources.count(key) ? s.routine_sources.at(key).second : std::string();
+            r["ACTION_STATEMENT"] = s.routine_sources.count(key) ? s.routine_sources.at(key).text : std::string();
             r["ACTION_ORIENTATION"] = "ROW";
             r["ACTION_TIMING"] = timing;
             r["ACTION_REFERENCE_OLD_TABLE"] = EXECUTOR_NULL_VALUE;
             r["ACTION_REFERENCE_NEW_TABLE"] = EXECUTOR_NULL_VALUE;
             r["ACTION_REFERENCE_OLD_ROW"] = "OLD";
             r["ACTION_REFERENCE_NEW_ROW"] = "NEW";
-            r["CREATED"] = EXECUTOR_NULL_VALUE;
+            const auto kept = s.routine_sources.find(key);
+            r["CREATED"] = kept != s.routine_sources.end() && !kept->second.created.empty() ? kept->second.created : std::string(EXECUTOR_NULL_VALUE);
             r["SQL_MODE"] = kDefaultSqlMode;
-            r["DEFINER"] = "root@localhost";
+            r["DEFINER"] = kept != s.routine_sources.end() && !kept->second.definer.empty() ? plain_account(kept->second.definer) : std::string("root@localhost");
             r["CHARACTER_SET_CLIENT"] = "utf8mb4";
             r["COLLATION_CONNECTION"] = "utf8mb4_0900_ai_ci";
             r["DATABASE_COLLATION"] = "utf8mb4_0900_ai_ci";

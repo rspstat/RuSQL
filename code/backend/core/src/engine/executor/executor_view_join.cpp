@@ -25,43 +25,6 @@ const ColumnDef* column_named(const TableSchema& schema, const std::string& name
     return nullptr;
 }
 
-// Whether a condition / an expression names a column of the view that is an expression (nothing of a table below it to be read as: it would come out NULL)
-bool names_expression_column(const CondExpr& e, const ViewColumnMap& map);
-
-bool names_expression_column(const ArithExpr& e, const ViewColumnMap& map) {
-    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
-        if (col->outer != 0) return false;
-        const auto* entry = view_column_entry(map, col->name);
-        return entry && entry->second.empty();
-    }
-    if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) return names_expression_column(*v->lhs, map) || names_expression_column(*v->rhs, map);
-    if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
-        return std::any_of(f->args.begin(), f->args.end(), [&](const ArithExpr& a) { return names_expression_column(a, map); });
-    }
-    if (auto* p = std::get_if<ArithExpr::Pred>(&e.data)) return names_expression_column(*p->cond, map);
-    return false;
-}
-
-bool names_expression_column(const CondExpr& e, const ViewColumnMap& map) {
-    if (auto* a = std::get_if<CondExpr::And>(&e.data)) return names_expression_column(*a->lhs, map) || names_expression_column(*a->rhs, map);
-    if (auto* o = std::get_if<CondExpr::Or>(&e.data)) return names_expression_column(*o->lhs, map) || names_expression_column(*o->rhs, map);
-    if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return names_expression_column(*n->inner, map);
-    if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
-        if (names_expression_column(leaf->condition.left, map)) return true;
-        if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return names_expression_column(value->expr, map);
-        if (auto* literal = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) {
-            if (literal->quoted || literal->outer != 0) return false;
-            const auto* entry = view_column_entry(map, literal->value);
-            return entry && entry->second.empty();
-        }
-    }
-    return false;
-}
-
 std::string not_supported(const char* what) {
     return std::string("Writing through a join view ") + what + " is not supported in this version";
 }

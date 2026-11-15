@@ -108,10 +108,12 @@ StringResult Executor::exec_update(SharedDatabase& s, std::string table, std::ve
             const auto* entry = view_column_entry(target->columns, column);
             if (!entry) return StringResult::Err("Unknown column '" + column + "' in 'field list'");
             if (entry->second.empty()) return StringResult::Err("ERROR 1348 (HY000): Column '" + column + "' is not updatable");
+            if (names_expression_column(expr, target->columns)) return StringResult::Err("Writing through a view with a column that is an expression read in the new value is not supported in this version");
             column = entry->second;
             if (!plain) rename_arith_columns(expr, target->columns);
         }
         std::optional<CondExpr> asked = condition;
+        if (asked && names_expression_column(*asked, target->columns)) return StringResult::Err("Writing through a view with a column that is an expression read in the WHERE is not supported in this version");
         if (!plain && asked) rename_cond_columns(*asked, target->columns);
         auto merged_cond = merge_conditions(target->condition, asked);
         // WITH CHECK OPTION: a row that would leave the view is refused, before anything is written

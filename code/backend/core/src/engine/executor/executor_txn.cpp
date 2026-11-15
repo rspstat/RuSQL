@@ -36,6 +36,7 @@ StringResult Executor::exec_begin(SharedDatabase& s, bool consistent_snapshot) {
     if (res.is_err()) return StringResult::Err(res.error());
     std::uint64_t txn_id = res.value();
     s.active_txn_ids->lock()->insert(txn_id);
+    register_snapshot_floor(s); // (START TRANSACTION WITH CONSISTENT SNAPSHOT has its snapshot already; the others take it at the first read)
     return StringResult::Ok("Transaction " + std::to_string(txn_id) + " started. (isolation: " + isolation_level_debug(txn.isolation_level()) +
                              ")");
 }
@@ -150,6 +151,7 @@ StringResult Executor::exec_commit(SharedDatabase& s) {
     if (auto res = txn.commit(); res.is_err()) return StringResult::Err(res.error());
     s.lock_mgr.release(txn_id);
     s.active_txn_ids->lock()->erase(txn_id);
+    s.snapshot_floors->lock()->erase(txn_id);
     // Stage 4: per touched table, not a single global call -- COMMIT's own lock set
     // (see Executor::execute()) already covers exactly these tables.
     for (auto& table : dirty_tables) maybe_auto_vacuum(s, table);
@@ -250,6 +252,7 @@ StringResult Executor::execute_commit_grouped() {
     // pruned via commit_finalize()) -- is it safe for a concurrent reader/checkpoint to
     // treat this txn as fully done. Still holding table_locks EXCLUSIVE here (see above).
     active_txn_ids->lock()->erase(txn_id);
+    guard.structural->snapshot_floors->lock()->erase(txn_id);
     for (auto& table : dirty_tables) maybe_auto_vacuum(const_cast<SharedDatabase&>(*guard.structural), table);
 
     return StringResult::Ok("Transaction committed.");
@@ -264,6 +267,7 @@ void Executor::apply_rollback(SharedDatabase& s) {
     (void)txn.abort();
     s.lock_mgr.release(txn_id);
     s.active_txn_ids->lock()->erase(txn_id);
+    s.snapshot_floors->lock()->erase(txn_id);
 
     // MVCC Stage 2: writes now live directly in s.tables, tagged with this transaction's
     // id -- undoing them is a single filtered pass per touched table instead of a JSON

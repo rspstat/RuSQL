@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include "engine/executor/executor.hpp"
+#include "engine/routine_privilege.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
 
@@ -224,7 +225,11 @@ struct Who {
     // any privilege that lets the account into the database (table empty) or the table; `with_columns` false: a privilege on a column does not count
     bool any_access(const std::string& db, const std::string& table, bool with_columns = true) const {
         for (const GrantRecord* g : held) {
-            if (routine_grant(*g)) continue;
+            if (routine_grant(*g)) {
+                // (a privilege on one routine of the database lets the account into the database: it may USE it, as in MySQL; it does not see a table of it)
+                if (table.empty() && lower(g->object).rfind(db + ".", 0) == 0) return true;
+                continue;
+            }
             const Object o = object_of(*g, current_db);
             if (o.level == kGlobal) {
                 for (const std::string& p : privileges_of(*g, kGlobal)) {
@@ -1069,6 +1074,14 @@ void set_password(UserRecord& u, const std::string& password) {
 // Who the session is, and what it may do
 // ---------------------------------------------------------------------------
 
+bool routine_text_shown(Executor& ex, const SharedDatabase& s, const std::string& kind, const std::string& name) {
+    if (!ex.privileges_apply(s)) return true;
+    if (ex.holds_global(s, "SHOW_ROUTINE") || ex.holds_global(s, "SELECT")) return true;
+    // (the account that made it: its definer)
+    auto kept = s.routine_sources.find(kind + ":" + lower(name));
+    return kept != s.routine_sources.end() && kept->second.definer == "`" + ex.auth_user + "`@`" + ex.account_host(s) + "`";
+}
+
 bool Executor::privileges_apply(const SharedDatabase& s) const { return auth_user != "root" && login_account(s, auth_user) != nullptr; }
 
 std::string Executor::account_host(const SharedDatabase& s) const {
@@ -1103,6 +1116,26 @@ std::optional<std::string> Executor::check_privileges(const SharedDatabase& s, c
     if (!privileges_apply(s)) return std::nullopt;
     Who who(s, auth_user, account_host(s), current_db, active_roles_);
     return Checker(who, s).run(stmt);
+}
+
+// SHOW CREATE PROCEDURE / FUNCTION, information_schema.routines and SHOW ... STATUS (R84): MySQL shows an account the routines that it may run (EXECUTE), change (ALTER
+// ROUTINE) or make (CREATE ROUTINE), at the routine, its database or everywhere, and every one to an account that holds SHOW_ROUTINE or SELECT on everything. The text of the
+// routine is another right (routine_text_shown): the rest see NULL in its place.
+std::optional<std::string> Executor::check_show_routine(const SharedDatabase& s, const std::string& database, const std::string& name) {
+    if (!privileges_apply(s)) return std::nullopt;
+    Who who(s, auth_user, account_host(s), current_db, active_roles_);
+    const std::string db = lower(database), routine = lower(name);
+    for (const char* priv : {"EXECUTE", "ALTER ROUTINE", "CREATE ROUTINE"}) {
+        if (who.routine_allowed(priv, db, routine)) return std::nullopt;
+    }
+    if (who.global("SHOW_ROUTINE") || who.global("SELECT")) return std::nullopt;
+    // (the account that made it sees it, whatever else it holds)
+    const std::string me = "`" + auth_user + "`@`" + account_host(s) + "`";
+    for (const char* kind : {"procedure:", "function:"}) {
+        auto kept = s.routine_sources.find(kind + routine);
+        if (kept != s.routine_sources.end() && kept->second.definer == me) return std::nullopt;
+    }
+    return routine_denied(who, "execute", db, name);
 }
 
 std::optional<std::string> Executor::check_table_maintenance(const SharedDatabase& s, const std::string& table, bool write) {
