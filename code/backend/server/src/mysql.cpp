@@ -1393,6 +1393,15 @@ std::optional<StringResult> mysql_compat(const std::string& q, Executor& exec) {
                                 "FROM information_schema.engines");
     }
 
+    // SHOW DATABASES | SCHEMAS LIKE 'pattern' | WHERE condition (R89): the schemas this session may see, filtered; a plain SHOW DATABASES is the engine's
+    for (const char* head : {"SHOW DATABASES", "SHOW SCHEMAS"}) {
+        const std::string name = head;
+        if (up.rfind(name, 0) != 0 || (up.size() > name.size() && up[name.size()] != ' ')) continue;
+        const std::string tail = trim_copy(q.substr(name.size()));
+        if (tail.empty() && name == "SHOW DATABASES") break;
+        if (auto query = exec.show_databases_query(tail)) return exec_inner(exec, *query);
+        break;
+    }
     if (up.rfind("SHOW PLUGINS", 0) == 0) return StringResult::Ok(box_table({"Name", "Status", "Type", "Library", "License"}, {}));
     if (up.rfind("SHOW WARNINGS", 0) == 0) return StringResult::Ok(box_table({"Level", "Code", "Message"}, {}));
     if (up.rfind("SHOW EVENTS", 0) == 0)

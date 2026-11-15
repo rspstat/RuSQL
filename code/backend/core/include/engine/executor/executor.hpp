@@ -333,6 +333,7 @@ public:
     };
     std::int64_t row_count_ = -1;            // the rows the last statement changed (-1: it was a SELECT)
     std::uint64_t found_rows_ = 0;           // the rows the last SELECT returned (or would have without its LIMIT, after SQL_CALC_FOUND_ROWS)
+    std::int64_t proc_row_count_ = 0;        // what ROW_COUNT() says after the last statement of a procedure body that sets it: the CALL answers with it (R89)
     std::int64_t affected_rows_ = -1;        // the rows the last statement affected when its message does not say it (ON DUPLICATE KEY UPDATE, REPLACE); -1: the message's number
     std::int64_t matched_rows_ = -1;         // the rows the last UPDATE found (its message counts the rows it changed); -1: not an UPDATE
     std::size_t replace_deleted_rows_ = 0;   // the rows the REPLACE that is running deleted before its inserts
@@ -361,6 +362,8 @@ public:
     // SHOW CREATE DATABASE | SCHEMA | PROCEDURE | FUNCTION | TRIGGER, SHOW TRIGGERS and SHOW PROCEDURE | FUNCTION STATUS in the native protocol (the app, the CLI, MCP): the
     // CREATE text itself as SHOW CREATE TABLE gives it, the table for the others. nullopt: not one of them (the parser reads the statement).
     std::optional<StringResult> show_routine_native(const std::string& sql_text);
+    // SHOW DATABASES | SCHEMAS [LIKE 'pattern' | WHERE condition]: the SELECT that answers it over the schemas this session may see; `tail` is what follows the name (R89)
+    std::optional<std::string> show_databases_query(const std::string& tail) const;
     bool implicit_txn_ = false;              // the transaction that is open was begun by a statement of a session with autocommit = 0
     // The transaction characteristics of the session (SET [SESSION] TRANSACTION ..., SET transaction_isolation = ..., SET transaction_read_only = ...). A change made while a
     // transaction is open is for the next one (the engine's level follows session_isolation_ when none is open); SET TRANSACTION (no SESSION) is for the next one only.
@@ -1454,6 +1457,10 @@ private:
     StringResult exec_revoke(SharedDatabase& s, const Statement::Revoke& st);
     StringResult exec_show_grants(const SharedDatabase& s, const Statement::ShowGrants& st) const;
     StringResult exec_show_databases(const SharedDatabase& s) const;
+    std::vector<std::string> visible_databases(const SharedDatabase& s) const; // the schemas this session may see, by name (SHOW DATABASES, R89)
+    // a CHECK condition the way MySQL writes it (`(`qty` >= 0)`, `((`a` > 0) and (`b` < 5))`, lower case words, back-quoted columns as the table spells them); nullopt for one
+    // this does not know how to write (it is then shown as it was typed). `information_schema`: the quotes and backslashes are escaped once more, as CHECK_CLAUSE has them (R89)
+    static std::optional<std::string> check_clause_text(const std::string& raw, const TableSchema& schema, bool information_schema);
     StringResult exec_create_role(SharedDatabase& s, const Statement::CreateRole& st);
     StringResult exec_drop_role(SharedDatabase& s, const Statement::DropRole& st);
     StringResult exec_grant_role(SharedDatabase& s, const Statement::GrantRole& st);

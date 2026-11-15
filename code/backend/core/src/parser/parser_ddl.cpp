@@ -305,35 +305,24 @@ std::string Parser::read_parenthesized_expr() {
     for (;;) {
         const Token* t = advance();
         if (!t) throw ParseError("Unexpected end in expression");
-        switch (t->kind) {
-            case TokenKind::LParen: depth++; parts.push_back("("); break;
-            case TokenKind::RParen:
-                depth--;
-                if (depth == 0) goto done;
-                parts.push_back(")");
-                break;
-            case TokenKind::Ident: parts.push_back(t->text); break;
-            case TokenKind::StringLit: parts.push_back("'" + t->text + "'"); break;
-            case TokenKind::NumberLit: parts.push_back(t->text); break;
-            case TokenKind::And: parts.push_back("AND"); break;
-            case TokenKind::Or: parts.push_back("OR"); break;
-            case TokenKind::Not: parts.push_back("NOT"); break;
-            case TokenKind::Eq: parts.push_back("="); break;
-            case TokenKind::Ne: parts.push_back("!="); break;
-            case TokenKind::Gt: parts.push_back(">"); break;
-            case TokenKind::Lt: parts.push_back("<"); break;
-            case TokenKind::Gte: parts.push_back(">="); break;
-            case TokenKind::Lte: parts.push_back("<="); break;
-            case TokenKind::Null: parts.push_back("NULL"); break;
-            case TokenKind::Is: parts.push_back("IS"); break;
-            case TokenKind::In: parts.push_back("IN"); break;
-            case TokenKind::Between: parts.push_back("BETWEEN"); break;
-            case TokenKind::Like: parts.push_back("LIKE"); break;
-            case TokenKind::Comma: parts.push_back(","); break;
-            default: parts.push_back(token_debug(*t)); break;
+        if (t->kind == TokenKind::LParen) {
+            depth++;
+        } else if (t->kind == TokenKind::RParen) {
+            depth--;
+            if (depth == 0) break;
+        }
+        // Each token as it was typed. (The condition used to be put back together from a table of the tokens it knew; the others -- `*`, `+`, `%`, a function, REGEXP -- came out as
+        // the word "Token", and a table with such a CHECK refused every row: "FUNCTION token does not exist", R89.)
+        if (t->end > t->begin && t->end <= source_.size()) {
+            parts.push_back(source_.substr(t->begin, t->end - t->begin));
+        } else if (t->kind == TokenKind::Ident || t->kind == TokenKind::NumberLit) {
+            parts.push_back(t->text);
+        } else if (t->kind == TokenKind::StringLit) {
+            parts.push_back("'" + t->text + "'");
+        } else {
+            parts.push_back(token_debug(*t));
         }
     }
-done:
     std::string out;
     for (std::size_t i = 0; i < parts.size(); i++) {
         if (i) out.push_back(' ');
@@ -1132,30 +1121,7 @@ Statement Parser::parse_alter_action(const std::string& table) {
             }
             if (kind && kind->kind == TokenKind::Check) {
                 if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after CHECK");
-                advance();
-                int depth = 1;
-                std::string expr;
-                auto app = [&](const std::string& piece) {
-                    if (!expr.empty()) expr.push_back(' ');
-                    expr += piece;
-                };
-                for (;;) {
-                    const Token* tk = advance();
-                    if (!tk) break;
-                    if (tk->kind == TokenKind::LParen) { depth++; if (!expr.empty()) expr.push_back(' '); expr.push_back('('); }
-                    else if (tk->kind == TokenKind::RParen) { depth--; if (depth == 0) break; if (!expr.empty()) expr.push_back(' '); expr.push_back(')'); }
-                    else if (tk->kind == TokenKind::Ident) app(tk->text);
-                    else if (tk->kind == TokenKind::NumberLit) app(tk->text);
-                    else if (tk->kind == TokenKind::StringLit) app("'" + tk->text + "'");
-                    else if (tk->kind == TokenKind::Gt) app(">");
-                    else if (tk->kind == TokenKind::Lt) app("<");
-                    else if (tk->kind == TokenKind::Gte) app(">=");
-                    else if (tk->kind == TokenKind::Lte) app("<=");
-                    else if (tk->kind == TokenKind::Eq) app("=");
-                    else if (tk->kind == TokenKind::Ne) app("!=");
-                    else if (tk->kind == TokenKind::And) app("AND");
-                    else if (tk->kind == TokenKind::Or) app("OR");
-                }
+                std::string expr = read_parenthesized_expr(); // (every token as it was typed: this loop knew a few of them and left the rest out, `qty / 2 < 10` was `qty 2 < 10`, R89)
                 return Statement(Statement::AlterTable{table, AlterAction(AlterAction::AddCheckConstraint{constraint_name, expr})});
             }
             throw ParseError("Expected FOREIGN, UNIQUE, or CHECK after CONSTRAINT");

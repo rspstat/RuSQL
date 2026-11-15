@@ -1553,7 +1553,7 @@ void Executor::note_statement_outcome(const std::string& sql, const StringResult
         row_count_ = -1;
     } else if (word == "INSERT" || word == "REPLACE" || word == "UPDATE" || word == "DELETE" || word == "MERGE") {
         row_count_ = static_cast<std::int64_t>(statement_affected_rows(result.value()));
-    } else if ((word == "CREATE" || word == "DROP" || word == "ALTER") && affected_rows_ >= 0) {
+    } else if ((word == "CREATE" || word == "DROP" || word == "ALTER" || word == "CALL") && affected_rows_ >= 0) {
         row_count_ = affected_rows_; // (CREATE TABLE ... SELECT: the rows it copied; CREATE DATABASE: 1; DROP DATABASE: the tables and views it took away; ALTER TABLE that copies the table: its rows)
     } else {
         row_count_ = 0;

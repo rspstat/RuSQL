@@ -18,7 +18,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - DROP SCHEMA db : DROP DATABASE와 같음
 - USE db : 사용할 데이터베이스 선택
 - USE DATABASE db : USE와 같음
-- SHOW DATABASES : 데이터베이스 목록 조회(R86: 빈 시스템 스키마 `mysql`은 MySQL 프로토콜 세션(`mysql` 클라이언트 · `mysqldump` · DBeaver)에만 보이고, 앱 · CLI · MCP의 네이티브 프로토콜에는 안 보임; `information_schema.schemata`도 같음. 세션은 `mysql`에서 시작하지 않음)
+- SHOW DATABASES : 데이터베이스 목록 조회(R86: 빈 시스템 스키마 `mysql`은 MySQL 프로토콜 세션(`mysql` 클라이언트 · `mysqldump` · DBeaver)에만 보이고, 앱 · CLI · MCP의 네이티브 프로토콜에는 안 보임; `information_schema.schemata`도 같음. 세션은 `mysql`에서 시작하지 않음; R89: **`SHOW DATABASES | SCHEMAS LIKE '패턴'`과 `WHERE 조건`도 됨** — 계정이 볼 수 있는 스키마만 이름순으로, 열 이름은 LIKE이면 `Database (패턴)`, WHERE이면 `Database`; `SHOW SCHEMAS`도 됨; 문자열 하나가 아닌 LIKE · 거기에 WHERE를 더한 것 · `FROM`은 문법 오류)
 
 ## 2. 테이블 정의 — CREATE TABLE
 
@@ -40,7 +40,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ON UPDATE CURRENT_TIMESTAMP[(n)] : 수정할 때 시각을 자동 갱신
 - AUTO_INCREMENT : 자동 증가 번호
 - UNIQUE : 중복 불가
-- CHECK (조건) [[NOT] ENFORCED] : 값 검사 조건. 열의 타입으로 비교한다 — 글자 열과 글자는 글자끼리(`'9' > '10'`), 한쪽이 숫자면 숫자로(`'007' = 7`), 숫자로 완전히 읽히지 않는 글자(`'abc'`)를 숫자와 비교하면 위반(3819; R79)
+- CHECK (조건) [[NOT] ENFORCED] : 값 검사 조건(R89: 조건에 `*` · `/` · `%` · `+` · `-` · 함수 · `REGEXP`가 있어도 **쓴 글자 그대로** 저장돼 지켜짐 — 전에는 모르는 낱말이 `Token`이라는 글자로 바뀌어 저장돼, 그런 `CHECK`가 든 표는 모든 행이 "FUNCTION token does not exist"로 거절됐음; `SHOW CREATE TABLE` · `information_schema.check_constraints.CHECK_CLAUSE`는 MySQL이 쓰는 꼴 — 열은 쓴 대로 백틱, 비교와 `AND`/`OR`마다 괄호(같은 `AND`/`OR`의 사슬은 한 쌍), 낱말은 소문자, 글자는 `_utf8mb4'…'`, `NOT`은 비교 안으로, 함수는 MySQL 이름, `CASE`, `regexp_like`; 파서가 안 남기는 모양(`-열` · `1e3` · `TRUE` · 큰따옴표 글자 · `IN (열)` · `BETWEEN 열 AND 5`)은 쓴 대로 보임). 열의 타입으로 비교한다 — 글자 열과 글자는 글자끼리(`'9' > '10'`), 한쪽이 숫자면 숫자로(`'007' = 7`), 숫자로 완전히 읽히지 않는 글자(`'abc'`)를 숫자와 비교하면 위반(3819; R79)
 - REFERENCES t(col) [ON DELETE 동작] [ON UPDATE 동작] : 컬럼에 바로 붙이는 외래 키
 - COMMENT '설명' : 열 설명 — 표에 남고(`SHOW CREATE TABLE`, `information_schema.columns.COLUMN_COMMENT`, `SHOW FULL COLUMNS`, `BACKUP`, 재시작 뒤에도) `ALTER TABLE ... ADD COLUMN | MODIFY | CHANGE`에도 쓸 수 있다(`MODIFY`에 `COMMENT`가 없으면 설명이 지워짐, MySQL과 같음; R82 — 전에는 받고 버렸다)
 - CHARACTER SET x / CHARSET x / COLLATE x : 문자 집합 · 정렬 규칙 표기(utf8mb4 계열 · `_ci`만 받음)
@@ -68,7 +68,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ALTER TABLE t ALTER [COLUMN] col DROP DEFAULT : 기본값 제거
 - ALTER TABLE t ADD [UNIQUE] INDEX | KEY [이름] (cols) : 인덱스 추가
 - ALTER TABLE t ADD CONSTRAINT [이름] UNIQUE (cols) : 유일 제약 추가
-- ALTER TABLE t ADD CONSTRAINT [이름] CHECK (조건) : 검사 제약 추가(표에 있는 행이 이미 어기면 거절 — MySQL 3819)
+- ALTER TABLE t ADD CONSTRAINT [이름] CHECK (조건) : 검사 제약 추가(표에 있는 행이 이미 어기면 거절 — MySQL 3819; R89: 조건을 쓴 그대로 저장 — 전에는 `/` 같은 낱말이 빠져 `qty / 2 < 10`이 `qty 2 < 10`이 됐음)
 - ALTER TABLE t ADD [CONSTRAINT 이름] FOREIGN KEY (col) REFERENCES t2(col) [ON DELETE ..] [ON UPDATE ..] : 외래 키 추가(이름을 안 주면 가장 큰 `<표>_ibfk_n`보다 하나 큰 번호; 부모가 없는 행이 이미 있으면 거절 — MySQL 1452 — 단 `SET FOREIGN_KEY_CHECKS = 0`이면 건너뜀)
 - ALTER TABLE t DROP INDEX | KEY 이름 : 인덱스 삭제
 - ALTER TABLE t DROP CONSTRAINT 이름 : 제약 삭제
@@ -464,7 +464,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 - information_schema.tables / columns / statistics : 테이블 · 컬럼 · 인덱스 정보(R85: `tables.CREATE_TIME`은 표 · 뷰를 만든 시각 — R85 전에 만든 표 · 뷰는 NULL, `UPDATE_TIME`은 NULL; R86: `ALTER TABLE`(이름 바꾸기만 하는 것은 빼고) · `CREATE INDEX` · `DROP INDEX` · `OPTIMIZE TABLE`이 끝나면 표의 시각이 그때로 바뀜(MySQL이 표를 다시 만들기 때문), `RENAME` · `TRUNCATE` · `ANALYZE` · 쓰기 · 실패한 문장은 안 바꿈; R60: `columns`는 뷰의 열도 냄 — 그대로 가져온 열은 그 열의 타입, 계산한 열은 TEXT; `tables`의 `AVG_ROW_LENGTH`·`DATA_LENGTH`·`INDEX_LENGTH`는 InnoDB가 세는 16 KB 쪽 수를 행에서 추정한 값이라 작은 표는 MySQL과 같고 큰 표는 몇 % 어긋남)
 - information_schema.schemata (schemas) : 데이터베이스 목록
 - information_schema.key_column_usage / table_constraints / referential_constraints : 키 · 제약 · 외래 키 정보(R83: `UNIQUE` 키의 열도 — 두 열짜리 포함 — 나옴)
-- information_schema.check_constraints : `CHECK` 제약(이름 · 조건; 이름이 없으면 `표_chk_번호`; R83)
+- information_schema.check_constraints : `CHECK` 제약(이름 · 조건; 이름이 없으면 `표_chk_번호`; R83; R89: `CHECK_CLAUSE`가 MySQL이 쓰는 꼴 — 위 `CHECK` 줄)
 - information_schema.views : 뷰 정보(R83: `VIEW_DEFINITION`은 쓴 SELECT, `CHECK_OPTION`; R84: `IS_UPDATABLE`을 MySQL처럼 — 한 표의 행이거나 바깥 조인이 없는 조인 뷰면 `YES`, 바깥 조인 · `DISTINCT` · `GROUP BY` · 집계 · `UNION` · 윈도 · `LIMIT`이 든 뷰는 `NO`, select 목록에 서브쿼리만 든 뷰는 쓰기는 못 받는데도 `YES`(MySQL이 그렇다); R85: **`DEFINER` · `SECURITY_TYPE`은 뷰를 만들 때 쓴 값**(안 쓰면 `root@localhost` · `DEFINER`), `ALGORITHM = TEMPTABLE` 뷰와 그 위의 뷰는 `NO`, **파생 표(`FROM (SELECT …) d`) 위의 뷰는 안쪽이 무엇이든 `YES`**(쓰기는 1288 · 1471)로 거절)
 - information_schema.routines / parameters / triggers : 저장 프로시저 · 함수 · 매개변수 · 트리거(R83: 만들 때 쓴 글자에서 본문 · 특성 · 설명을 읽음; R84: `CREATED` · `LAST_ALTERED`는 만든 시각(루틴은 초까지, 트리거는 100분의 1초까지), `DEFINER`는 `CREATE DEFINER=…`로 쓴 계정, 안 쓰면 만든 세션의 계정; 함수 이름은 쓴 그대로; **계정은 실행 · 변경 · 생성할 수 있는 루틴(트리거는 표의 `TRIGGER` 권한이 있는 것)만 봄, `ROUTINE_DEFINITION`은 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정만**; R83 전에 만든 루틴은 모든 데이터베이스에 나타나고 만든 시각은 NULL, `DEFINER`는 `root@localhost`)
 - information_schema.files / column_statistics : 비어 있는 표(`mysqldump`가 먼저 묻는 것; R83)
@@ -507,7 +507,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 ## 13. 저장 프로시저 · 함수 · 트리거
 
 - CREATE PROCEDURE 이름([IN | OUT | INOUT] 매개변수 타입, ...) BEGIN ... END : 저장 프로시저 생성(한 문장 본문도 가능; `DEFINER = x`, `DETERMINISTIC`, `COMMENT`, `SQL SECURITY` 표기 가능)
-- CALL 이름([인수, ...]) : 프로시저 실행(식 · @변수 인수, OUT/INOUT은 @변수로 돌려받음)
+- CALL 이름([인수, ...]) : 프로시저 실행(식 · @변수 인수, OUT/INOUT은 @변수로 돌려받음; R89: OK 패킷과 `ROW_COUNT()`는 본문에서 행 수를 정하는 **마지막 문장의 행 수** — 쓰기는 바뀐 행, `SELECT … INTO`는 1, `SET @x` · DDL · 결과 표를 내는 `SELECT`는 0, 지역 변수 `SET` · `DECLARE` · `IF`/`WHILE`은 그대로)
 - DROP PROCEDURE [IF EXISTS] 이름 : 프로시저 삭제
 - CREATE FUNCTION 이름(매개변수 타입, ...) RETURNS 타입 [DETERMINISTIC] RETURN 식 : 사용자 정의 함수 생성
 - DROP FUNCTION [IF EXISTS] 이름 : 함수 삭제
@@ -574,7 +574,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
 - **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : 프로시저 · 함수 수준의 `GRANT EXECUTE`는 받지만 `SHOW GRANTS`의 모양만 같고 MySQL의 모든 경우를 다 따라가지는 않음, `FLUSH PRIVILEGES`(필요 없음: 권한은 문장마다 바로 반영됨), 비밀번호 정책 · 계정 잠금 · 만료
-- **조회 · 관리** : `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW DATABASES LIKE`, `SHOW OPEN TABLES`, `SHOW DATABASES LIKE`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
+- **조회 · 관리** : `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW OPEN TABLES`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
 - **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
 
 > 이 문서는 RuSQL 엔진이 받아들이는 문법을 실제로 실행해 확인한 목록입니다. 새 문법을 넣거나 빼면 이 문서도 같이 고칩니다.

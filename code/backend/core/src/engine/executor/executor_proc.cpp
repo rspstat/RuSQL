@@ -86,9 +86,28 @@ StringResult Executor::exec_proc_stmts(SharedDatabase& s, std::vector<Statement>
         // a query of the body only reads: KILL QUERY may stop it (the statement that is run is CALL, and the reads of a CALL are not asked for)
         std::optional<deadline::ReadPhase> reads;
         if (is_query || std::holds_alternative<Statement::SelectInto>(stmt.data)) reads.emplace();
+        // ROW_COUNT() after the statement (what the CALL answers with is the last one that sets it): a write, the rows it changed; SELECT ... INTO, the one row it read; the
+        // others set 0 (SET @x, DDL, a query that gives a result table) -- except what only steers the body (DECLARE, a SET of a local variable, IF / WHILE / LOOP / REPEAT,
+        // LEAVE, ITERATE, a CALL: the rows of the last statement inside it) (R89)
+        enum class RowCount { Keep, Zero, One, Written } row_count = RowCount::Zero;
+        if (std::holds_alternative<Statement::ProcDeclare>(stmt.data) || std::holds_alternative<Statement::ProcSet>(stmt.data) || std::holds_alternative<Statement::ProcIf>(stmt.data) ||
+            std::holds_alternative<Statement::ProcWhile>(stmt.data) || std::holds_alternative<Statement::ProcLoop>(stmt.data) || std::holds_alternative<Statement::ProcRepeat>(stmt.data) ||
+            std::holds_alternative<Statement::ProcLeave>(stmt.data) || std::holds_alternative<Statement::ProcIterate>(stmt.data) || std::holds_alternative<Statement::CallProcedure>(stmt.data)) {
+            row_count = RowCount::Keep;
+        } else if (std::holds_alternative<Statement::Insert>(stmt.data) || std::holds_alternative<Statement::InsertSelect>(stmt.data) || std::holds_alternative<Statement::Update>(stmt.data) ||
+                   std::holds_alternative<Statement::Delete>(stmt.data) || std::holds_alternative<Statement::MultiUpdate>(stmt.data) || std::holds_alternative<Statement::MultiDelete>(stmt.data) ||
+                   std::holds_alternative<Statement::Merge>(stmt.data)) {
+            row_count = RowCount::Written;
+            affected_rows_ = matched_rows_ = -1; // (the statement says its own count)
+        } else if (std::holds_alternative<Statement::SelectInto>(stmt.data)) {
+            row_count = RowCount::One;
+        }
         auto res = execute_with_s(s, std::move(stmt));
         reads.reset();
         if (res.is_err()) return res;
+        if (row_count == RowCount::Written) proc_row_count_ = static_cast<std::int64_t>(statement_affected_rows(res.value()));
+        else if (row_count == RowCount::One) proc_row_count_ = 1;
+        else if (row_count == RowCount::Zero) proc_row_count_ = 0;
         if (query_shape && res.value().rfind("0 rows returned", 0) == 0) {
             const std::vector<std::string> names = result_column_names_in(s, std::move(*query_shape));
             if (!names.empty()) res = StringResult::Ok(result_text::empty_table(names));
@@ -258,6 +277,7 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
 
     // On an error the caller's variables come back too: the Rust original's `?` left the callee's in place, where a later statement read them in place of
     // the columns of the same names (after a failed CALL p(12.5), `SELECT a FROM t` was 12.50 for every row)
+    proc_row_count_ = 0;
     auto res = exec_proc_stmts(s, std::move(body));
     if (res.is_err()) {
         proc_vars = std::move(saved_vars);
@@ -278,6 +298,8 @@ StringResult Executor::exec_call_procedure(SharedDatabase& s, std::string name, 
     proc_signal_.reset(); // clear any signal that escaped the body
 
     std::string last = res.value();
+    affected_rows_ = proc_row_count_; // (the OK packet and ROW_COUNT() of the CALL: the rows of the last statement of the body that sets them, R89)
+    matched_rows_ = -1;
     return StringResult::Ok(last.empty() ? "Procedure '" + name + "' executed." : last);
 }
 

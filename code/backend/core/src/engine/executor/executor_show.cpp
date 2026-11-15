@@ -272,7 +272,8 @@ StringResult Executor::show_create_table_mysql(const std::string& name) {
         }
     }
     for (auto& [check_name, check_text] : check_constraints_of(*schema, bare)) { // (the checks of the columns too, in the order of their names)
-        lines.push_back("  CONSTRAINT `" + check_name + "` CHECK ((" + check_text + "))");
+        const auto written = check_clause_text(check_text, *schema, false); // (the condition the way MySQL writes it, else as it was typed)
+        lines.push_back("  CONSTRAINT `" + check_name + "` CHECK (" + (written ? *written : "(" + check_text + ")") + ")");
     }
     std::string ddl = "CREATE TABLE `" + bare + "` (\n";
     for (std::size_t i = 0; i < lines.size(); i++) ddl += lines[i] + (i + 1 < lines.size() ? ",\n" : "\n");
@@ -518,6 +519,13 @@ std::optional<StringResult> Executor::show_routine_native(const std::string& sql
             if (!in.name(unused, database) || !unused.empty()) return std::nullopt;
         }
         return execute_sql_inner(show_sql::filtered(show_sql::triggers_select(database), in.rest(), "Table"));
+    }
+    const bool databases = in.word("DATABASES");
+    if (databases || in.word("SCHEMAS")) { // SHOW DATABASES | SCHEMAS LIKE | WHERE (a plain SHOW DATABASES is the parser's), R89
+        const std::string tail = in.rest();
+        if (tail.empty() && databases) return std::nullopt;
+        if (auto query = show_databases_query(tail)) return execute_sql_inner(*query);
+        return std::nullopt;
     }
     const bool procedure = in.word("PROCEDURE");
     const bool function = !procedure && in.word("FUNCTION");

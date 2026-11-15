@@ -721,6 +721,21 @@ ALTER TABLE r88_t MODIFY b VARCHAR(5);
 SELECT ROW_COUNT() AS copied_by_shorter_varchar;
 DROP TABLE r88_t;
 
+-- SHOW DATABASES LIKE | WHERE, CHECK With Arithmetic And Functions, CHECK Text, CALL Row Count (R89)
+SHOW DATABASES LIKE 'comp%';
+SHOW SCHEMAS WHERE `Database` = 'company';
+CREATE TABLE r89_ck (qty INT, price DECIMAL(10,2), name VARCHAR(20), CONSTRAINT r89_c1 CHECK (qty * 2 > 0 AND price < 100), CONSTRAINT r89_c2 CHECK (LENGTH(name) > 2 OR NOT (qty > 5)), CONSTRAINT r89_c3 CHECK (qty % 2 = 0));
+INSERT INTO r89_ck VALUES (4, 10.5, 'abcd');
+INSERT INTO r89_ck VALUES (3, 10.5, 'abcd');
+INSERT INTO r89_ck VALUES (4, 500, 'abcd');
+SELECT constraint_name, check_clause FROM information_schema.check_constraints WHERE constraint_name LIKE 'r89_c%' ORDER BY constraint_name;
+SHOW CREATE TABLE r89_ck;
+CREATE PROCEDURE r89_p() BEGIN UPDATE r89_ck SET price = price + 1; END;
+CALL r89_p();
+SELECT ROW_COUNT() AS call_rows;
+DROP PROCEDURE r89_p;
+DROP TABLE r89_ck;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

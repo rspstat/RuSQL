@@ -491,6 +491,30 @@
       "bothFail": 1
     },
     {
+      "name": "show_databases_r89",
+      "en": "SHOW DATABASES | SCHEMAS LIKE 'pattern' | WHERE condition: the schemas that match, by name, the column called `Database (pattern)` for LIKE and `Database` for WHERE; what is not that statement is a syntax error",
+      "ko": "SHOW DATABASES | SCHEMAS LIKE '패턴' | WHERE 조건: 맞는 스키마를 이름순으로, LIKE는 열 이름이 `Database (패턴)`, WHERE는 `Database`; 그 문장이 아닌 것은 문법 오류",
+      "statements": 20,
+      "different": 0,
+      "bothFail": 6
+    },
+    {
+      "name": "check_text_r89",
+      "en": "A CHECK condition the way MySQL writes it (information_schema.check_constraints, SHOW CREATE TABLE): columns back-quoted in the case typed, every comparison and AND / OR in brackets, lower case words, strings as _utf8mb4'..', a NOT pushed into the comparison, function names, CASE, regexp_like; 90 conditions",
+      "ko": "MySQL이 쓰는 CHECK 조건 글자(information_schema.check_constraints, SHOW CREATE TABLE): 열은 쓴 대로 백틱, 비교와 AND / OR마다 괄호, 소문자 낱말, 글자는 _utf8mb4'..', NOT은 비교 안으로, 함수 이름, CASE, regexp_like; 조건 90가지",
+      "statements": 180,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "call_rows_r89",
+      "en": "CALL: the OK packet and ROW_COUNT() are the rows of the last statement of the body that sets a row count (a write: its rows; SELECT ... INTO: 1; SET @x, DDL, a result set: 0; a local SET, DECLARE, IF / WHILE: unchanged)",
+      "ko": "CALL: OK 패킷과 ROW_COUNT()는 본문에서 행 수를 정하는 마지막 문장의 행 수(쓰기: 그 행 수, SELECT ... INTO: 1, SET @x · DDL · 결과 표: 0, 지역 SET · DECLARE · IF / WHILE: 그대로)",
+      "statements": 30,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -541,8 +565,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1024,
-    "assertions": 1525377
+    "cases": 1030,
+    "assertions": 1525668
   },
   "bugsFound": 206
 }

@@ -346,7 +346,7 @@ TEST_CASE("every statement in test/test_full.sql parses without error", "[parser
         const std::size_t from = upper.find_first_not_of(" \t\r\n");
         upper = from == std::string::npos ? std::string() : upper.substr(from);
         for (const char* prefix : {"SHOW CREATE PROCEDURE ", "SHOW CREATE FUNCTION ", "SHOW CREATE TRIGGER ", "SHOW CREATE DATABASE ", "SHOW CREATE SCHEMA ", "SHOW TRIGGERS",
-                                   "SHOW PROCEDURE STATUS", "SHOW FUNCTION STATUS"}) {
+                                   "SHOW PROCEDURE STATUS", "SHOW FUNCTION STATUS", "SHOW DATABASES LIKE ", "SHOW DATABASES WHERE ", "SHOW SCHEMAS"}) {
             if (upper.rfind(prefix, 0) == 0) return true;
         }
         return false;

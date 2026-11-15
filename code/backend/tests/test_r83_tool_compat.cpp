@@ -411,7 +411,7 @@ TEST_CASE("R83: information_schema tells the routines, their parameters, the tri
         CHECK(at("aa") < at("ck2_chk_1"));
         CHECK(at("ck2_chk_1") < at("ck2_chk_2"));
         CHECK(at("ck2_chk_2") < at("zz"));
-        CHECK(t.find("(q > 0)") < t.find("(id <> 5)")); // (the one on the column is the first of the unnamed)
+        CHECK(t.find("(`q` > 0)") < t.find("(`id` <> 5)")); // (the one on the column is the first of the unnamed; the conditions are written as MySQL writes them since R89)
     }
     // the CHECK constraints (the names MySQL makes count the checks that were not named) and the UNIQUE keys of several columns
     CHECK(flat(ex, "SELECT constraint_name FROM information_schema.check_constraints WHERE constraint_schema = 'v' ORDER BY constraint_name") == "aa;ck_qty;ck2_chk_1;ck2_chk_2;ckt_chk_1;ckt_chk_2;named;zz");

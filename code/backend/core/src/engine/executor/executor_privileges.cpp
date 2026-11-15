@@ -14,6 +14,7 @@
 #include "engine/routine_privilege.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
+#include "engine/show_filter.hpp"
 
 namespace engine {
 
@@ -1439,7 +1440,7 @@ StringResult Executor::exec_show_grants(const SharedDatabase& s, const Statement
     return StringResult::Ok(box({"Grants for " + user + "@" + host}, rows));
 }
 
-StringResult Executor::exec_show_databases(const SharedDatabase& s) const {
+std::vector<std::string> Executor::visible_databases(const SharedDatabase& s) const {
     std::vector<std::string> dbs;
     const bool all = !privileges_apply(s) || Who(s, auth_user, account_host(s), current_db, active_roles_).global("SHOW DATABASES");
     for (const std::string& d : s.databases) {
@@ -1447,6 +1448,20 @@ StringResult Executor::exec_show_databases(const SharedDatabase& s) const {
         if (all || may_see(s, d, "")) dbs.push_back(d);
     }
     std::sort(dbs.begin(), dbs.end());
+    return dbs;
+}
+
+std::optional<std::string> Executor::show_databases_query(const std::string& tail) const {
+    std::vector<std::string> names;
+    {
+        auto s = shared->read();
+        names = visible_databases(*s);
+    }
+    return show_sql::databases_query(names, tail);
+}
+
+StringResult Executor::exec_show_databases(const SharedDatabase& s) const {
+    const std::vector<std::string> dbs = visible_databases(s);
     if (dbs.empty()) return StringResult::Ok("No databases.");
     std::vector<std::vector<std::string>> rows;
     for (const std::string& d : dbs) rows.push_back({d});

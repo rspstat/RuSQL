@@ -3476,6 +3476,34 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
 ① `SHOW DATABASES LIKE '…'` · `WHERE`는 1064로 거절. ② 표의 `UPDATE_TIME`은 NULL. ③ 파티션 표의 `ALTER`는 열 변경 자체가 아직 거절된다(그래서 그 복사 행 수는 해당 없음). `ALTER TABLE … FORCE` · `CONVERT TO CHARACTER SET`은 RuSQL에 아직 없다(파싱 오류). ④ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ⑤ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑥ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑦ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
 
+### 11월 16일 — R89: R88의 남은 것 (`SHOW DATABASES LIKE | WHERE` · `CHECK` 글자를 MySQL이 쓰는 꼴로 · `CALL`의 행 수) + 고치다 찾은 진짜 버그 둘
+
+**왜 이 항목인가**: R88 보고의 "남은 것"에 대해 사용자가 "**R88 남은 것 진행합니다**"라고 했다(진행방식은 그대로: 개발 → 전체 시험 → `test_full.sql` → 문서 전부(개정 HWPX · 통합문서 포함) → 커밋 · 푸시 `commit`). 범위는 `RECOMMAND.md` 8번 표 "R88 남은 것"에서 할 수 있는 것 — ① `SHOW DATABASES LIKE | WHERE`, ② 정규화한 `CHECK`, ③ R88 때 코퍼스에서 눈에 띈 `CALL`의 영향 행. 하지 않은 것: 뷰 정의의 정규화(SELECT 전체를 MySQL 정규형으로 쓰는 출력기가 필요 — `CHECK` 출력기와는 한 자릿수 더 큼), 표의 `UPDATE_TIME`(쓸 때마다 시각을 남겨야 해서 성능 동결과 부딪힘).
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **셋을 새로 만듦**, 점수판 67 → 70개)
+- 새 코퍼스 `show_databases_r89` **20문장 차이 0**(R88 빌드로는 15개가 달랐다), `check_text_r89` **180문장 차이 0**(90개가 달랐다), `call_rows_r89` **30문장 차이 0**(13개가 달랐다). 점수판 ****70개 코퍼스 5,732문장 차이 0****.
+- C++ 시험 **1,024 → 1,030 케이스**(`test_r89_show_check_call.cpp` 6 케이스; 옛 시험 둘을 새 동작에 맞춰 고침 — R83의 `CHECK` 글자 순서 시험, `test_full.sql`을 파서로만 읽는 시험이 건너뛸 `SHOW` 목록).
+
+**① `SHOW DATABASES | SCHEMAS LIKE '패턴' | WHERE 조건`** — 전에는 1064로 거절. 이제 **계정이 볼 수 있는 스키마만** 이름순으로(`GRANT`가 없는 계정은 자기 것만; 빈 시스템 스키마 `mysql`은 MySQL 프로토콜 세션에만), 열 이름은 LIKE이면 **`Database (패턴)`**(패턴은 MySQL이 읽는 글자로: `\_`는 그대로, `''`는 `'`), WHERE이면 `Database`. 문자열 하나가 아닌 `LIKE` · `LIKE`에 `WHERE`를 더한 것 · `FROM`은 문법 오류(1064), 없는 열은 1054. `SHOW SCHEMAS`(아무것도 안 붙인 것)도 됨. 구현: `show_sql::databases_query`(헤더, 두 프로토콜이 같이 씀)가 `information_schema.schemata`를 이름 목록으로 거른 SELECT를 만들고(실제 표라서 없는 열이 오류), 네이티브는 `show_routine_native`가, MySQL 프로토콜은 `mysql_compat`이 `Executor::show_databases_query`를 부른다. (처음엔 이름을 `UNION ALL`로 이은 파생 표를 썼다가 **`WHERE`의 없는 열이 오류 없이 0행**이 되는 걸 코퍼스가 알려 줘 `information_schema` 쪽으로 바꿨다 — 같은 모양의 일반 쿼리 `SELECT * FROM (SELECT 'a' AS d UNION ALL SELECT 'b') s WHERE nosuch = 1`이 아직 오류 없이 0행이다: 아래 한계.)
+
+**② `CHECK` 조건을 MySQL이 쓰는 꼴로** — 전에는 쓴 글자를 `((qty >= 0))`로 감쌀 뿐이었다. MySQL은 쓴 글자를 안 남기고 읽은 조건을 다시 쓴다: 열은 **쓴 대로 백틱**(`QTY`는 `` `QTY` ``), 비교와 `AND`/`OR`마다 괄호(같은 연결자의 사슬은 한 쌍: `((a) and (b) and (c))`), 낱말은 소문자(`and` · `like` · `between` · `is not null` · `in (1,2,3)` — 쉼표 뒤에 공백 없음), 글자는 `_utf8mb4'x'`(information_schema의 `CHECK_CLAUSE`는 따옴표 · 역슬래시를 한 번 더 이스케이프), 정수의 앞 0은 빼고(`007` → `7`) 음수는 `-(5)`, `NOT`은 비교 안으로(`NOT (a > 3)` → `(a <= 3)`, `NOT (a AND b)` → 반대 비교의 `OR`, `NOT LIKE`는 `(not((… like …)))`), 함수는 MySQL 이름(`lcase` → `lower`, `ceil` → `ceiling`, `substring` → `substr`, `round(x)` → `round(x,0)`, `mod(a,b)` → `(a % b)`), `CASE`, `REGEXP`는 `regexp_like(…)`. 구현: 새 `executor_check_text.cpp`(`Executor::check_clause_text` — 조건을 `SELECT 1 FROM __check__ WHERE …`로 읽어 `CheckWriter`가 씀; 모르는 모양이면 nullopt → 쓴 대로). `SHOW CREATE TABLE`(MySQL 프로토콜)과 `information_schema.check_constraints`가 같이 쓴다. **파서가 안 남기는 것은 못 맞춤**(쓴 대로 보임): `-열`(`0 - 열`로 읽음), `1e3`(`1000`), `TRUE`(`1`), 큰따옴표 글자(열 이름으로 읽음), `IN (열 …)`(`OR`로 풀림), `BETWEEN 열 AND 5`(`AND`로 풀림), `= NULL`. 코퍼스 `check_text_r89`는 조건 90가지로 처음 90문장이 달랐고 → 0.
+
+**③ `CALL`의 OK 패킷과 `ROW_COUNT()`** — MySQL은 프로시저가 끝난 뒤 **본문에서 행 수를 정하는 마지막 문장**의 값을 말한다: 쓰기(`INSERT`/`UPDATE`/`DELETE`)는 바뀐 행, `SELECT … INTO`는 1, `SET @x` · DDL · 결과 표를 내는 `SELECT`는 0, 지역 변수 `SET` · `DECLARE` · `IF`/`WHILE`은 그대로(`WHILE` 안의 `INSERT`가 마지막이면 1). 전에는 `ROW_COUNT()`가 늘 0이었다(OK 패킷은 마지막 메시지의 앞 숫자라 우연히 맞는 일이 많았음). `exec_proc_stmts`가 문장마다 `proc_row_count_`를 갱신하고 `exec_call_procedure`가 끝에서 `affected_rows_`로 둔다.
+
+**④ 고치다 찾은 진짜 버그 둘 (R83부터 있던 것)**
+- **`CHECK`에 `*` · `/` · `%` · `+` · `-` · 함수 · `REGEXP`가 있으면 그 표를 못 썼다**: 파서가 `CHECK (…)`의 조건을 낱말 표로 다시 이어 붙였고(`read_parenthesized_expr`), 표에 없는 낱말(`*`, `+`, `LENGTH`, `UPPER`, `REGEXP`, …)은 **`Token`이라는 글자**로 바뀌어 저장됐다 — 그래서 `CHECK (qty * 2 > 0)`이 든 표의 `INSERT`는 모두 `FUNCTION r89p.token does not exist`로 거절됐다. 이제 토큰마다 **쓴 글자 그대로**(`source_` 위치) 저장한다. 시험: 이런 `CHECK` 다섯 개를 한 표에 달아 맞는 행은 받고 어기는 행은 `CHECK`로 거절하는지(`qty * 2`, `LENGTH(name)`, `qty % 2`, `REGEXP`, `qty + 1 <> 3 AND -qty < 100`).
+- **`ALTER TABLE … ADD CONSTRAINT … CHECK (qty / 2 < 10)`이 `/`를 빠뜨리고 `qty 2 < 10`으로 저장**하던 것(`ALTER` 쪽에 따로 있던 토큰 루프가 `> < >= <= = != AND OR`만 알았음) — 같은 함수(`read_parenthesized_expr`)를 쓰게 고침.
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `show_databases_r89` 15/20 → **0**, `check_text_r89` 90/180 → **0**, `call_rows_r89` 13/30 → **0**.
+- C++ 시험: 전체 **1,030 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,525,668 · 1,525,667 · 1,525,666 assertions). 예비 실행에서 옛 시험 둘이 붉었고 모두 의도한 변화였다(`CHECK` 글자가 MySQL 꼴이 된 것, `SHOW DATABASES LIKE`가 파서가 아닌 실행기가 답하는 문장이 된 것).
+- 심은 버그: 새 코드에 하나씩 심어 `[r89]` 시험이 붉어지는지 봄 — **42개**(`CHECK` 출력기 23 · 파서 2 · `SHOW DATABASES` 9 · `CALL` 8) 가운데 처음에 28개를 잡았고 살아남은 14개는 모두 C++ 시험에 그 모양이 없어서였다(코퍼스에는 있었음) → `CHECK` 모양 23가지를 C++ 시험에 더해 모두 잡음(`SUBSTRING(… FROM … FOR …)` 모양은 처음 22가지에 빠져 하나가 더 살아남았다가 그 모양을 더하고서야 잡혔다 — 쉼표 꼴은 파서가 `SUBSTR`로 바꿔서 표의 `SUBSTRING` 줄에 안 닿는다). 시스템 스키마를 네이티브에서 거르는 한 줄은 R86 시험(`[r86]`)이 잡는다. **42개 모두 잡음**.
+- 검증 도구 · 퍼저(최종 빌드): 두 세션 도구 `two_sessions.py` 596단계 차이 0, 검산 도구 12개(`verify_*.py`) 위반 0, 빌드 비교 `diff_builds.py`(R88 빌드와, 무작위 SELECT 6,000개) 차이 0, 충돌 후 복구 퍼저 다섯(시드 7700, 6회) · `fuzz_crash_fk` 시드 7701 · 동시성 퍼저 10회 불일치 0.
+- `test_full.sql`: R89 구역(`SHOW DATABASES LIKE` · `SHOW SCHEMAS WHERE`, 곱셈 · 함수 · `%`가 든 `CHECK`가 행을 받고 어기는 행을 거절, `CHECK` 글자, `CALL` 뒤 `ROW_COUNT()`)을 더해 CLI로 돌려 **의도한 오류 14개만**(R88까지 12개 + `CHECK` 위반 둘).
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
+① **뷰 정의의 정규화**(`SHOW CREATE VIEW` · `information_schema.views.VIEW_DEFINITION`이 MySQL의 `select … from` 정규형이 아님; 이번 출력기를 SELECT 전체로 넓혀야 함). ② 표의 `UPDATE_TIME`은 NULL. ③ `CHECK`의 파서가 안 남기는 모양 일곱(위 ②)은 쓴 대로 보임; `NOT REGEXP`의 반대 표기는 재 본 적 없어 안 씀. ④ **같은 모양의 일반 쿼리 `SELECT * FROM (SELECT 'a' AS d UNION ALL SELECT 'b') s WHERE nosuch = 1`이 `Unknown column`(1054) 없이 0행**을 돌려준다(표를 거치지 않는 `UNION` 파생 표의 `WHERE`가 열을 안 묶음) — 이번에 `SHOW DATABASES`를 거기서 빼냈고 일반 모양은 안 고쳤다. ⑤ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ⑥ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑦ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

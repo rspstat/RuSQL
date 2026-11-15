@@ -39,6 +39,7 @@ add_executable(engine_tests
     test_r86_leftovers.cpp
     test_r87_drop_column_keys.cpp
     test_r88_alter_copy_rows.cpp
+    test_r89_show_check_call.cpp
     test_executor_misc.cpp
     test_server_stmt_split.cpp
     test_concurrency.cpp

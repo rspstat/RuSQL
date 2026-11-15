@@ -1045,7 +1045,8 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["CONSTRAINT_CATALOG"] = "def";
                 r["CONSTRAINT_SCHEMA"] = db;
                 r["CONSTRAINT_NAME"] = check_name;
-                r["CHECK_CLAUSE"] = "(" + check_text + ")";
+                const auto written = check_clause_text(check_text, schema, true); // (the condition the way MySQL writes it, else as it was typed)
+                r["CHECK_CLAUSE"] = written ? *written : "(" + check_text + ")";
                 rows.push_back(std::move(r));
             }
         }
