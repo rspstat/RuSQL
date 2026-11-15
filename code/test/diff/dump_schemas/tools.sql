@@ -36,6 +36,7 @@ INSERT INTO orders (customer_id, total, placed, status, tags) VALUES
 INSERT INTO pairs VALUES (1, 1, 'x'), (1, 2, 'y'), (2, 1, NULL);
 CREATE VIEW v_big AS SELECT id, total FROM orders WHERE total > 100;
 CREATE VIEW v_cust AS SELECT id, name FROM customers WHERE is_vip = 1;
+CREATE ALGORITHM = TEMPTABLE SQL SECURITY INVOKER VIEW v_temp AS SELECT id, total FROM orders; -- (R85: a dump of it says ALGORITHM=TEMPTABLE and SQL SECURITY INVOKER)
 DELIMITER $$
 CREATE PROCEDURE sp_bump(IN cid INT, IN amount DECIMAL(10,2))
 BEGIN

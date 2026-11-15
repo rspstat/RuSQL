@@ -12,6 +12,7 @@
 #include "engine/parser/ast_json.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
+#include "engine/routine_privilege.hpp"
 #include "engine/statement_deadline.hpp"
 
 namespace engine {
@@ -38,10 +39,9 @@ typename Map::iterator find_named(Map& named, const std::string& name) {
     return std::find_if(named.begin(), named.end(), [&](const auto& entry) { return to_lower_str(entry.first) == wanted; });
 }
 
-// The account a routine is made by: the one its DEFINER = clause names, else the account of the session that makes it (`root`@`localhost` for the CLI and the app's root)
+// The account a routine is made by: the one its DEFINER = clause names, else the account of the session that makes it
 std::string definer_or_session(const Executor& ex, const SharedDatabase& s, std::string written) {
-    if (!written.empty()) return written;
-    return "`" + ex.auth_user + "`@`" + ex.account_host(s) + "`";
+    return written.empty() ? session_account_text(ex, s) : written;
 }
 
 // The place SharedDatabase::routine_sources keeps what a routine was written as (R83), by whom and when (R84); a routine made again has the new text, one with none has no text.

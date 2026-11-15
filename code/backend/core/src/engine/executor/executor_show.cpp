@@ -297,7 +297,10 @@ StringResult Executor::show_create_view_mysql(const std::string& name) {
     if (auto raw = s->view_raw_sql.find(view); raw != s->view_raw_sql.end()) select_text = raw->second;
     std::string body = select_text;
     // (the stored text may start with SELECT or already with the whole CREATE)
-    return StringResult::Ok("CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `" + bare_name(view) + "` AS " + body);
+    const RoutineSource* made = view_meta(*s, view); // (what the CREATE wrote: R85; a view made before has MySQL's defaults)
+    return StringResult::Ok("CREATE ALGORITHM=" + (made && !made->algorithm.empty() ? made->algorithm : std::string("UNDEFINED")) + " DEFINER=" +
+                            (made && !made->definer.empty() ? made->definer : std::string("`root`@`localhost`")) + " SQL SECURITY " + (made && !made->security.empty() ? made->security : std::string("DEFINER")) +
+                            " VIEW `" + bare_name(view) + "` AS " + body);
 }
 
 // The type a function returns the way SHOW CREATE FUNCTION writes it: lower case, with the character set a text type has ("int", "varchar(30) CHARSET utf8mb4")

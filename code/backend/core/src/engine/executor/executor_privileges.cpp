@@ -1074,6 +1074,8 @@ void set_password(UserRecord& u, const std::string& password) {
 // Who the session is, and what it may do
 // ---------------------------------------------------------------------------
 
+std::string session_account_text(const Executor& ex, const SharedDatabase& s) { return "`" + ex.auth_user + "`@`" + ex.account_host(s) + "`"; }
+
 bool routine_text_shown(Executor& ex, const SharedDatabase& s, const std::string& kind, const std::string& name) {
     if (!ex.privileges_apply(s)) return true;
     if (ex.holds_global(s, "SHOW_ROUTINE") || ex.holds_global(s, "SELECT")) return true;

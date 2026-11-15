@@ -7,6 +7,8 @@
 
 #include "engine/executor/executor.hpp"
 #include "engine/fk_name.hpp"
+#include "engine/now_text.hpp"
+#include "engine/routine_privilege.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -401,6 +403,7 @@ StringResult Executor::exec_create(SharedDatabase& s, std::string name, std::vec
     auto res = s.catalog.create_table_full(name, columns, primary_key_columns, schema_checks);
     if (res.is_err()) return StringResult::Err(res.error());
     s.catalog.get_table_mut(name)->unique_keys = unique_keys;
+    s.catalog.get_table_mut(name)->created = time_now_text(0, false, true); // (information_schema CREATE_TIME, R85)
 
     s.tables[name] = {};
     {
@@ -1473,6 +1476,19 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
             ++it;
         }
     }
+    { // (what was kept about the views of the database goes with them)
+        bool erased = false;
+        const std::string meta_prefix = "view:" + key + ".";
+        for (auto it = s.routine_sources.begin(); it != s.routine_sources.end();) {
+            if (it->first.compare(0, meta_prefix.size(), meta_prefix) == 0) {
+                it = s.routine_sources.erase(it);
+                erased = true;
+            } else {
+                ++it;
+            }
+        }
+        if (erased) s.disk.save_routine_sources(s.routine_sources);
+    }
 
     s.disk.drop_db_dir(key);
     s.databases.erase(key);
@@ -1619,7 +1635,15 @@ StringResult Executor::exec_drop_index(SharedDatabase& s, const std::string& ind
     return StringResult::Ok("Index '" + index_name + "' does not exist, skipped.");
 }
 
-StringResult Executor::exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql) {
+const RoutineSource* Executor::view_meta(const SharedDatabase& s, const std::string& view) {
+    std::string key = "view:" + view;
+    for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto it = s.routine_sources.find(key);
+    return it == s.routine_sources.end() ? nullptr : &it->second;
+}
+
+StringResult Executor::exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql, std::string definer, std::string algorithm,
+                                        std::string security) {
     if (auto* sel = std::get_if<Statement::Select>(&query.data)) {
         // (a SELECT with no FROM, `SELECT 1 AS a`, reads the one-row table _dual_; a derived table is no table either: a dump makes each view first as `SELECT 1 AS a, 1 AS b`)
         const bool no_table = sel->subquery || sel->table == "_dual_" || (sel->table.size() > 7 && sel->table.compare(sel->table.size() - 7, 7, "._dual_") == 0);
@@ -1628,6 +1652,14 @@ StringResult Executor::exec_create_view(SharedDatabase& s, const std::string& na
     s.views[name] = std::move(query);
     if (!raw_sql.empty()) s.view_raw_sql[name] = raw_sql;
     persist_views_for_db(s, current_db);
+    { // who made it, when, and with which ALGORITHM / SQL SECURITY (the view's own record, next to the routines': SHOW CREATE VIEW, information_schema.views and .tables tell it)
+        std::string key = "view:" + name;
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const auto dot = name.find('.');
+        s.routine_sources[key] = RoutineSource{dot == std::string::npos ? current_db : name.substr(0, dot), raw_sql, definer.empty() ? session_account_text(*this, s) : std::move(definer),
+                                               time_now_text(0, false, true), "", algorithm == "UNDEFINED" ? std::string() : std::move(algorithm), security == "DEFINER" ? std::string() : std::move(security)};
+        s.disk.save_routine_sources(s.routine_sources);
+    }
     return StringResult::Ok("View '" + name + "' created.");
 }
 
@@ -1635,6 +1667,12 @@ StringResult Executor::exec_drop_view(SharedDatabase& s, const std::string& name
     if (s.views.erase(name)) {
         s.view_raw_sql.erase(name);
         persist_views_for_db(s, current_db);
+        if (view_meta(s, name)) {
+            std::string key = "view:" + name;
+            for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            s.routine_sources.erase(key);
+            s.disk.save_routine_sources(s.routine_sources);
+        }
         return StringResult::Ok("View '" + name + "' dropped.");
     }
     return StringResult::Ok("View '" + name + "' does not exist, skipped.");

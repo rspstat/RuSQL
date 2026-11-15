@@ -22,6 +22,7 @@ void to_json(nlohmann::json& j, const TableSchema& s) {
         {"partition_info", s.partition_info},
     };
     if (!s.comment.empty()) j["comment"] = s.comment; // (only when there is one: the schema files of tables without a comment stay as they were)
+    if (!s.created.empty()) j["created"] = s.created;
 }
 
 void from_json(const nlohmann::json& j, TableSchema& s) {
@@ -39,6 +40,7 @@ void from_json(const nlohmann::json& j, TableSchema& s) {
     if (j.contains("partition_info")) j.at("partition_info").get_to(s.partition_info);
     else s.partition_info = std::nullopt;
     s.comment = j.value("comment", std::string());
+    s.created = j.value("created", std::string());
 }
 
 Result<void, std::string> Catalog::create_table(std::string name, std::vector<ColumnDef> columns) {

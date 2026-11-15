@@ -3365,6 +3365,34 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
 ① 표현식 열을 `WHERE` · 새 값에 쓰는 뷰 쓰기는 MySQL이 행을 찾아 바꾸는데 여기서는 거절. ② `ALGORITHM = TEMPTABLE` 뷰는 `IS_UPDATABLE`이 `YES`(MySQL `NO`), 파생 표 위의 뷰는 `NO`(MySQL `YES`) — `tool_gaps` 7번. ③ R84 전에 만든 루틴은 글자가 없어 모든 데이터베이스에 나타나고 `SHOW CREATE`는 "다시 만들라". ④ 뷰의 `DEFINER`(`information_schema.views`는 `root@%`, `SHOW CREATE VIEW`는 `root@localhost` 고정)와 표의 `CREATE_TIME`은 아직 NULL · 고정값. ⑤ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑥ `mysql` 스키마는 비어 있다 — `mysqldump --all-databases`로 뜬 덤프에는 계정이 없다. ⑦ `SHOW VARIABLES LIKE 'gtid_mode'`는 빈 답(MySQL은 `OFF`). ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
 
+### 11월 15일 — R85: R84의 남은 것 (뷰가 만든 계정 · `ALGORITHM` · `SQL SECURITY` · 표와 뷰를 만든 시각 · `TEMPTABLE` 뷰 · 파생 표 위의 뷰 · 표현식 열을 읽는 뷰 쓰기 · `gtid_mode`)
+
+**왜 이 항목인가**: R84 보고의 다음 제안에 대해 사용자가 "**R84 남은 것 진행**"이라고 했다(진행방식은 그대로: 개발 → 전체 시험 → `test_full.sql` → 문서 전부(개정 HWPX · 통합문서 포함) → 커밋 · 푸시 `commit`). 범위는 `RECOMMAND.md` 8번 표 "R84 남은 모서리" 줄에서 할 수 있는 것 — ① 표현식 열을 `WHERE` · 새 값에 쓰는 뷰 쓰기, ② `TEMPTABLE` · 파생 표 뷰의 `IS_UPDATABLE`, ④ 뷰의 `DEFINER`와 표의 `CREATE_TIME`, ⑥ `gtid_mode`. 하지 않은 것: R84 전에 만든 루틴의 글자(되살릴 수 없음 — 다시 만들어야 함), `--tab`(서버에 파일을 씀), 정규화한 `CHECK` · 뷰 정의, 조인 뷰의 표현식 열.
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **하나를 새로 만들고 하나를 넓힘**, 점수판 60 → 61개)
+- 새 코퍼스 `view_meta_r85` **50문장 차이 0**(R84 빌드로 돌리면 37개가 달랐다), `views_updatable_r84`는 77 → **88문장 차이 0**(R84가 일부러 밖에 둔 `TEMPTABLE` · 파생 표 · 표현식 열 문장을 넣었다 — R84 빌드로는 10개가 달랐다). `tool_gaps.sql`은 R84가 더했던 뷰 4문장이 사라져 22문장 중 18개가 다름으로 돌아왔다. 점수판 **61개 코퍼스 5,256문장 차이 0**.
+- C++ 시험 **1,002 → 1,007 케이스**(`test_r85_view_meta.cpp` 5 케이스 + R84의 뷰 시험 한 케이스를 새 동작에 맞춰 고침).
+
+**① 뷰가 만든 계정 · `ALGORITHM` · `SQL SECURITY` · 만든 시각** — 파서가 `CREATE ALGORITHM = … DEFINER = … SQL SECURITY … VIEW`에서 셋을 기억하고(전에는 읽고 버림), 뷰의 기록을 R84의 루틴 기록과 같은 파일에(`_routine_sources.json`, 열쇠 `view:db.이름`; `RoutineSource`에 `algorithm` · `security` 칸) 만든 시각과 함께 저장한다. 안 쓴 것은 만든 세션의 계정, MySQL의 기본값(`UNDEFINED`, `DEFINER`). **MySQL 프로토콜의 `SHOW CREATE VIEW`**가 그 값으로 `CREATE ALGORITHM=TEMPTABLE DEFINER=`bob`@`%` SQL SECURITY INVOKER VIEW …`를 쓰고(전에는 늘 `UNDEFINED` · `root` · `DEFINER` — `mysqldump`가 `TEMPTABLE` 뷰를 `UNDEFINED`로 옮기던 것), `information_schema.views`의 `DEFINER`(전에는 늘 `root@%`) · `SECURITY_TYPE`이 같은 값을 말한다. `DROP VIEW` · `DROP DATABASE`는 기록을 지운다.
+
+**② 표와 뷰를 만든 시각** — `TableSchema::created`(스키마 파일의 `created`, 없으면 R85 전에 만든 표: NULL)를 `CREATE TABLE`(과 `LIKE` · `AS SELECT`)이 채우고, `information_schema.tables.CREATE_TIME`(표 · 뷰), `SHOW TABLE STATUS`의 `Create_time`이 말한다. 뷰의 `UPDATE_TIME`은 NULL(MySQL도). **한계**: `ALTER TABLE` · `TRUNCATE`는 시각을 안 바꾼다(MySQL은 표를 다시 만들어 시각이 바뀜); 표의 `UPDATE_TIME`(MySQL은 마지막 쓰기 시각)은 NULL 그대로.
+
+**③ `ALGORITHM = TEMPTABLE` 뷰와 파생 표 위의 뷰** — TEMPTABLE 뷰는 행을 먼저 만들므로 `IS_UPDATABLE` `NO`, 쓰기는 1288 · 1471(그 위의 뷰도 `NO`; `SELECT` 목록에 서브쿼리를 더해도 `NO`). **파생 표(`FROM (SELECT …) d`) 위의 뷰는 안쪽이 `GROUP BY` · `DISTINCT` · `UNION` · 조인이든 `IS_UPDATABLE` `YES`**(MySQL이 그렇다 — 실측), 쓰기는 거절(1288 · 1471) — R84의 "select 목록 서브쿼리" 뷰와 같은 모양. 바깥 `GROUP BY` · 집계 · 바깥 조인이 있으면 `NO`.
+
+**④ 표현식 열을 읽는 뷰 쓰기** — `CREATE VIEW vx AS SELECT id, k + 1 AS k1 FROM ua`에서 `UPDATE vx SET name = 'x' WHERE k1 = 11` · `DELETE FROM vx WHERE k1 > 11` · `UPDATE vx SET id = k1 WHERE …`가 **MySQL처럼 식을 그 자리에 넣어**(`WHERE k + 1 = 11`) 행을 찾는다(R84까지는 0행으로 조용히 끝나다가 R84에서 거절로 바뀌었던 것). 뷰가 갖고 있는 표현식 열의 식(표의 열 이름으로 쓴 것)을 `ViewTarget::expressions`에 두고, `rewrite_view_columns`(`view_rename.hpp`)가 뷰의 열 이름을 표의 이름으로 바꾸면서 표현식 열은 식으로 갈아 끼운다 — `WHERE` 왼쪽 · 오른쪽 · `SET`의 새 값 · 뷰 위의 뷰(안쪽 뷰의 식을 물려받음) · 함수(`UPPER(name) AS up`) · `CASE`. **알게 된 것**: 엔진은 `SELECT` 목록의 함수와 `CASE`를 모두 하나의 `Expr`로 읽는다(옛 `SelectColumn::Func` · `CaseWhen`은 저장 형식에만 남음) — 그래서 R84의 "다른 종류의 식은 거절"은 사실상 옛 저장 형식에만 남았다. 조인 뷰의 표현식 열은 아직 거절(R80부터).
+
+**⑤ `gtid_mode`** — `SHOW VARIABLES LIKE 'gtid_mode'` · `enforce_gtid_consistency`가 빈 답이던 것을 `OFF`로(`mysqldump`가 먼저 묻는다; `@@gtid_mode`도).
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `view_meta_r85` 37/50 → **0**, `views_updatable_r84` 10/88 → **0**. `dump_to_mysql.py` 옵션 여덟 묶음에 `TEMPTABLE ... SQL SECURITY INVOKER` 뷰를 더해 거절된 문장 0.
+- C++ 시험: 전체 **1,007 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,524,487 · 1,524,488 · 1,524,487 assertions).
+- 심은 버그: 새 코드에 하나씩 심어 `[r85]` · `[r84]` 시험이 붉어지는지 봄 — **40개**(뷰의 `ALGORITHM` · `DEFINER` · `SQL SECURITY` 기억과 지움 · 만든 시각의 저장과 읽기 · `SHOW CREATE VIEW` · `information_schema` · `TEMPTABLE` 규칙 · 파생 표 뷰의 플래그와 `DELETE` 오류 · 표현식 열 대치의 각 자리)에서 처음 38개 중 **31개가 잡히고 7개가 살아남았다**: `DROP DATABASE`가 뷰의 기록을 파일에서 지우는지(뒤에 오는 다른 쓰기가 같은 파일을 다시 써서 가려져 있었음 → 마지막 쓰기로 두고 재시작하는 시험을 더함), `TEMPTABLE` 조인 뷰, 파생 표에 바깥 조인이 붙은 뷰, 비교의 오른쪽에 쓴 표현식 열 이름(`WHERE id = k1`), 열 이름을 바꾼 뷰(`id AS ident`), 함수 안의 표현식 열(`ABS(k1)`), 그리고 **하나는 동등한 변이**(파서는 한 번에 한 문장만 읽으므로 앞 문장의 `ALGORITHM`이 남을 수 없음 — 거둠). 시험을 보강하고 새 규칙(파생 표를 낀 조인 뷰의 `DELETE`는 1395, `TEMPTABLE`이면 1288)의 변이 둘을 더해 **모두 잡혔다**(39개 잡힘 + 동등 1개). 이 시험이 찾은 것: 파생 표를 낀 조인 뷰의 `DELETE` 오류 번호(MySQL 1395, 전에는 1288)가 달랐다 — 코퍼스에 넣어 진짜 MySQL과 맞춤. (처음 시험에는 같은 표를 두 번 쓴 조인 뷰를 썼다가 R80의 알려진 한계 — 같은 표가 두 번이면 열을 못 정함 — 에 걸려 서로 다른 두 표로 바꿨다.)
+- `test_full.sql`: R85 구역(뷰의 계정 · 보안 · `IS_UPDATABLE`, 표 · 뷰의 만든 시각, `TEMPTABLE` 뷰의 쓰기, 표현식 열을 읽는 `UPDATE` · `DELETE`)을 더해 CLI로 돌려 **의도한 오류 6개만**(전 5개 + `TEMPTABLE` 뷰 `UPDATE` 1288).
+- 검증 도구 · 퍼저(최종 빌드): 두 세션 도구 `two_sessions.py` 596단계 차이 0, 검산 도구 12개(`verify_*.py`) 위반 0, 빌드 간 차분(R84 빌드 대 R85, 무작위 6,000질의) 차이 0, 크래시 퍼저 5종(6라운드) · `fuzz_crash_fk` 7701 · 동시 퍼저(10라운드, 확인된 행 5,777) 불일치 0.
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
+① 조인 뷰의 표현식 열을 `WHERE` · 새 값에 쓰는 쓰기는 아직 거절(R80부터). ② `ALTER TABLE` · `TRUNCATE`가 표의 만든 시각을 안 바꾸고 표의 `UPDATE_TIME`은 NULL. ③ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다(뷰는 MySQL의 기본값 `root@localhost` · `UNDEFINED` · `DEFINER`, 시각은 NULL). ④ 네이티브 프로토콜의 `SHOW CREATE VIEW`는 `ALGORITHM`을 안 쓴다(MySQL 프로토콜만 R85 모양). ⑤ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑥ `mysql` 스키마는 비어 있고 앱의 데이터베이스 목록에 보인다. ⑦ `--tab`(서버 파일 쓰기), `--hex-blob`의 UTF-8이 아닌 바이트. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

@@ -2,6 +2,7 @@
 #include <cctype>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 #include "engine/parser/parser.hpp"
 
@@ -1351,6 +1352,9 @@ Statement Parser::parse_drop_index() {
 }
 
 Statement Parser::parse_create_view() {
+    std::string definer = std::exchange(create_definer_, std::string());
+    std::string algorithm = std::exchange(create_algorithm_, std::string());
+    std::string security = std::exchange(create_security_, std::string());
     std::string name = expect_table_name();
     if (!peek_is(TokenKind::As)) throw ParseError("Expected AS");
     advance();
@@ -1375,7 +1379,7 @@ Statement Parser::parse_create_view() {
             raw_sql += " WITH " + kind + " CHECK OPTION";
         }
     }
-    return Statement(Statement::CreateView{name, std::make_unique<Statement>(std::move(query)), raw_sql});
+    return Statement(Statement::CreateView{name, std::make_unique<Statement>(std::move(query)), raw_sql, std::move(definer), std::move(algorithm), std::move(security)});
 }
 
 Statement Parser::parse_drop_view() {

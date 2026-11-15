@@ -649,6 +649,19 @@ DROP VIEW r84_plain;
 DROP VIEW r84_group;
 DROP VIEW r84_expr;
 
+-- View Account, ALGORITHM, SQL SECURITY, Creation Times, Derived-Table Views, Expression Columns (R85)
+CREATE ALGORITHM = TEMPTABLE VIEW r85_temp AS SELECT id, first_name FROM employee;
+CREATE ALGORITHM = MERGE SQL SECURITY INVOKER VIEW r85_merge AS SELECT id, first_name, salary + 1 AS next_salary FROM employee;
+CREATE VIEW r85_derived AS SELECT d.id FROM (SELECT id FROM employee) d;
+SELECT table_name, definer, security_type, is_updatable FROM information_schema.views WHERE table_name LIKE 'r85_%' ORDER BY table_name;
+SELECT table_name, table_type, create_time IS NOT NULL AS has_time FROM information_schema.tables WHERE table_schema = 'company' AND table_name IN ('employee', 'r85_temp', 'r85_merge') ORDER BY table_name;
+UPDATE r85_merge SET first_name = first_name WHERE next_salary > 0 AND id = 1;
+UPDATE r85_temp SET first_name = 'x' WHERE id = 1;
+DELETE FROM r85_merge WHERE next_salary = -1;
+DROP VIEW r85_temp;
+DROP VIEW r85_merge;
+DROP VIEW r85_derived;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

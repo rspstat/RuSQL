@@ -134,6 +134,7 @@ private:
     /// kept in create_definer_ for the routine or trigger that follows, the rest has no effect here)
     void skip_create_attributes();
     std::string create_definer_; // `user`@`host` of the DEFINER = clause just read, empty for none (and for CURRENT_USER)
+    std::string create_algorithm_, create_security_; // ALGORITHM = x and SQL SECURITY x of the CREATE just read, upper case (R85), empty for none
     /// `[DEFAULT] CHARACTER SET|CHARSET [=] x` / `[DEFAULT] COLLATE [=] x` after a table, a database or a column: accepted when x is a character set / collation
     /// this engine's own comparison stands for (utf8mb4_0900_ai_ci), refused for the others, which would compare differently
     bool parse_charset_option();

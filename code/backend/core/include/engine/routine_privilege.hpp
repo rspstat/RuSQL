@@ -13,4 +13,8 @@ namespace engine {
 // `kind`: "procedure" or "function"; always true for a session that the privilege tables do not hold
 bool routine_text_shown(Executor& ex, const SharedDatabase& s, const std::string& kind, const std::string& name);
 
+// The account of the session as a DEFINER is written: `user`@`host` (`root`@`localhost` for the CLI and the app's root). A routine, a trigger or a view is made by it unless
+// the CREATE names another with DEFINER = (R84, R85)
+std::string session_account_text(const Executor& ex, const SharedDatabase& s);
+
 } // namespace engine

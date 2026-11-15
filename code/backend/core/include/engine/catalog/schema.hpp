@@ -44,6 +44,8 @@ struct TableSchema {
     std::optional<PartitionBy> partition_info;
     // the table option COMMENT = '...'
     std::string comment;
+    // when CREATE TABLE made it ("YYYY-MM-DD HH:MM:SS", R85; information_schema CREATE_TIME); empty for a table made before: NULL is told
+    std::string created;
 
     // The columns that identify a row: the composite PRIMARY KEY if there is one, else the single PRIMARY KEY
     // column; empty if the table has none.

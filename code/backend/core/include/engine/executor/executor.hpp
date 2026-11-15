@@ -889,7 +889,10 @@ private:
     StringResult exec_create_index(SharedDatabase& s, const std::string& index_name, const std::string& table,
                                     const std::vector<std::string>& columns, bool using_hash);
     StringResult exec_drop_index(SharedDatabase& s, const std::string& index_name, const std::optional<std::string>& table = std::nullopt);
-    StringResult exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql);
+    // `definer` / `algorithm` / `security`: what the CREATE wrote (empty: not written), kept with the time in SharedDatabase::routine_sources under "view:db.name" (R85)
+    StringResult exec_create_view(SharedDatabase& s, const std::string& name, Statement query, const std::string& raw_sql, std::string definer, std::string algorithm, std::string security);
+    // What was kept about a view when it was made (the account, the time, ALGORITHM, SQL SECURITY); null for one made before R85
+    static const RoutineSource* view_meta(const SharedDatabase& s, const std::string& view);
     StringResult exec_drop_view(SharedDatabase& s, const std::string& name);
     void persist_views_for_db(const SharedDatabase& s, const std::string& db) const;
     static void index_insert_row(SharedDatabase& s, const std::string& table, const Row& row);
@@ -1091,6 +1094,9 @@ private:
         std::string table;
         std::optional<CondExpr> condition;
         std::vector<std::pair<std::string, std::string>> columns; // (view column, table column)
+        // (view column, the expression it is, written with the columns of the table): a column of the view that is `k + 1 AS k1` can be read in the WHERE or the new value of
+        // a write by putting the expression in its place (R85); a column that is another kind of expression (a function, a CASE) has none, and a write that reads it is refused
+        std::vector<std::pair<std::string, ArithExpr>> expressions;
     };
     static std::optional<ViewTarget> resolve_view_target(const SharedDatabase& s, const std::string& name);
     // The error of a write the view cannot take (a join, DISTINCT, GROUP BY, LIMIT, an aggregate, a subquery): MySQL's 1288 (UPDATE), 1471 (INSERT), 1395 (DELETE of a join view)

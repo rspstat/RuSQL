@@ -33,13 +33,3 @@ SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci
 SELECT @@collation_connection, @@auto_increment_offset
 SELECT 18446744073709551615 + 1
 SELECT CAST(18446744073709551615 AS SIGNED)
-# --- 7. R84 (2026-11-15): views (found while checking IS_UPDATABLE; the rest of that check is corpus/views_updatable_r84.sql on the scoreboard)
---CREATE TABLE gv84 (id INT PRIMARY KEY, k INT, name VARCHAR(10))
---INSERT INTO gv84 VALUES (1, 10, 'a'), (2, 20, 'b')
---CREATE VIEW gv84_expr AS SELECT id, k + 1 AS k1, name FROM gv84
---CREATE ALGORITHM = TEMPTABLE VIEW gv84_temp AS SELECT id, k FROM gv84
---CREATE VIEW gv84_derived AS SELECT d.id FROM (SELECT id FROM gv84) d
-UPDATE gv84_expr SET name = 'x' WHERE k1 = 11
-DELETE FROM gv84_expr WHERE k1 = 21
-SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'gv84_temp'
-SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'gv84_derived'

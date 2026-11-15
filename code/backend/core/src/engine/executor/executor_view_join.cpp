@@ -35,6 +35,7 @@ std::optional<Executor::JoinViewTarget> Executor::resolve_join_view_target(const
     if (it == s.views.end()) return std::nullopt;
     const auto* sel = std::get_if<Statement::Select>(&it->second.data);
     if (!sel) return std::nullopt;
+    if (const RoutineSource* meta = view_meta(s, name); meta && meta->algorithm == "TEMPTABLE") return std::nullopt; // (as resolve_view_target)
     // DISTINCT, GROUP BY, HAVING, LIMIT, a derived table: no row of the view is a row of a table
     const bool group_by_empty = !sel->group_by || sel->group_by->empty();
     if (sel->distinct || !group_by_empty || sel->subquery || sel->having || sel->limit || sel->offset) return std::nullopt;

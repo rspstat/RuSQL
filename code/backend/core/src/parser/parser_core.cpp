@@ -415,6 +415,8 @@ Statement Parser::parse_stmt() {
         case TokenKind::Delete: return parse_delete();
         case TokenKind::Create: {
             create_definer_.clear();
+            create_algorithm_.clear();
+            create_security_.clear();
             skip_create_attributes();
             if (peek_is(TokenKind::Unique) && peek_at_is(1, TokenKind::Index)) { advance(); advance(); return parse_create_unique_index(); }
             if (peek_is(TokenKind::Index))    { advance(); return parse_create_index(); }
@@ -638,7 +640,10 @@ void Parser::skip_create_attributes() {
         if (word(0, "ALGORITHM")) { // ALGORITHM = UNDEFINED | MERGE | TEMPTABLE
             advance();
             if (peek_is(TokenKind::Eq)) advance();
-            if (peek()) advance();
+            if (const Token* t = peek()) {
+                create_algorithm_ = to_upper(t->text.empty() ? t->word : t->text);
+                advance();
+            }
         } else if (word(0, "DEFINER")) { // DEFINER = user@host | CURRENT_USER[()]
             advance();
             if (peek_is(TokenKind::Eq)) advance();
@@ -663,7 +668,10 @@ void Parser::skip_create_attributes() {
         } else if (word(0, "SQL") && word(1, "SECURITY")) { // SQL SECURITY DEFINER | INVOKER
             advance();
             advance();
-            if (peek()) advance();
+            if (const Token* t = peek()) {
+                create_security_ = to_upper(t->text.empty() ? t->word : t->text);
+                advance();
+            }
         } else {
             return;
         }

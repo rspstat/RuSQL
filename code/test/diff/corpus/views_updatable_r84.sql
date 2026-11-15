@@ -26,6 +26,8 @@
 --CREATE VIEW vu84_func AS SELECT id, UPPER(name) AS up FROM ua
 --CREATE VIEW vu84_selfjoin AS SELECT a.id, b.k FROM ua a JOIN ua b ON a.id = b.id
 --CREATE VIEW vu84_cross AS SELECT ua.id, ub.qty FROM ua, ub
+--CREATE ALGORITHM = TEMPTABLE VIEW vu84_temptable AS SELECT id, k FROM ua
+--CREATE VIEW vu84_derived AS SELECT d.id FROM (SELECT id FROM ua) d
 --CREATE VIEW vu84_chk AS SELECT id, k FROM ua WHERE k > 5 WITH CHECK OPTION
 --CREATE ALGORITHM = MERGE VIEW vu84_merge AS SELECT id, k FROM ua
 --CREATE VIEW vu84_exists AS SELECT id FROM ua WHERE EXISTS (SELECT 1 FROM ub WHERE ub.ua_id = ua.id)
@@ -55,6 +57,8 @@ SELECT table_name, is_updatable FROM information_schema.views WHERE table_name =
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_func'
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_selfjoin'
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_cross'
+SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_temptable'
+SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_derived'
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_chk'
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_merge'
 SELECT table_name, is_updatable FROM information_schema.views WHERE table_name = 'vu84_exists'
@@ -87,6 +91,15 @@ INSERT INTO vu84_expr VALUES (35, 1)
 SELECT id, k FROM ua ORDER BY id
 UPDATE vu84_expr SET id = 40 WHERE id = 33
 UPDATE vu84_expr SET k1 = 2
+UPDATE vu84_expr SET id = 41 WHERE k1 = 11
+DELETE FROM vu84_expr WHERE k1 = 21
+SELECT id, k FROM ua ORDER BY id
+UPDATE vu84_temptable SET k = 11 WHERE id = 1
+DELETE FROM vu84_temptable WHERE id = 99
+INSERT INTO vu84_temptable (id, k) VALUES (9, 9)
+UPDATE vu84_derived SET id = 5 WHERE id = 99
+DELETE FROM vu84_derived WHERE id = 99
+INSERT INTO vu84_derived (id) VALUES (50)
 SELECT id, k FROM ua ORDER BY id
 INSERT INTO vu84_subsel (id) VALUES (50)
 INSERT INTO vu84_subsel (id, n) VALUES (51, 1)

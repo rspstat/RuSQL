@@ -188,6 +188,7 @@ std::optional<Executor::ViewTarget> Executor::resolve_view_target(const SharedDa
     if (it == s.views.end()) return std::nullopt;
     const auto* sel = std::get_if<Statement::Select>(&it->second.data);
     if (!sel) return std::nullopt;
+    if (const RoutineSource* meta = view_meta(s, name); meta && meta->algorithm == "TEMPTABLE") return std::nullopt; // (ALGORITHM = TEMPTABLE: the rows are made first, MySQL writes to none)
     // a join, DISTINCT, GROUP BY, a derived table, HAVING, LIMIT: no row of the view is one row of a table
     const bool group_by_empty = !sel->group_by || sel->group_by->empty();
     if (!sel->joins.empty() || sel->distinct || !group_by_empty || sel->subquery || sel->having || sel->limit || sel->offset) return std::nullopt;
@@ -201,6 +202,7 @@ std::optional<Executor::ViewTarget> Executor::resolve_view_target(const SharedDa
         below = inner->columns;
         target.table = inner->table;
         target.condition = merge_conditions(inner->condition, target.condition);
+        target.expressions = inner->expressions; // (a column of the view below that is an expression is one here too, when this view takes it as it is)
     } else if (const TableSchema* schema = s.catalog.get_table(sel->table)) {
         for (auto& c : schema->columns) below.emplace_back(c.name, c.name);
     } else {
@@ -220,6 +222,10 @@ std::optional<Executor::ViewTarget> Executor::resolve_view_target(const SharedDa
             target.columns.emplace_back(aliased->alias, column_below(aliased->name));
         } else if (auto* expr = std::get_if<SelectColumn::Expr>(&c.data)) {
             target.columns.emplace_back(expr->alias.value_or(""), "");
+            if (expr->alias) { // (the expression, in the table's names, for a write that reads this column: R85)
+                ArithExpr copy = expr->expr;
+                if (rewrite_view_columns(copy, below, target.expressions)) target.expressions.emplace_back(*expr->alias, std::move(copy));
+            }
         } else if (auto* func = std::get_if<SelectColumn::Func>(&c.data)) {
             target.columns.emplace_back(func->alias.value_or(""), "");
         } else if (auto* when = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
@@ -245,10 +251,13 @@ std::optional<std::string> Executor::view_write_refusal(const SharedDatabase& s,
     const std::string db = view.rfind('.') == std::string::npos ? std::string() : view.substr(0, view.rfind('.'));
     const std::string what = verb;
     // (a join view with DISTINCT, GROUP BY, an aggregate ... has no row of a table in it: it is refused like the view of one table is; MySQL 1288 / 1471)
+    // (a join view that IS_UPDATABLE says YES for -- one that can be written through, or one over a derived table -- says 1395 to a DELETE; the others 1288)
+    const RoutineSource* meta = view_meta(s, view);
     const bool joins = sel && !sel->joins.empty() && resolve_join_view_target(s, view);
+    const bool derived_join = sel && !sel->joins.empty() && view_reads_derived_table(*sel) && !view_has_write_blocker(*sel) && !(meta && meta->algorithm == "TEMPTABLE");
     // (a view with an outer join is not updatable at all: its DELETE is 1288 like its UPDATE, where an inner join view says "Can not delete from join view")
     const bool outer = sel && std::any_of(sel->joins.begin(), sel->joins.end(), [](const Join& j) { return j.join_type == JoinType::Left || j.join_type == JoinType::Right || j.join_type == JoinType::FullOuter; });
-    if (joins && what == "DELETE" && !outer) return "ERROR 1395 (HY000): Can not delete from join view '" + db + "." + bare + "'";
+    if ((joins || derived_join) && what == "DELETE" && !outer) return "ERROR 1395 (HY000): Can not delete from join view '" + db + "." + bare + "'";
     if (joins && !(outer && what == "DELETE")) return std::nullopt; // (MySQL can write to one table of a join view: the callers' own errors say what they refuse)
     if (what == "INSERT") return "ERROR 1471 (HY000): The target table " + bare + " of the INSERT is not insertable-into";
     return "ERROR 1288 (HY000): The target table " + bare + " of the " + what + " is not updatable";

@@ -237,6 +237,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
             ts->unique_keys = schema.unique_keys; // (UNIQUE keys over several columns)
             ts->partition_info = schema.partition_info; // (a partitioned table read 0 rows after a restart: its partitions were forgotten)
             ts->comment = schema.comment; // (the table option COMMENT = '...')
+            ts->created = schema.created; // (information_schema CREATE_TIME)
         }
 
         auto rows = disk.load_table(qualified_key);
@@ -2204,7 +2205,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     if (auto* v = std::get_if<Statement::CreateIndex>(&stmt.data))
         return exec_create_index(s, v->index_name, v->table, v->columns, v->using_hash);
     if (auto* v = std::get_if<Statement::DropIndex>(&stmt.data)) return exec_drop_index(s, v->index_name, v->table);
-    if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) return exec_create_view(s, v->name, *v->query, v->raw_sql);
+    if (auto* v = std::get_if<Statement::CreateView>(&stmt.data)) return exec_create_view(s, v->name, *v->query, v->raw_sql, std::move(v->definer), std::move(v->algorithm), std::move(v->security));
     if (auto* v = std::get_if<Statement::DropView>(&stmt.data)) return exec_drop_view(s, v->name);
     if (auto* v = std::get_if<Statement::ShowTables>(&stmt.data)) return exec_show_tables(s, v->database, v->like);
     if (auto* v = std::get_if<Statement::Describe>(&stmt.data)) return exec_describe(s, v->table);

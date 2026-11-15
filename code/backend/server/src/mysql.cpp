@@ -1044,6 +1044,8 @@ std::string handle_select_atvars(const std::string& q, const Executor& exec) {
         {"character_set_server", "utf8mb4"},
         {"collation_connection", "utf8mb4_general_ci"},
         {"collation_server", "utf8mb4_general_ci"},
+        {"enforce_gtid_consistency", "OFF"},
+        {"gtid_mode", "OFF"},
         {"init_connect", ""},
         {"interactive_timeout", "28800"},
         {"license", "GPL"},
@@ -1115,6 +1117,8 @@ std::string show_variables_result(const std::string& up, const Executor& exec) {
         {"character_set_server", "utf8mb4"},
         {"collation_connection", "utf8mb4_general_ci"},
         {"collation_server", "utf8mb4_general_ci"},
+        {"enforce_gtid_consistency", "OFF"}, // (a tool asks whether GTIDs are on: mysqldump's SHOW VARIABLES LIKE 'gtid_mode'; they never are here)
+        {"gtid_mode", "OFF"},
         {"interactive_timeout", "28800"},
         {"lower_case_table_names", "0"},
         {"max_allowed_packet", "67108864"},

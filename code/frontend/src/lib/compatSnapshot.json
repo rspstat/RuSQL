@@ -438,9 +438,17 @@
       "name": "views_updatable_r84",
       "en": "information_schema.views IS_UPDATABLE for views of 29 shapes and the errors of a write a view cannot take (UPDATE / DELETE 1288, INSERT 1471, a column of an expression 1348, DELETE through a join view 1395)",
       "ko": "29가지 모양의 뷰의 IS_UPDATABLE과 뷰가 받지 못하는 쓰기의 오류(UPDATE · DELETE 1288, INSERT 1471, 표현식 열 1348, 조인 뷰의 DELETE 1395)",
-      "statements": 77,
+      "statements": 88,
       "different": 0,
-      "bothFail": 38
+      "bothFail": 44
+    },
+    {
+      "name": "view_meta_r85",
+      "en": "What the CREATE of a view wrote (DEFINER, SQL SECURITY, ALGORITHM = TEMPTABLE takes no write), the time a table or a view was made, a view over a derived table (YES, no write), a write that reads a column of a view that is an expression (k + 1 AS k1: the expression is put in its place), gtid_mode",
+      "ko": "뷰의 CREATE가 쓴 것(DEFINER, SQL SECURITY, ALGORITHM = TEMPTABLE은 쓰기를 못 받음), 표 · 뷰를 만든 시각, 파생 표 위의 뷰(YES, 쓰기는 안 됨), 표현식 열(k + 1 AS k1)을 읽는 쓰기(식을 그 자리에 넣음), gtid_mode",
+      "statements": 50,
+      "different": 0,
+      "bothFail": 20
     },
     {
       "name": "rollup",
@@ -485,8 +493,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1002,
-    "assertions": 1524264
+    "cases": 1007,
+    "assertions": 1524487
   },
   "bugsFound": 206
 }

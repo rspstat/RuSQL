@@ -2,6 +2,7 @@
 // rusql-core/src/engine/executor.rs (Phase 8f): info_schema_rows (a select on one of these tables runs on a temporary table of the rows: see exec_select).
 
 #include "engine/executor/executor.hpp"
+#include "engine/view_rename.hpp"
 #include "engine/check_names.hpp"
 #include "engine/fk_name.hpp"
 #include "engine/parser/parser.hpp"
@@ -385,7 +386,8 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                     break;
                 }
             }
-            r["CREATE_TIME"] = EXECUTOR_NULL_VALUE;
+            const TableSchema* made_table = s.catalog.get_table(name);
+            r["CREATE_TIME"] = made_table && !made_table->created.empty() ? made_table->created : std::string(EXECUTOR_NULL_VALUE); // (a table made before R85 has no time)
             r["UPDATE_TIME"] = EXECUTOR_NULL_VALUE;
             r["CHECK_TIME"] = EXECUTOR_NULL_VALUE;
             r["TABLE_COLLATION"] = "utf8mb4_0900_ai_ci";
@@ -402,6 +404,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             r["TABLE_SCHEMA"] = db;
             r["TABLE_NAME"] = tbl;
             r["TABLE_TYPE"] = "VIEW";
+            if (const RoutineSource* made = view_meta(s, name); made && !made->created.empty()) r["CREATE_TIME"] = made->created;
             r["ENGINE"] = EXECUTOR_NULL_VALUE;
             r["VERSION"] = EXECUTOR_NULL_VALUE;
             r["ROW_FORMAT"] = EXECUTOR_NULL_VALUE;
@@ -799,20 +802,20 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             if (!updatable) {
                 if (auto joined = resolve_join_view_target(s, name)) updatable = !joined->outer;
             }
-            if (!updatable) {
-                // MySQL says YES for a view that is updatable but for a subquery in its select list (it takes no write, 1288 / 1471: the flag does not look at the subquery)
+            const RoutineSource* made = view_meta(s, name);
+            if (!updatable && !(made && made->algorithm == "TEMPTABLE")) {
+                // MySQL says YES for a view that is updatable but for a subquery in its select list or a derived table in its FROM (it takes no write, 1288 / 1471: the flag does not look
+                // at them). Anything else that stops a write -- DISTINCT, GROUP BY, HAVING, LIMIT, an aggregate, a window function, an outer join -- says NO. (Measured on MySQL 8.4.9.)
                 const auto* sel = std::get_if<Statement::Select>(&_.data);
-                const bool has_subquery = sel && std::any_of(sel->columns.begin(), sel->columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::Subquery>(c.data); });
-                if (has_subquery && sel->joins.empty() && !sel->distinct && (!sel->group_by || sel->group_by->empty()) && !sel->subquery && !sel->having && !sel->limit && !sel->offset &&
-                    std::none_of(sel->columns.begin(), sel->columns.end(), [](const SelectColumn& c) {
-                        return std::holds_alternative<SelectColumn::Agg>(c.data) || std::holds_alternative<SelectColumn::AggAlias>(c.data) || std::holds_alternative<SelectColumn::WinFunc>(c.data);
-                    })) {
-                    updatable = s.views.count(sel->table) ? resolve_updatable_view(s, sel->table).has_value() : s.catalog.get_table(sel->table) != nullptr;
-                }
+                const bool select_subquery = sel && std::any_of(sel->columns.begin(), sel->columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::Subquery>(c.data); });
+                const bool derived = sel && view_reads_derived_table(*sel);
+                const bool blocked = !sel || view_has_write_blocker(*sel);
+                if (!blocked && derived) updatable = true;
+                else if (!blocked && select_subquery && sel->joins.empty()) updatable = s.views.count(sel->table) ? resolve_updatable_view(s, sel->table).has_value() : s.catalog.get_table(sel->table) != nullptr;
             }
             r["IS_UPDATABLE"] = updatable ? "YES" : "NO";
-            r["DEFINER"] = "root@%";
-            r["SECURITY_TYPE"] = "DEFINER";
+            r["DEFINER"] = made && !made->definer.empty() ? plain_account(made->definer) : std::string("root@localhost");
+            r["SECURITY_TYPE"] = made && !made->security.empty() ? made->security : std::string("DEFINER");
             r["CHARACTER_SET_CLIENT"] = "utf8mb4";
             r["COLLATION_CONNECTION"] = "utf8mb4_0900_ai_ci";
             rows.push_back(std::move(r));

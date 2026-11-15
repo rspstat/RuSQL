@@ -96,9 +96,11 @@ StringResult Executor::exec_delete(SharedDatabase& s, const std::string& table, 
             return StringResult::Err("View '" + strip_db_prefix(table) + "' is not updatable");
         }
         std::optional<CondExpr> asked = condition; // (the condition names the columns of the view)
-        // (a column of the view that is an expression has no column of the table to be read as: it would come out NULL and no row would be found, so it is refused)
-        if (asked && names_expression_column(*asked, target->columns)) return StringResult::Err("Writing through a view with a column that is an expression read in the WHERE is not supported in this version");
-        if (asked && !view_columns_are_plain(target->columns)) rename_cond_columns(*asked, target->columns);
+        // (a column of the view that is `k + 1 AS k1` is read as `k + 1`; one that is another kind of expression has no column of the table to be read as -- it would come out NULL
+        // and no row would be found, so it is refused)
+        if (asked && !view_columns_are_plain(target->columns) && !rewrite_view_columns(*asked, target->columns, target->expressions)) {
+            return StringResult::Err("Writing through a view with a column that is an expression read in the WHERE is not supported in this version");
+        }
         auto merged_cond = merge_conditions(target->condition, asked);
         return exec_delete(s, target->table, merged_cond, returning);
     }

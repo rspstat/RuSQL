@@ -340,17 +340,18 @@ TEST_CASE("R84: which views take writes (information_schema.views.IS_UPDATABLE) 
     CHECK(num("INSERT INTO vu_expr (id) VALUES (33)") == "ERROR 1471 (HY000): The target table vu_expr of the INSERT is not insertable-into");
     CHECK(num("INSERT INTO vu_func (id) VALUES (70)").find("ERROR 1471") == 0);
     CHECK(num("UPDATE vu_func SET up = 'x'") == "ERROR 1348 (HY000): Column 'up' is not updatable");
-    // a WHERE (or a new value) that reads a column of the view that is an expression: MySQL finds the rows; here it used to find none and say nothing -- it is refused, and nothing is changed
-    CHECK(num("UPDATE vu_expr SET id = 41 WHERE k1 = 11").find("is not supported in this version") != std::string::npos);
-    CHECK(num("DELETE FROM vu_expr WHERE k1 = 11").find("is not supported in this version") != std::string::npos);
-    CHECK(num("UPDATE vu_func SET id = id WHERE up = 'A'").find("is not supported in this version") != std::string::npos);
-    CHECK(num("UPDATE vu_expr SET id = k1 + 1 WHERE id = 1").find("is not supported in this version") != std::string::npos); // (the new value reads the column of an expression)
-    CHECK(flat(ex, "SELECT id, k, name FROM ua ORDER BY id") == "1,10,a;2,20,b");
-    // a condition on the columns the view has of the table works, with the expression column in the view
-    ok(ex, "UPDATE vu_expr SET id = 41 WHERE id = 1");
-    CHECK(flat(ex, "SELECT id, k FROM ua ORDER BY id") == "2,20;41,10");
-    ok(ex, "DELETE FROM vu_expr WHERE id = 41");
+    // a WHERE (or a new value) that reads a column of the view that is an expression finds the rows, as MySQL does (R84 refused it; before that it matched nothing and said nothing --
+    // R85 puts the expression in its place: test_r85_view_meta.cpp has the cases)
+    ok(ex, "UPDATE vu_expr SET id = 41 WHERE k1 = 11");
+    CHECK(flat(ex, "SELECT id, k, name FROM ua ORDER BY id") == "2,20,b;41,10,a");
+    ok(ex, "DELETE FROM vu_expr WHERE k1 = 11"); // (the row is k = 10: k1 = 11)
+    CHECK(flat(ex, "SELECT id, k, name FROM ua ORDER BY id") == "2,20,b");
+    ok(ex, "UPDATE vu_func SET id = 3 WHERE up = 'B'");
+    CHECK(flat(ex, "SELECT id, k FROM ua ORDER BY id") == "3,20");
+    ok(ex, "UPDATE vu_expr SET id = 2 WHERE id = 3"); // (a condition on the columns the view has of the table works too)
     CHECK(flat(ex, "SELECT id, k FROM ua ORDER BY id") == "2,20");
+    ok(ex, "DELETE FROM vu_expr WHERE id = 2");
+    CHECK(flat(ex, "SELECT id, k FROM ua ORDER BY id").empty());
 }
 
 TEST_CASE("R84: VACUUM keeps what an open snapshot reads when the transactions running at the snapshot have committed since", "[r84][mvcc]") {
