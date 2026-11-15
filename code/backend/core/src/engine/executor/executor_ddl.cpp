@@ -791,6 +791,64 @@ std::optional<std::string> drop_columns_error(const SharedDatabase& s, const Tab
     return std::nullopt;
 }
 
+// Whether MySQL would copy the table for these actions (its ALGORITHM=COPY, measured on 8.4.9): the OK packet of such an ALTER says how many rows were copied (R88), the others say 0.
+// A column whose type changes in a way the storage cannot take in place -- another kind of type, a size or precision or scale or digits of a fraction of a second, signedness, CHAR
+// length, a VARCHAR that gets shorter or whose length prefix grows from one byte to two (4 bytes a character: 63 -> 64), an ENUM / SET that is not the old list with more at the
+// end -- or that gets or loses AUTO_INCREMENT; ADD CHECK; ADD FOREIGN KEY while foreign keys are checked. A rename, a nullability / default / comment / position change, a longer
+// VARCHAR in the same class, an index or a UNIQUE key, ADD / DROP COLUMN are done in place. One action that copies makes the whole statement copy.
+bool alter_copies_table(const TableSchema& before, const std::vector<const AlterAction*>& actions, bool skip_fk_checks) {
+    auto old_column = [&](const std::string& name) -> const ColumnDef* {
+        for (const ColumnDef& c : before.columns) {
+            if (same_name(c.name, name)) return &c;
+        }
+        return nullptr;
+    };
+    auto length_class = [](std::uint32_t n) { return n <= 63 ? 1 : 2; }; // (utf8mb4: 4 bytes a character, one byte of length up to 255 bytes)
+    auto appended = [](const std::vector<std::string>& was, const std::vector<std::string>& now) {
+        return now.size() >= was.size() && std::equal(was.begin(), was.end(), now.begin());
+    };
+    auto type_changes = [&](const ColumnDef& was, const ColumnDef& now) {
+        if (was.is_unsigned != now.is_unsigned || was.auto_increment != now.auto_increment) return true;
+        const DataType::Data* a = &was.data_type.data;
+        const DataType::Data* b = &now.data_type.data;
+        auto kind = [](const DataType::Data& d) { // (BOOLEAN is TINYINT(1))
+            return std::holds_alternative<DataType::Boolean>(d) ? std::size_t(DataType::Data(DataType::TinyInt{}).index()) : d.index();
+        };
+        if (kind(*a) != kind(*b)) return true;
+        if (auto* x = std::get_if<DataType::Int>(a)) return x->medium != std::get<DataType::Int>(*b).medium;
+        if (auto* x = std::get_if<DataType::Text>(a)) return x->size != std::get<DataType::Text>(*b).size;
+        if (auto* x = std::get_if<DataType::Blob>(a)) return x->size != std::get<DataType::Blob>(*b).size;
+        if (auto* x = std::get_if<DataType::DateTime>(a)) return x->fsp != std::get<DataType::DateTime>(*b).fsp;
+        if (auto* x = std::get_if<DataType::Timestamp>(a)) return x->fsp != std::get<DataType::Timestamp>(*b).fsp;
+        if (auto* x = std::get_if<DataType::Time>(a)) return x->fsp != std::get<DataType::Time>(*b).fsp;
+        if (auto* x = std::get_if<DataType::Decimal>(a)) {
+            const auto& y = std::get<DataType::Decimal>(*b);
+            return x->precision != y.precision || x->scale != y.scale;
+        }
+        if (auto* x = std::get_if<DataType::Varchar>(a)) {
+            const auto& y = std::get<DataType::Varchar>(*b);
+            if (x->fixed != y.fixed) return true;
+            if (x->length == y.length) return false;
+            if (x->fixed || y.length < x->length) return true; // (CHAR(n) of another length, a VARCHAR that gets shorter)
+            return length_class(x->length) != length_class(y.length);
+        }
+        if (auto* x = std::get_if<DataType::Enum>(a)) return !appended(x->values, std::get<DataType::Enum>(*b).values);
+        if (auto* x = std::get_if<DataType::Set>(a)) return !appended(x->values, std::get<DataType::Set>(*b).values);
+        return false;
+    };
+    for (const AlterAction* action : actions) {
+        if (std::holds_alternative<AlterAction::AddCheckConstraint>(action->data)) return true;
+        if (std::holds_alternative<AlterAction::AddForeignKey>(action->data) && !skip_fk_checks) return true;
+        if (auto* v = std::get_if<AlterAction::ModifyColumn>(&action->data)) {
+            if (const ColumnDef* was = old_column(v->column.name); was && type_changes(*was, v->column)) return true;
+        }
+        if (auto* v = std::get_if<AlterAction::ChangeColumn>(&action->data)) {
+            if (const ColumnDef* was = old_column(v->from); was && type_changes(*was, v->column)) return true;
+        }
+    }
+    return false;
+}
+
 StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, AlterAction action) {
     // Table partitioning (V1): every action except ADD/DROP PARTITION is blocked on a
     // partitioned table -- a schema change (ADD/DROP/MODIFY/RENAME COLUMN, FK/constraint

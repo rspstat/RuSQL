@@ -30,6 +30,7 @@
 namespace engine {
 
 std::string alter_actions_error(const TableSchema& schema, const std::string& table, const std::vector<const AlterAction*>& actions); // (executor_ddl.cpp)
+bool alter_copies_table(const TableSchema& before, const std::vector<const AlterAction*>& actions, bool skip_fk_checks); // (executor_ddl.cpp)
 std::optional<std::string> drop_columns_error(const SharedDatabase& s, const TableSchema& schema, const std::string& table, bool skip_fk_checks, const std::vector<std::string>& dropped,
                                               bool (*visible)(const Row&)); // (executor_ddl.cpp)
 
@@ -1552,8 +1553,8 @@ void Executor::note_statement_outcome(const std::string& sql, const StringResult
         row_count_ = -1;
     } else if (word == "INSERT" || word == "REPLACE" || word == "UPDATE" || word == "DELETE" || word == "MERGE") {
         row_count_ = static_cast<std::int64_t>(statement_affected_rows(result.value()));
-    } else if ((word == "CREATE" || word == "DROP") && affected_rows_ >= 0) {
-        row_count_ = affected_rows_; // (CREATE TABLE ... SELECT: the rows it copied; CREATE DATABASE: 1; DROP DATABASE: the tables and views it took away)
+    } else if ((word == "CREATE" || word == "DROP" || word == "ALTER") && affected_rows_ >= 0) {
+        row_count_ = affected_rows_; // (CREATE TABLE ... SELECT: the rows it copied; CREATE DATABASE: 1; DROP DATABASE: the tables and views it took away; ALTER TABLE that copies the table: its rows)
     } else {
         row_count_ = 0;
     }
@@ -2197,6 +2198,12 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
     }
     if (auto* v = std::get_if<Statement::TruncateTable>(&stmt.data)) return exec_truncate(s, v->name);
     if (auto* v = std::get_if<Statement::AlterTable>(&stmt.data)) {
+        bool copies = false; // (the table is copied, as MySQL does it for some actions: the OK packet says how many rows, R88)
+        {
+            std::vector<const AlterAction*> all{&v->action};
+            for (const AlterAction& action : v->more) all.push_back(&action);
+            if (const TableSchema* before = s.catalog.get_table(v->table)) copies = alter_copies_table(*before, all, skip_fk_checks);
+        }
         if (!v->more.empty()) { // all or nothing
             std::vector<const AlterAction*> actions{&v->action};
             for (const AlterAction& action : v->more) actions.push_back(&action);
@@ -2222,6 +2229,13 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             if (auto* rename = std::get_if<AlterAction::RenameTable>(&action.data); rename && done.is_ok()) table = rename->to;
         }
         if (remade) stamp_created(s, table);
+        if (copies && done.is_ok()) {
+            std::int64_t rows = 0;
+            if (auto it = s.tables.find(table); it != s.tables.end()) {
+                for (const Row& row : it->second) rows += is_visible(row) ? 1 : 0;
+            }
+            affected_rows_ = rows;
+        }
         return done;
     }
     if (auto* v = std::get_if<Statement::CreateIndex>(&stmt.data)) {

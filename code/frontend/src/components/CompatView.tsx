@@ -29,7 +29,7 @@ const KNOWN: { en: string; ko: string }[] = [
   { en: "A view that mixes an aggregate with a plain column is refused when it is created (MySQL refuses when it is selected)", ko: "집계와 일반 열이 섞인 뷰는 만들 때 거절 (MySQL은 조회할 때 거절)" },
   { en: "Privileges: a GRANT reaches an open connection at once (MySQL: the privileges of a database from the next USE), SHOW FULL COLUMNS leaves its Privileges column empty, and there is no mysql.user table", ko: "권한: GRANT가 열려 있는 연결에 바로 반영됨 (MySQL: 데이터베이스 수준은 다음 USE부터), SHOW FULL COLUMNS의 Privileges 열은 비어 있고, mysql.user 표는 없음" },
   { en: "A view over a join takes UPDATE and INSERT, but not with WITH CHECK OPTION: that is refused with a message (MySQL writes through it)", ko: "조인 뷰의 UPDATE·INSERT는 되지만 WITH CHECK OPTION이 있으면 메시지로 거절함 (MySQL은 쓰기가 됨)" },
-  { en: "SHOW DATABASES takes no LIKE or WHERE (a plain SHOW DATABASES works), and an ALTER TABLE that rebuilds the table (MODIFY) reports 0 affected rows where MySQL reports the rows it copied", ko: "SHOW DATABASES는 LIKE · WHERE를 못 받고(그냥 SHOW DATABASES는 됨), 표를 다시 만드는 ALTER TABLE(MODIFY)은 MySQL이 복사한 행 수를 말하는 자리에 영향 행 0을 말함" },
+  { en: "SHOW DATABASES takes no LIKE or WHERE (a plain SHOW DATABASES works)", ko: "SHOW DATABASES는 LIKE · WHERE를 못 받음(그냥 SHOW DATABASES는 됨)" },
 ];
 
 function pct(part: number, whole: number): string {

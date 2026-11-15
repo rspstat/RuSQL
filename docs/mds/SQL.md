@@ -59,7 +59,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ## 3. 테이블 변경 · 삭제 · 이름 변경
 
-- ALTER TABLE t ADD [COLUMN] 컬럼 정의 [FIRST | AFTER col] : 컬럼 추가. NOT NULL이고 DEFAULT가 없으면 표에 있던 행은 그 형의 영(0 · 빈 글자 · `0.00` · ENUM의 첫 값 · JSON `null`)으로 채우고, DATE · DATETIME은 행이 있으면 거절(1292, 영 날짜; R80)
+- ALTER TABLE의 OK 패킷 · `ROW_COUNT()` (R88) : MySQL이 표를 복사하는 ALTER(`ALGORITHM=COPY`)는 **복사한 행 수**를, 그 자리에서 하는 ALTER는 0을 말함 — 복사하는 것: 저장소가 그 자리에서 못 바꾸는 **열 형 변경**(`MODIFY` · `CHANGE`로 다른 종류의 형 · 크기 · 정밀도 · 소수 자릿수 · 부호 · `CHAR` 길이 · 더 짧아진 `VARCHAR` · 길이 칸이 1바이트에서 2바이트로 커지는 `VARCHAR`(63 → 64자) · 끝에 덧붙이지 않은 `ENUM` · `SET`, `AUTO_INCREMENT`를 더하거나 뺌), `ADD CHECK`, `ADD FOREIGN KEY`(`FOREIGN_KEY_CHECKS = 0`이면 아님); 그 자리에서 하는 것: 이름 바꾸기 · `NULL` 허용 · 기본값 · 주석 · 위치 변경, 같은 길이 칸의 더 긴 `VARCHAR`, 끝에 덧붙인 `ENUM` · `SET`, 인덱스 · `UNIQUE`, `ADD` · `DROP COLUMN`. 한 문장에 복사하는 동작이 하나라도 있으면 문장 전체가 복사 [FIRST | AFTER col] : 컬럼 추가. NOT NULL이고 DEFAULT가 없으면 표에 있던 행은 그 형의 영(0 · 빈 글자 · `0.00` · ENUM의 첫 값 · JSON `null`)으로 채우고, DATE · DATETIME은 행이 있으면 거절(1292, 영 날짜; R80)
 - ALTER TABLE t MODIFY [COLUMN] 컬럼 정의 : 컬럼 타입 · 제약 변경(값도 새 타입으로 바꾸고 인덱스를 다시 만듦). NOT NULL로 바꿀 때 NULL이 있으면 형이 그대로인 제자리 변경은 1138(`Invalid use of NULL value`), 형이 바뀌면 1265(`Data truncated for column ... at row N`; R80)
 - ALTER TABLE t CHANGE [COLUMN] 옛이름 새이름 타입... : 컬럼 이름과 정의를 함께 변경
 - ALTER TABLE t RENAME COLUMN a TO b : 컬럼 이름 변경

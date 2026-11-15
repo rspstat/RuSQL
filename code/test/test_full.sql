@@ -710,6 +710,17 @@ DROP TABLE r87_u;
 DROP TABLE r87_k;
 DROP TABLE r87_pk;
 
+-- ALTER TABLE That Copies The Table Says How Many Rows (R88)
+CREATE TABLE r88_t (id INT PRIMARY KEY, a INT, b VARCHAR(10));
+INSERT INTO r88_t VALUES (1, 1, 'x'), (2, 2, 'y'), (3, 3, 'z');
+ALTER TABLE r88_t MODIFY a BIGINT;
+SELECT ROW_COUNT() AS copied_by_modify;
+ALTER TABLE r88_t ADD COLUMN c INT;
+SELECT ROW_COUNT() AS copied_by_add_column;
+ALTER TABLE r88_t MODIFY b VARCHAR(5);
+SELECT ROW_COUNT() AS copied_by_shorter_varchar;
+DROP TABLE r88_t;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

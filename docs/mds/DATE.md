@@ -3450,6 +3450,32 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
 ① `SHOW DATABASES LIKE '…'` · `WHERE`는 1064로 거절. ② 표를 다시 만드는 `ALTER TABLE`(`MODIFY`)은 영향 행 0(MySQL은 복사한 행 수); 표의 `UPDATE_TIME`은 NULL. ③ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ④ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑤ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑥ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑦ 표 수준 `CHECK`가 지우려는 열을 읽는 경우는 MySQL과 이미 같았고(둘 다 거절), `DROP COLUMN` 외의 동작이 데이터 때문에 중간에 실패하는 다중 동작 `ALTER`의 전부-아니면-전무는 이번에 안 봤다. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
 
+### 11월 16일 — R88: `ALTER TABLE`의 OK 패킷이 MySQL처럼 복사한 행 수를 말함 (R87의 "남은 것" 중 엔진 쪽)
+
+**왜 이 항목인가**: R87 보고의 "다음 라운드 추천" 3번(엔진을 더 한다면 `ALTER … MODIFY`의 영향 행 수가 가장 작고 안전한 후보)에 사용자가 "**엔진쪽 진행합니다 일단**"이라고 했다(진행방식은 그대로: 개발 → 전체 시험 → `test_full.sql` → 문서 전부(개정 HWPX · 통합문서 포함) → 커밋 · 푸시 `commit`). 범위는 그 한 가지; 같은 줄의 `SHOW DATABASES LIKE` · 표의 `UPDATE_TIME`은 하지 않았다.
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **하나를 새로 만듦**, 점수판 66 → 67개)
+- 새 코퍼스 `alter_copy_rows_r88` **89문장 차이 0**(R87 빌드로 돌리면 절반 넘게 달랐다). 점수판 ****67개 코퍼스 5,502문장 차이 0****.
+- C++ 시험 **1,021 → 1,024 케이스**(`test_r88_alter_copy_rows.cpp` 3 케이스; 옛 시험은 하나도 안 고쳤다).
+
+**무엇이 달랐나** — 진짜 MySQL은 표를 복사하는 `ALTER`(`ALGORITHM=COPY`)의 OK 패킷에 **복사한 행 수**를 담는다(`mysql` 클라이언트의 "Query OK, 3 rows affected"; `ROW_COUNT()`도 같음). 그 자리에서(in place · instant) 하는 `ALTER`는 0을 담는다. RuSQL은 늘 0이었다(오류 없이 숫자만 다른 차이; 어느 `ALTER`가 복사하는지는 MySQL의 저장소가 정하는 일이라 규칙이 필요했다).
+
+**규칙(진짜 MySQL에서 약 120가지 모양을 재서 세움)**
+- **복사하는 것**: 그 자리에서 못 바뀌는 열 형 변경(`MODIFY` · `CHANGE`로 다른 종류의 형 · `INT` ↔ `BIGINT`/`MEDIUMINT`/`TINYINT` · 부호(`UNSIGNED`) · `TEXT`/`BLOB` 크기 · `DATETIME`/`TIMESTAMP`/`TIME`의 소수 자릿수 · `DECIMAL` 정밀도/소수 · `CHAR` 길이 · `CHAR` ↔ `VARCHAR` · 더 짧아진 `VARCHAR` · **길이 칸이 1바이트에서 2바이트로 커지는 `VARCHAR`**(글자 하나가 4바이트라서 63 → 64자) · 끝에 덧붙이지 않은 `ENUM`/`SET`(순서를 바꾸거나 줄임) · `AUTO_INCREMENT`를 더하거나 뺌), `ADD CHECK`, `ADD FOREIGN KEY`(`FOREIGN_KEY_CHECKS = 0`이면 그 자리).
+- **그 자리에서 하는 것**: 이름 바꾸기(`RENAME TO` · `RENAME COLUMN` · `CHANGE`로 이름만), `NULL` 허용 · 기본값 · 주석 · 위치(`FIRST`/`AFTER`) 변경, 같은 길이 칸의 더 긴 `VARCHAR`(10 → 63), 끝에 덧붙인 `ENUM`/`SET`, `INT(5)`(폭은 무시), `BOOLEAN` ↔ `TINYINT(1)`, 인덱스 · `UNIQUE`, `ADD`/`DROP COLUMN`(`NOT NULL DEFAULT`도), 기본값 · 주석 · `AUTO_INCREMENT =`. **한 문장에 복사하는 동작이 하나라도 있으면 문장 전체가 복사**(`ADD COLUMN z INT, MODIFY i BIGINT`). 빈 표는 복사해도 0.
+
+**구현**: 자유 함수 `alter_copies_table`(`executor_ddl.cpp`; 동작들과 `skip_fk_checks`를 받음)이 `Statement::AlterTable` 실행 **앞에서** 표의 옛 정의와 견주어 복사 여부를 말하고(`executor_core.cpp`), 문장이 성공하면 표의 보이는 행 수를 `affected_rows_`에 둔다. `note_statement_outcome`이 `ALTER`도 `ROW_COUNT()`에 반영한다. 헤더는 안 건드려 빌드는 짧았다.
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `alter_copy_rows_r88` 46 → **0**(처음 83문장일 때; 이어 `BLOB` · `TIMESTAMP(3)` · `TIME(3)` · `MEDIUMINT` 여섯을 더해 89문장 차이 0). 옛 코퍼스 `schema_change` · `tables` · `constraints`의 `--proto` 영향 행 차이 15개 중 `ALTER` 14개가 사라졌다(`CALL`의 영향 행 한 개가 남음; 점수판은 이 코퍼스들에서 영향 행을 비교하지 않음).
+- C++ 시험: 전체 **1,024 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,525,377 · 1,525,377 · 1,525,376 assertions).
+- 심은 버그: 새 코드에 하나씩 심어 `[r88]` 시험이 붉어지는지 봄 — **28개 모두 잡음**(`ADD CHECK` · `ADD FOREIGN KEY`(검사 끔 포함) · 부호 · `AUTO_INCREMENT` · 형의 종류 · `MEDIUMINT` · `TEXT`/`BLOB` 크기 · `DATETIME`/`TIMESTAMP`/`TIME` 소수 · `DECIMAL` 정밀도/소수 · `CHAR`↔`VARCHAR` · `CHAR` 길이 · 더 짧은 `VARCHAR` · 길이 칸 · `ENUM`/`SET` 순서와 덧붙임 · `MODIFY`/`CHANGE` · 한 문장에 여러 동작 · 행 수 전달 · `ROW_COUNT()`).
+- 검증 도구 · 퍼저(최종 빌드): 두 세션 도구 `two_sessions.py` 596단계 차이 0, 검산 도구 12개(`verify_*.py`) 위반 0, 빌드 비교 `diff_builds.py`(R87 빌드와, 무작위 SELECT 6,000개) 차이 0, 충돌 후 복구 퍼저 다섯(시드 7700, 6회) · `fuzz_crash_fk` 시드 7701 · 동시성 퍼저 10회 불일치 0.
+- `test_full.sql`: R88 구역(`MODIFY` → 3, `ADD COLUMN` → 0, 더 짧은 `VARCHAR` → 3을 `ROW_COUNT()`로)을 더해 CLI로 돌려 **의도한 오류 12개만**(R87과 같음).
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
+① `SHOW DATABASES LIKE '…'` · `WHERE`는 1064로 거절. ② 표의 `UPDATE_TIME`은 NULL. ③ 파티션 표의 `ALTER`는 열 변경 자체가 아직 거절된다(그래서 그 복사 행 수는 해당 없음). `ALTER TABLE … FORCE` · `CONVERT TO CHARACTER SET`은 RuSQL에 아직 없다(파싱 오류). ④ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ⑤ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑥ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑦ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
