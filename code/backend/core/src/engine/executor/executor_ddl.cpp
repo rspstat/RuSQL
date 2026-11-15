@@ -720,6 +720,77 @@ StringResult Executor::exec_create_as(SharedDatabase& s, const std::string& name
     return StringResult::Ok("Table '" + name + "' created with " + std::to_string(rows.size()) + " row(s).");
 }
 
+// What MySQL refuses before ALTER TABLE ... DROP COLUMN changes anything (R87): every column of the table (1090), a column that has a foreign key of its own (1828), a column that
+// a foreign key of a table refers to (1829), and a key (a UNIQUE key, a composite PRIMARY KEY) that gets shorter and would repeat over the rows the table holds (1062; a NULL in a
+// UNIQUE key repeats nothing). `dropped`: the columns of the table as it was that the statement drops, all of them for a statement with several DROP COLUMN.
+std::optional<std::string> drop_columns_error(const SharedDatabase& s, const TableSchema& schema, const std::string& table, bool skip_fk_checks, const std::vector<std::string>& dropped,
+                                              bool (*visible)(const Row&)) {
+    auto is_dropped = [&](const std::string& name) { return std::find(dropped.begin(), dropped.end(), name) != dropped.end(); };
+    std::size_t dropped_here = 0;
+    for (const ColumnDef& c : schema.columns) {
+        if (is_dropped(c.name)) dropped_here++;
+    }
+    if (dropped_here == 0) return std::nullopt;
+    if (dropped_here == schema.columns.size()) return std::string("ERROR 1090 (42000): You can't delete all columns with ALTER TABLE; use DROP TABLE instead");
+    if (!skip_fk_checks) {
+        const std::string bare_table = table.substr(table.rfind('.') == std::string::npos ? 0 : table.rfind('.') + 1);
+        for (std::size_t i = 0; i < schema.columns.size(); i++) { // a column that has a foreign key of its own: 1828
+            if (!is_dropped(schema.columns[i].name) || schema.columns[i].foreign_keys.empty()) continue;
+            return "ERROR 1828 (HY000): Cannot drop column '" + schema.columns[i].name + "': needed in a foreign key constraint '" + fk_constraint_name(schema, bare_table, i, 0) + "'";
+        }
+        for (auto& [other_name, other_schema] : s.catalog.tables) { // a column that a foreign key of a table refers to: 1829
+            const std::string other_bare = other_name.substr(other_name.rfind('.') == std::string::npos ? 0 : other_name.rfind('.') + 1);
+            for (std::size_t i = 0; i < other_schema.columns.size(); i++) {
+                for (std::size_t k = 0; k < other_schema.columns[i].foreign_keys.size(); k++) {
+                    const ForeignKey& fk = other_schema.columns[i].foreign_keys[k];
+                    if (fk.ref_table != table) continue;
+                    for (const ColumnDef& c : schema.columns) {
+                        if (is_dropped(c.name) && same_name(fk.ref_column, c.name)) {
+                            return "ERROR 1829 (HY000): Cannot drop column '" + c.name + "': needed in a foreign key constraint '" + fk_constraint_name(other_schema, other_bare, i, k) + "' of table '" +
+                                   other_bare + "'";
+                        }
+                    }
+                }
+            }
+        }
+    }
+    auto shorter_key_repeats = [&](const std::vector<std::string>& key, const std::string& key_name) -> std::optional<std::string> {
+        auto tit = s.tables.find(table);
+        if (tit == s.tables.end() || key.empty()) return std::nullopt;
+        std::unordered_set<std::string> seen;
+        for (auto& row : tit->second) {
+            if (!visible(row)) continue;
+            std::string encoded, shown;
+            bool has_null = false;
+            for (std::size_t k = 0; k < key.size(); k++) {
+                auto it = row.find(key[k]);
+                const std::string value = it != row.end() ? it->second : std::string(EXECUTOR_NULL_VALUE);
+                if (value == EXECUTOR_NULL_VALUE) has_null = true;
+                const std::string part = collation::key(value);
+                encoded += std::to_string(part.size()) + ":" + part;
+                shown += (k ? "-" : "") + value;
+            }
+            if (has_null) continue;
+            if (!seen.insert(encoded).second) return "Duplicate entry '" + shown + "' for key '" + key_name + "'";
+        }
+        return std::nullopt;
+    };
+    auto without_dropped = [&](std::vector<std::string> key) {
+        key.erase(std::remove_if(key.begin(), key.end(), is_dropped), key.end());
+        return key;
+    };
+    const auto& pk = schema.primary_key_columns;
+    if (std::any_of(pk.begin(), pk.end(), is_dropped)) {
+        if (auto repeated = shorter_key_repeats(without_dropped(pk), "PRIMARY")) return repeated;
+    }
+    for (const UniqueKey& key : schema.unique_keys) {
+        if (!std::any_of(key.columns.begin(), key.columns.end(), is_dropped)) continue;
+        std::vector<std::string> shorter = without_dropped(key.columns);
+        if (auto repeated = shorter_key_repeats(shorter, key.name.value_or(shorter.empty() ? key.columns.front() : shorter.front()))) return repeated;
+    }
+    return std::nullopt;
+}
+
 StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, AlterAction action) {
     // Table partitioning (V1): every action except ADD/DROP PARTITION is blocked on a
     // partitioned table -- a schema change (ADD/DROP/MODIFY/RENAME COLUMN, FK/constraint
@@ -899,9 +970,47 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
         if (std::none_of(cols.begin(), cols.end(), [&](const ColumnDef& c) { return c.name == v->name; })) {
             return StringResult::Err("Can't DROP '" + v->name + "'; check that column/key exists");
         }
+        if (auto refused = drop_columns_error(s, *schema, table, skip_fk_checks, {v->name}, &Executor::is_visible)) return StringResult::Err(*refused); // (what MySQL refuses before anything is changed, R87)
+        auto without_column = [&](std::vector<std::string> key) {
+            key.erase(std::remove(key.begin(), key.end(), v->name), key.end());
+            return key;
+        };
         cols.erase(std::remove_if(cols.begin(), cols.end(), [&](const ColumnDef& c) { return c.name == v->name; }), cols.end());
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             for (auto& row : it->second) row.erase(v->name);
+        }
+        { // the column leaves the keys of the table that read it: a UNIQUE key (one that has no column left goes; one left with a single column is the flag of that column) and a composite PRIMARY KEY (R87)
+            for (auto it = schema->unique_keys.begin(); it != schema->unique_keys.end();) {
+                if (std::find(it->columns.begin(), it->columns.end(), v->name) == it->columns.end()) {
+                    ++it;
+                    continue;
+                }
+                it->columns = without_column(it->columns);
+                if (it->columns.size() == 1) {
+                    auto kept = std::find_if(cols.begin(), cols.end(), [&](const ColumnDef& c) { return c.name == it->columns.front(); });
+                    if (kept != cols.end() && !kept->unique) {
+                        kept->unique = true;
+                        kept->unique_constraint_name = it->name;
+                        it = schema->unique_keys.erase(it);
+                        continue;
+                    }
+                }
+                if (it->columns.empty()) {
+                    it = schema->unique_keys.erase(it);
+                    continue;
+                }
+                ++it;
+            }
+            auto& pk = schema->primary_key_columns;
+            if (std::find(pk.begin(), pk.end(), v->name) != pk.end()) {
+                pk = without_column(pk);
+                if (pk.size() == 1) { // a PRIMARY KEY over one column is the flag of that column
+                    for (ColumnDef& c : cols) {
+                        if (c.name == pk.front()) c.primary_key = true;
+                    }
+                    pk.clear();
+                }
+            }
         }
         { // an index loses the column it read, and one that has no column left goes with it, as in MySQL (it was left on a column the table no longer had, R86)
             bool changed = false;

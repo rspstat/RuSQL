@@ -686,6 +686,30 @@ SHOW DATABASES;
 DROP TABLE r86_copy;
 DROP TABLE r86_t;
 
+-- DROP COLUMN And The Keys That Read The Column (R87)
+CREATE TABLE r87_u (id INT PRIMARY KEY, a INT, b INT, c INT, UNIQUE KEY r87_uab (a, b), UNIQUE KEY r87_ub (b));
+INSERT INTO r87_u VALUES (1, 1, 1, 1), (2, 2, 2, 2);
+ALTER TABLE r87_u DROP COLUMN b;
+INSERT INTO r87_u VALUES (3, 3, 3);
+INSERT INTO r87_u VALUES (4, 1, 4);
+CREATE TABLE r87_k (id INT PRIMARY KEY, a INT, b INT, UNIQUE KEY r87_kab (a, b));
+INSERT INTO r87_k VALUES (1, 1, 1), (2, 1, 2);
+ALTER TABLE r87_k DROP COLUMN b;
+SELECT id, a, b FROM r87_k ORDER BY id;
+CREATE TABLE r87_pk (a INT, b INT, c INT, PRIMARY KEY (a, b));
+INSERT INTO r87_pk VALUES (1, 1, 1), (2, 1, 2);
+ALTER TABLE r87_pk DROP COLUMN b;
+SELECT index_name, column_name FROM information_schema.statistics WHERE table_schema = 'company' AND table_name IN ('r87_k', 'r87_pk', 'r87_u') ORDER BY table_name, index_name, seq_in_index;
+CREATE TABLE r87_p (id INT PRIMARY KEY, x INT);
+CREATE TABLE r87_c (id INT PRIMARY KEY, p INT, FOREIGN KEY (p) REFERENCES r87_p (id));
+ALTER TABLE r87_p DROP COLUMN id;
+ALTER TABLE r87_c DROP COLUMN p;
+DROP TABLE r87_c;
+DROP TABLE r87_p;
+DROP TABLE r87_u;
+DROP TABLE r87_k;
+DROP TABLE r87_pk;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

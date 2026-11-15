@@ -30,6 +30,8 @@
 namespace engine {
 
 std::string alter_actions_error(const TableSchema& schema, const std::string& table, const std::vector<const AlterAction*>& actions); // (executor_ddl.cpp)
+std::optional<std::string> drop_columns_error(const SharedDatabase& s, const TableSchema& schema, const std::string& table, bool skip_fk_checks, const std::vector<std::string>& dropped,
+                                              bool (*visible)(const Row&)); // (executor_ddl.cpp)
 
 // ---------------------------------------------------------------------------
 // Password hashing helpers (native TCP auth: SHA-256; MySQL wire protocol: SHA1)
@@ -2200,6 +2202,13 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
             for (const AlterAction& action : v->more) actions.push_back(&action);
             if (const TableSchema* schema = s.catalog.get_table(v->table)) {
                 if (auto error = alter_actions_error(*schema, v->table, actions); !error.empty()) return StringResult::Err(error);
+                std::vector<std::string> dropped; // (the columns that several DROP COLUMN take together: a key that loses all of them is looked at once, R87)
+                for (const AlterAction* action : actions) {
+                    if (auto* drop = std::get_if<AlterAction::DropColumn>(&action->data)) dropped.push_back(drop->name);
+                }
+                if (dropped.size() > 1) {
+                    if (auto refused = drop_columns_error(s, *schema, v->table, skip_fk_checks, dropped, &Executor::is_visible)) return StringResult::Err(*refused);
+                }
             }
         }
         auto done = exec_alter(s, v->table, v->action);

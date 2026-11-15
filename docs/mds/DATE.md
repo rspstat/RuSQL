@@ -3424,6 +3424,32 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
 ① `SHOW DATABASES LIKE '…'` · `WHERE`는 1064로 거절(그냥 `SHOW DATABASES`는 됨). ② 표를 다시 만드는 `ALTER TABLE`(`MODIFY`)은 영향 행 0(MySQL은 복사한 행 수) — `schema_change` 코퍼스의 12개가 이것이고 점수판은 이 항목을 비교하지 않는다; 표의 `UPDATE_TIME`은 NULL. ③ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ④ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑤ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑥ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑦ **`DROP COLUMN`이 `UNIQUE KEY (a, b)`의 열은 아직 안 뺀다**(이번 작업 중 발견, 양쪽을 재서 확인: 진짜 MySQL은 `UNIQUE (a)`로 줄여 `(1,1)` 뒤의 `(1,2)`를 1062로 막고, RuSQL은 `(a, b)`로 남겨 둔 채 둘 다 받아들인다 — 제약이 지켜지지 않는 조용한 차이. 인덱스(`CREATE INDEX`)만 고쳤다; 다음 후보 1순위). ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
 
+### 11월 15일 — R87: `ALTER TABLE … DROP COLUMN`이 키에서 열을 빼지 않던 것 (R86이 첫 후보로 올린 조용한 차이)
+
+**왜 이 항목인가**: R86 보고의 "다음 라운드 추천"(`DROP COLUMN`이 `UNIQUE KEY`에서 열을 안 빼는 것)에 사용자가 "**추천대로 진행합니다. 같은 진행방식으로 진행합니다.**"라고 했다(개발 → 전체 시험 → `test_full.sql` → 문서 전부(개정 HWPX · 통합문서 포함) → 커밋 · 푸시 `commit`). R86의 `CREATE INDEX` 검사가 시험 하나를 붉게 만들면서 드러난 같은 뿌리의 문제를 인덱스까지만 고쳤고, 제약 쪽은 양쪽(MySQL · RuSQL)을 재서 "조용한 차이"로 남겨 두었던 것이다. 하지 않은 것: `ALTER … MODIFY`의 영향 행 수, `SHOW DATABASES LIKE`, 표의 `UPDATE_TIME`(R86의 남은 것 그대로).
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **하나를 새로 만듦**, 점수판 65 → 66개)
+- 새 코퍼스 `drop_column_constraints_r87` **76문장 차이 0**(R86 빌드로 돌리면 36개가 달랐다). 점수판 ****66개 코퍼스 5,413문장 차이 0****.
+- C++ 시험 **1,016 → 1,021 케이스**(`test_r87_drop_column_keys.cpp` 5 케이스; 옛 시험은 하나도 안 고쳤다).
+
+**① 키에서 열이 빠진다** — `CREATE TABLE d1 (id INT PRIMARY KEY, a INT, b INT, c INT, UNIQUE KEY uab (a, b), UNIQUE KEY ub (b))`에서 `ALTER TABLE d1 DROP COLUMN b`: MySQL은 `uab`를 `UNIQUE (a)`로 줄이고 `ub`(열이 안 남음)는 지우는데, RuSQL은 `uab (a, b)`를 없는 열을 가리킨 채 남겨 **제약이 지켜지지 않았다**(`(1, …)` 뒤의 `(1, 9)`도 받음 — 오류 없는 조용한 차이). 이제 `UNIQUE` 키에서 열을 빼고(열이 하나 남으면 그 열의 `UNIQUE` 표시와 키 이름으로 옮김, 안 남으면 지움; 그 열이 이미 `UNIQUE`면 한 열짜리 키를 그대로 둠 — MySQL처럼 둘 다 보임), 복합 `PRIMARY KEY (a, b)`도 `(a)`로 줄인다(한 열이 남으면 그 열의 `primary_key` 표시로 옮김).
+
+**② 짧아진 키가 중복되면 거절** — 지금 있는 행에서 줄어든 키가 겹치면 MySQL처럼 1062로 거절하고 표를 그대로 둔다(`UNIQUE KEY (a, b)`에 `(1, 1)` `(1, 2)`가 있는데 `b`를 지우면 `(a)`가 겹침; 복합 `PRIMARY KEY`도 같음). `UNIQUE` 안의 NULL은 겹치지 않지만 짧아진 키에서는 겹칠 수 있다(`(1, NULL, c)`가 두 행이면 `b`를 지울 때 1062 — MySQL이 그렇다, 실측). 여러 `DROP COLUMN`이 든 문장은 이름을 모아 **한 번에** 본다(`(a, b, c)`에서 `b`와 `c`를 같이 지우면 `(a)`가 겹치는지 — 하나씩 보면 앞 동작만 적용된 채 실패하므로) — 전부-아니면-전무가 이어진다.
+
+**③ 외래키 · 마지막 열** — 지우려는 열에 외래키가 있으면 1828, 다른 표의 외래키가 가리키면 1829, 표의 열을 전부 지우려 하면 1090(전에는 모두 그냥 지워졌음). 순서는 MySQL처럼 1090이 먼저(표의 하나뿐인 열이 FK의 대상이어도 1090). `FOREIGN_KEY_CHECKS = 0`이면 외래키 검사는 건너뛴다(이전과 같음).
+
+**구현**: 자유 함수 `drop_columns_error`(`executor_ddl.cpp`)가 위의 거절을 아무것도 바꾸기 전에 모아 말하고, `exec_alter`의 `DropColumn`(한 이름)과 `Statement::AlterTable`의 선검사(여러 동작이면 `DROP COLUMN` 이름 전부)가 함께 쓴다. 열을 지운 뒤 `schema->unique_keys` · `primary_key_columns`에서 열을 빼 스키마 파일에 저장(R86의 인덱스 정리와 같은 자리). 헤더는 안 건드려서 빌드는 짧았다.
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `drop_column_constraints_r87` 36/76 → **0**(열 하나 · 셋 · 둘을 한 문장에 · 이미 `UNIQUE`인 열 · NULL 중복 · 지운 행 · 복합 `PRIMARY KEY` · 줄어든 키 위의 `UPDATE` · `REPLACE` · `ON DUPLICATE KEY UPDATE` · 외래키 둘 · 표의 마지막 열 · 한 문장에 여럿).
+- C++ 시험: 전체 **1,021 케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,524,943 · 1,524,942 · 1,524,941 assertions). 첫 최종 실행에서 기본 모드의 시간 제한 시험 하나(R63, UNION 정렬 중단)가 한 번 붉었는데, 같은 파일을 다시 돌리면 6번 모두 통과하고 기본 모드 전체를 다시 돌려도 통과했다 — 기계 부하에 따라 흔들리는 시험이고 이번 변경과 상관없다(R65 기록에도 같은 시험이 이 컴퓨터에서 붉던 적이 있음).
+- 심은 버그: 새 코드에 하나씩 심어 `[r87]` 시험이 붉어지는지 봄 — **23개** 가운데 처음에 16개를 잡았고, 살아남은 7개 중 2개는 시험을 더해 잡았다(남은 키 안의 NULL이 중복이 아닌 것 · 한 문장에서 두 번째 `DROP COLUMN`이 열이 안 남은 키를 만나는 것). 5개는 결과가 달라질 길이 없어 뺐다(한 열이 남은 `UNIQUE` · `PRIMARY KEY`를 그 열의 표시로 옮기는 넷 — 두 꼴이 똑같이 동작함을 코퍼스의 `UPDATE` · `REPLACE` · `ON DUPLICATE KEY UPDATE`로 MySQL과 견줘 확인했고 복합 `PRIMARY KEY`의 열은 이미 모두 표시가 있음; 지운 행을 중복에서 빼는 `is_visible` 검사 — 한 세션에서는 지운 행이 이미 없어 다른 세션의 커밋 안 된 삭제에서만 보임). **18개 잡음 · 5개 뺌**.
+- `test_full.sql`: R87 구역(`UNIQUE` 키 줄이기와 중복 거절, 중복이 될 키, 복합 `PRIMARY KEY`, 외래키 1829 · 1828)을 더해 CLI로 돌려 **의도한 오류 12개만**(전 8개 + 중복 `INSERT` + 중복으로 거절된 `DROP COLUMN` + 1829 + 1828).
+- 검증 도구 · 퍼저(최종 빌드): 두 세션 도구 `two_sessions.py` 596단계 차이 0, 검산 도구 12개(`verify_*.py`) 위반 0, 빌드 비교 `diff_builds.py`(R86 빌드와, 무작위 SELECT 6,000개) 차이 0, 충돌 후 복구 퍼저 다섯(시드 7700, 6회) · `fuzz_crash_fk` 시드 7701 · 동시성 퍼저 10회 불일치 0.
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
+① `SHOW DATABASES LIKE '…'` · `WHERE`는 1064로 거절. ② 표를 다시 만드는 `ALTER TABLE`(`MODIFY`)은 영향 행 0(MySQL은 복사한 행 수); 표의 `UPDATE_TIME`은 NULL. ③ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ④ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑤ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑥ 정규화한 `CHECK` · 뷰 정의, `ONLY_FULL_GROUP_BY`를 끈 집계가 고르는 행. ⑦ 표 수준 `CHECK`가 지우려는 열을 읽는 경우는 MySQL과 이미 같았고(둘 다 거절), `DROP COLUMN` 외의 동작이 데이터 때문에 중간에 실패하는 다중 동작 `ALTER`의 전부-아니면-전무는 이번에 안 봤다. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

@@ -63,7 +63,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - ALTER TABLE t MODIFY [COLUMN] 컬럼 정의 : 컬럼 타입 · 제약 변경(값도 새 타입으로 바꾸고 인덱스를 다시 만듦). NOT NULL로 바꿀 때 NULL이 있으면 형이 그대로인 제자리 변경은 1138(`Invalid use of NULL value`), 형이 바뀌면 1265(`Data truncated for column ... at row N`; R80)
 - ALTER TABLE t CHANGE [COLUMN] 옛이름 새이름 타입... : 컬럼 이름과 정의를 함께 변경
 - ALTER TABLE t RENAME COLUMN a TO b : 컬럼 이름 변경
-- ALTER TABLE t DROP [COLUMN] col : 컬럼 삭제(R86: 그 열을 읽는 인덱스에서 열을 빼고, 열이 하나도 안 남은 인덱스는 같이 사라짐 — 전에는 없는 열을 가리키는 인덱스가 남았음)
+- ALTER TABLE t DROP [COLUMN] col : 컬럼 삭제(R86: 그 열을 읽는 인덱스에서 열을 빼고, 열이 하나도 안 남은 인덱스는 같이 사라짐 — 전에는 없는 열을 가리키는 인덱스가 남았음; R87: `UNIQUE` 키(열이 하나 남으면 그 열의 `UNIQUE`가 되고, 안 남으면 사라짐)와 복합 `PRIMARY KEY`에서도 열을 빼며, 짧아진 키가 지금 있는 행에서 중복되면 오류 1062로 거절하고 아무것도 안 바꿈(`UNIQUE` 안의 NULL은 중복이 아님); FK가 필요로 하는 열은 거절 — 그 열에 외래키가 있으면 1828, 다른 표의 외래키가 가리키면 1829; 표의 열을 전부 지우려 하면 1090; `DROP COLUMN`을 여러 개 쓴 문장은 함께 보고 모두 되거나 모두 안 됨)
 - ALTER TABLE t ALTER [COLUMN] col SET DEFAULT 값 : 기본값 지정
 - ALTER TABLE t ALTER [COLUMN] col DROP DEFAULT : 기본값 제거
 - ALTER TABLE t ADD [UNIQUE] INDEX | KEY [이름] (cols) : 인덱스 추가

@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-15",
+  "generated": "2026-11-16",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -475,6 +475,14 @@
       "bothFail": 4
     },
     {
+      "name": "drop_column_constraints_r87",
+      "en": "ALTER TABLE ... DROP COLUMN and the keys that read the column: a UNIQUE key and a composite PRIMARY KEY lose it (a key with no column left goes), a shorter key that would repeat is 1062 and nothing is changed, a column an FK needs is 1828 / 1829, the only column of the table 1090",
+      "ko": "ALTER TABLE ... DROP COLUMN과 그 열을 읽는 키: UNIQUE 키와 복합 PRIMARY KEY에서 열이 빠지고(열이 안 남은 키는 사라짐), 짧아진 키가 중복되면 1062로 거절하며 아무것도 안 바뀜, FK가 필요로 하는 열은 1828 · 1829, 표의 하나뿐인 열은 1090",
+      "statements": 76,
+      "different": 0,
+      "bothFail": 15
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -525,8 +533,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1016,
-    "assertions": 1524798
+    "cases": 1021,
+    "assertions": 1524943
   },
   "bugsFound": 206
 }
