@@ -357,6 +357,104 @@ test("MCP panel: every tool has a request to ask Claude, and every group has too
   }
 });
 
+// ── ecosystemLayout (R93: the Ecosystem window) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+const eco = await load("ecosystemLayout");
+const ecoConn = (id, name = id) => ({ id, name, host: "localhost", port: 7878, user: "root", autoLogin: false, dataDir: "C:/data/" + id });
+const ecoTable = (name, rows = 0) => ({ name, columns: 3, primaryKey: ["id"], foreignKeys: 0, indexes: 1, rows, bytes: 4096 });
+const ecoDb = (name, tables) => ({ name, tables, views: 0, bytes: 8192 });
+const ecoScan = (id, databases, exists = true) => ({ id, exists, users: 1, routines: 0, triggers: 0, bytes: 20000, databases });
+const box = n => ({ l: n.cx - n.w / 2, r: n.cx + n.w / 2, t: n.cy - n.h / 2, b: n.cy + n.h / 2 });
+const overlap = (p, q) => { const a = box(p), c = box(q); return a.l < c.r && c.l < a.r && a.t < c.b && c.t < a.b; };
+test("ecosystem: no connection is the root alone, and a connection never opened has no children", () => {
+  const none = eco.layoutEcosystem([], {});
+  assert.deepEqual(none.nodes.map(n => n.id), ["root"]);
+  assert.equal(none.arrows.length, 0);
+  assert.ok(none.height >= 360);
+  for (const scans of [{}, { a: ecoScan("a", [], false) }]) {
+    const l = eco.layoutEcosystem([ecoConn("a")], scans);
+    assert.deepEqual(l.nodes.map(n => n.id), ["root", "c:a"]);
+    assert.deepEqual(l.arrows.map(a => [a.from, a.to, a.depth]), [["root", "c:a", 1]]);
+  }
+  assert.equal(eco.layoutEcosystem([ecoConn("a")], { a: ecoScan("a", [], true) }).nodes.length, 2, "an opened connection without a database has none under it");
+});
+test("ecosystem: root -> connection -> database -> table, with the arrows between them", () => {
+  const scans = {
+    a: ecoScan("a", [ecoDb("shop", [ecoTable("orders"), ecoTable("users")]), ecoDb("blog", [ecoTable("posts")])]),
+    b: ecoScan("b", [ecoDb("x", [])]),
+  };
+  const l = eco.layoutEcosystem([ecoConn("a"), ecoConn("b")], scans);
+  const byId = Object.fromEntries(l.nodes.map(n => [n.id, n]));
+  assert.deepEqual(l.nodes.map(n => n.id), ["root", "c:a", "c:a/d:shop", "c:a/d:shop/t:orders", "c:a/d:shop/t:users", "c:a/d:blog", "c:a/d:blog/t:posts", "c:b", "c:b/d:x"]);
+  assert.equal(byId["c:a/d:shop/t:users"].parent, "c:a/d:shop");
+  assert.deepEqual(l.nodes.map(n => n.depth), [0, 1, 2, 3, 3, 2, 3, 1, 2]);
+  assert.deepEqual(l.nodes.map(n => n.order), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(l.arrows.filter(a => a.depth === 1).length, 2);
+  assert.equal(l.arrows.filter(a => a.depth === 2).length, 3);
+  assert.equal(l.arrows.filter(a => a.depth === 3).length, 3, "one arrow from every database to the box of its tables");
+  assert.equal(l.groups.length, 3);
+  assert.ok(Math.abs(byId.root.cy - l.height / 2) < 1e-9, "the root stands in the middle of a small picture");
+  assert.ok(byId["c:a"].cy < byId["c:b"].cy, "connections stay in the order they were saved");
+});
+test("ecosystem: nothing overlaps, everything is inside the picture, tables sit inside the box of their database", () => {
+  const many = Array.from({ length: 13 }, (_, i) => ecoTable("t" + i));
+  const scans = {
+    a: ecoScan("a", [ecoDb("d1", many), ecoDb("d2", [ecoTable("only")]), ecoDb("d3", [])]),
+    b: ecoScan("b", [ecoDb("d4", many.slice(0, 5))]),
+    c: ecoScan("c", [], false),
+  };
+  const l = eco.layoutEcosystem([ecoConn("a"), ecoConn("b"), ecoConn("c")], scans);
+  for (const n of l.nodes) {
+    const b = box(n);
+    assert.ok(b.l >= 0 && b.r <= l.width && b.t >= 0 && b.b <= l.height, n.id + " is inside the picture");
+  }
+  for (let i = 0; i < l.nodes.length; i++) for (let j = i + 1; j < l.nodes.length; j++) assert.ok(!overlap(l.nodes[i], l.nodes[j]), l.nodes[i].id + " / " + l.nodes[j].id);
+  for (const n of l.nodes.filter(x => x.kind === "table")) {
+    const g = l.groups.find(x => x.id === n.parent), b = box(n);
+    assert.ok(b.l >= g.x && b.r <= g.x + g.w && b.t >= g.y && b.b <= g.y + g.h, n.id + " is inside its box");
+  }
+  const rowsOfD1 = new Set(l.nodes.filter(n => n.parent === "c:a/d:d1").map(n => n.cy)).size;
+  assert.equal(rowsOfD1, 3, "13 tables stand in rows of five: 3 rows");
+});
+test("ecosystem: in a tall picture the root stays on the first screen", () => {
+  const conns = Array.from({ length: 9 }, (_, i) => ecoConn("k" + i));
+  const l = eco.layoutEcosystem(conns, {});
+  assert.ok(l.height > 1000, "nine connections make a tall picture");
+  const root = l.nodes[0];
+  assert.equal(root.cy, 330);
+  assert.ok(root.cy + root.h / 2 < 600, "all of the root is in the first 600 units");
+  assert.equal(l.arrows.length, 9, "it still reaches every connection");
+});
+test("ecosystem: a database with more tables than the limit draws the first ones and one +N cylinder", () => {
+  const tables = Array.from({ length: 12 }, (_, i) => ecoTable("t" + i));
+  const l = eco.layoutEcosystem([ecoConn("a")], { a: ecoScan("a", [ecoDb("big", tables)]) }, 5);
+  const drawn = l.nodes.filter(n => n.kind === "table"), more = l.nodes.filter(n => n.kind === "more");
+  assert.equal(drawn.length, 4);
+  assert.equal(more.length, 1);
+  assert.equal(more[0].hidden, 8);
+  assert.equal(more[0].id, "c:a/d:big/more");
+  const exact = eco.layoutEcosystem([ecoConn("a")], { a: ecoScan("a", [ecoDb("big", tables.slice(0, 5))]) }, 5);
+  assert.equal(exact.nodes.filter(n => n.kind === "table").length, 5, "exactly the limit is drawn whole");
+  assert.equal(exact.nodes.filter(n => n.kind === "more").length, 0);
+});
+test("ecosystem: the path that stays lit under the mouse is the parents and everything below", () => {
+  const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1"), ecoTable("t2")]), ecoDb("d2", [ecoTable("t3")])]), b: ecoScan("b", [ecoDb("d4", [ecoTable("t4")])]) };
+  const l = eco.layoutEcosystem([ecoConn("a"), ecoConn("b")], scans);
+  assert.deepEqual([...eco.relatedTo(l.nodes, "c:a/d:d1/t:t1")].sort(), ["c:a", "c:a/d:d1", "c:a/d:d1/t:t1", "root"]);
+  assert.deepEqual([...eco.relatedTo(l.nodes, "c:a/d:d1")].sort(), ["c:a", "c:a/d:d1", "c:a/d:d1/t:t1", "c:a/d:d1/t:t2", "root"]);
+  const root = eco.relatedTo(l.nodes, "root");
+  assert.equal(root.size, l.nodes.length, "the root lights everything");
+  assert.ok(!eco.relatedTo(l.nodes, "c:a").has("c:b"));
+  assert.deepEqual([...eco.relatedTo(l.nodes, "nowhere")], ["nowhere"]);
+});
+test("ecosystem: the numbers over the picture, sizes and cut names", () => {
+  const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1", 10), ecoTable("t2", 5)]), ecoDb("d2", [ecoTable("t3", 100)])]), b: ecoScan("b", [], false) };
+  assert.deepEqual(eco.ecosystemTotals([ecoConn("a"), ecoConn("b"), ecoConn("c")], scans), { connections: 3, opened: 1, databases: 2, tables: 3, rows: 115, bytes: 20000 });
+  assert.deepEqual([512, 2048, 5 * 1024 * 1024, 3 * 1024 ** 3].map(eco.humanBytes), ["512 B", "2.0 KB", "5.0 MB", "3.00 GB"]);
+  assert.equal(eco.fitName("short", 12), "short");
+  assert.equal(eco.fitName("a_very_long_table_name", 12), "a_very_long…");
+  assert.equal(eco.fitName("한글로된아주긴테이블이름", 6), "한글로된아…", "cut by characters, not bytes");
+});
+
 // ── run ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 let failed = 0;
 for (const [name, fn] of tests) {

@@ -1291,6 +1291,144 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     Ok(format!("연결 완료! Claude Desktop을 재시작하세요.\n\nPython: {}", python_path))
 }
 
+// ─── 생태계 보기: 저장된 모든 연결의 데이터 폴더를 디스크에서 읽는다 ─────────────────────────
+// 엔진을 띄우지 않고(로그인 없이, 읽기만) 파일에서 연결 → 데이터베이스 → 테이블을 알아낸다. 데이터 폴더 = <연결의 dataDir>: 그 아래 `_`로 시작하지 않는 폴더가 데이터베이스,
+// 그 안의 `<표>.schema.json`이 테이블(열 · 기본키 · 외래키), `<표>.rdb` 머리 32바이트의 row_count가 행 수(파일에 저장된 행 버전의 수), `indexes.json` · `views.json`이 인덱스 · 뷰,
+// `_system/`의 `_users.json` · `_procedures.json` · `_functions.json` · `_triggers.json`이 사용자와 루틴. 아직 한 번도 연결하지 않은 연결은 폴더가 없다(exists: false).
+#[derive(serde::Deserialize)]
+struct EcoRequest {
+    id: String,
+    #[serde(rename = "dataDir")]
+    data_dir: String,
+}
+
+#[derive(serde::Serialize)]
+struct EcoTable {
+    name: String,
+    columns: usize,
+    #[serde(rename = "primaryKey")]
+    primary_key: Vec<String>,
+    #[serde(rename = "foreignKeys")]
+    foreign_keys: usize,
+    indexes: usize,
+    rows: u64,
+    bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct EcoDatabase {
+    name: String,
+    tables: Vec<EcoTable>,
+    views: usize,
+    bytes: u64,
+}
+
+#[derive(serde::Serialize)]
+struct EcoScan {
+    id: String,
+    exists: bool,
+    users: usize,
+    routines: usize,
+    triggers: usize,
+    bytes: u64,
+    databases: Vec<EcoDatabase>,
+}
+
+fn json_len(path: &std::path::Path) -> usize {
+    let value: Option<serde_json::Value> = std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok());
+    match value {
+        Some(serde_json::Value::Array(a)) => a.len(),
+        Some(serde_json::Value::Object(o)) => o.len(),
+        _ => 0,
+    }
+}
+
+fn dir_bytes(path: &std::path::Path, depth: u32) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    if depth < 4 { total += dir_bytes(&entry.path(), depth + 1); }
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
+}
+
+// .rdb 머리: 0..4 매직(바이트 00 'B' 'D' 'R'), 8..12 row_count (little endian)
+fn rdb_rows(path: &std::path::Path) -> u64 {
+    use std::io::Read;
+    let mut head = [0u8; 32];
+    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)) {
+        Ok(()) if &head[1..4] == b"BDR" => u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as u64,
+        _ => 0,
+    }
+}
+
+fn scan_database(dir: &std::path::Path, name: String) -> EcoDatabase {
+    let index_tables: Vec<String> = std::fs::read_to_string(dir.join("indexes.json")).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|i| i.get("table").and_then(|t| t.as_str()).map(|t| t.to_lowercase())).collect()))
+        .unwrap_or_default();
+    let mut tables = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().to_string();
+            let Some(table) = file.strip_suffix(".schema.json") else { continue };
+            let schema: serde_json::Value = match std::fs::read_to_string(entry.path()).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+                Some(v) => v,
+                None => continue,
+            };
+            let columns = schema.get("columns").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            let primary_key = columns.iter()
+                .filter(|c| c.get("primary_key").and_then(|p| p.as_bool()).unwrap_or(false))
+                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(|n| n.to_string()))
+                .collect();
+            let foreign_keys = columns.iter().filter(|c| c.get("foreign_key").map(|f| !f.is_null()).unwrap_or(false)).count();
+            let suffix = format!(".{}", table.to_lowercase());
+            let indexes = index_tables.iter().filter(|t| t.ends_with(&suffix) || **t == table.to_lowercase()).count();
+            let rdb = dir.join(format!("{}.rdb", table));
+            let bytes = rdb.metadata().map(|m| m.len()).unwrap_or(0) + entry.metadata().map(|m| m.len()).unwrap_or(0);
+            tables.push(EcoTable { name: table.to_string(), columns: columns.len(), primary_key, foreign_keys, indexes, rows: rdb_rows(&rdb), bytes });
+        }
+    }
+    tables.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    EcoDatabase { name, tables, views: json_len(&dir.join("views.json")), bytes: dir_bytes(dir, 3) }
+}
+
+#[tauri::command]
+fn scan_ecosystem(requests: Vec<EcoRequest>) -> Vec<EcoScan> {
+    requests.into_iter().map(|req| {
+        let root = std::path::PathBuf::from(&req.data_dir);
+        if req.data_dir.is_empty() || !root.is_dir() {
+            return EcoScan { id: req.id, exists: false, users: 0, routines: 0, triggers: 0, bytes: 0, databases: Vec::new() };
+        }
+        let system = root.join("_system");
+        let mut databases = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('_') || !entry.path().is_dir() { continue; }
+                databases.push(scan_database(&entry.path(), name));
+            }
+        }
+        databases.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        EcoScan {
+            id: req.id,
+            exists: true,
+            users: json_len(&system.join("_users.json")),
+            routines: json_len(&system.join("_procedures.json")) + json_len(&system.join("_functions.json")),
+            triggers: json_len(&system.join("_triggers.json")),
+            bytes: dir_bytes(&root, 0),
+            databases,
+        }
+    }).collect()
+}
+
 #[tauri::command]
 fn open_terminal() {
     let mut frontend_dir = code_dir().join("frontend");
@@ -1685,6 +1823,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            scan_ecosystem,
             execute_query,
             get_databases,
             get_current_db,

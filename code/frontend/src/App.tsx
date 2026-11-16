@@ -7,6 +7,7 @@ import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
+import EcosystemView from "./components/EcosystemView";
 import CompatView from "./components/CompatView";
 import BTreeView from "./components/BTreeView";
 import MvccView from "./components/MvccView";
@@ -427,6 +428,7 @@ function App() {
 
   // 새 연결 추가 폼 상태
   const [showNewConn, setShowNewConn] = useState(false);
+  const [showEcosystem, setShowEcosystem] = useState(false); // 홈 화면의 "Ecosystem" 버튼: 홈 전체를 생태계 창으로 바꿈
   const [newName, setNewName] = useState("New Connection");
   const [newHost, setNewHost] = useState("localhost");
   const [newPort, setNewPort] = useState("7878");
@@ -1710,6 +1712,8 @@ function App() {
 
   // ─── 로그인 화면 ────────────────────────────────────────────
   if (!loggedIn) {
+    // 생태계 창: 메뉴바 · 활동 막대 · 연결 목록 · 홈 본문을 하나도 그리지 않고 창 전체를 바꾼다
+    if (showEcosystem) return <EcosystemView connections={connections} onBack={() => setShowEcosystem(false)} />;
     const homeMenuLabels = ["File", "Edit", "View", "Run", "Terminal"];
     return (
       <div className="home-bg">
@@ -1894,6 +1898,22 @@ function App() {
                   <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.342-3.369-1.342-.454-1.154-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836a9.59 9.59 0 012.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.577.688.479C19.138 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
                 </svg>
                 Visit GitHub
+              </button>
+              <button className="home-quick-btn home-quick-eco" onClick={() => setShowEcosystem(true)} title="Every connection, database and table in one animated picture">
+                {/* 로고: 원통(데이터베이스) 하나에서 세 갈래로 퍼지는 선과 점 = 연결 → 데이터베이스 → 테이블 */}
+                <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
+                  <path d="M2.2 9.2v5.6c0 1 1.5 1.8 3.4 1.8s3.4-.8 3.4-1.8V9.2" />
+                  <ellipse cx="5.6" cy="9.2" rx="3.4" ry="1.6" fill="currentColor" fillOpacity="0.25" />
+                  <g className="eco-logo-lines">
+                    <path d="M9 11.2C12.4 11.2 12.6 5 16.6 5" />
+                    <path d="M9 12H16.6" />
+                    <path d="M9 12.8C12.4 12.8 12.6 19 16.6 19" />
+                  </g>
+                  <circle cx="19" cy="5" r="2.1" fill="currentColor" stroke="none" />
+                  <circle cx="19" cy="12" r="2.1" fill="currentColor" stroke="none" />
+                  <circle cx="19" cy="19" r="2.1" fill="currentColor" stroke="none" />
+                </svg>
+                Ecosystem
               </button>
             </div>
 

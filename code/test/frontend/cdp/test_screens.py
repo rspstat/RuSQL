@@ -263,6 +263,39 @@ def compare_schema_names_what_differs(page: Page):
     page.click(".sd-close")
 
 
+@scenario
+def the_ecosystem_window_replaces_the_home_screen(page: Page):
+    page.click(".menu-logout-btn")
+    page.wait("document.querySelectorAll('.home-quick-btn').length === 4", 20, "the home screen with its four buttons")
+    assert page.eval("[...document.querySelectorAll('.home-quick-btn')].map(b => b.innerText.trim()).join('|')") == "New Connection|Open Terminal|Visit GitHub|Ecosystem"
+    page.click(".home-quick-btn", "Ecosystem")
+    page.wait("document.querySelector('.eco-window') !== null", 10, "the Ecosystem window")
+    # the whole window is the new one: nothing of the home screen is left (menu bar, connection list, the buttons)
+    for left_over in (".home-bg", ".menu-bar", ".home-sidebar-item", ".home-quick-btn"):
+        assert page.count(left_over) == 0, left_over + " is still drawn"
+    page.click(".dg-seg button", "EN")
+    # (every cylinder has its id in data-id: c:<connection id>/d:<database>/t:<table>; the saved connections of the user are in the picture too)
+    mine = "c:cdp-test"
+    page.wait("document.querySelectorAll('[data-id^=\"%s/d:shop/t:\"]').length === 2" % mine, 20, "the two tables of shop in the test connection")
+    assert page.count('[data-id="%s"].eco-connection' % mine) == 1, "the test connection"
+    assert page.count('[data-id="%s/d:shop2/t:customers"]' % mine) == 1, "the table of shop2"
+    assert page.eval("document.querySelector('[data-id=\"%s\"] .eco-name').textContent" % mine) == CONNECTION
+    assert page.count(".dg-apacket") > 0, "packets run along the arrows"
+    # the mouse on a table: a tooltip with its facts, and what is not on its path steps back
+    page.eval("""document.querySelector('[data-id="%s/d:shop/t:orders"]').dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))""" % mine)
+    page.wait("document.querySelector('.eco-tip') !== null", 5, "the tooltip")
+    tip = page.eval("document.querySelector('.eco-tip').innerText")
+    assert "shop.orders" in tip and "4 column(s)" in tip and "primary key id" in tip and "1 foreign key(s)" in tip, tip
+    assert page.count(".eco-node.dim") > 0 and page.count(".eco-arrow.dim") > 0, "what is off the path steps back"
+    assert page.count('[data-id="%s/d:shop/t:customers"].dim' % mine) == 1 and page.count('[data-id="%s/d:shop"].dim' % mine) == 0, "its own database stays lit, its sibling table steps back"
+    page.screenshot(OUT / "ecosystem.png")
+    page.eval("""document.querySelector('[data-id="%s/d:shop/t:orders"]').dispatchEvent(new MouseEvent('mouseout', {bubbles: true}))""" % mine)
+    page.wait("document.querySelector('.eco-tip') === null && document.querySelectorAll('.eco-node.dim').length === 0", 5, "the tooltip is gone")
+    # Esc is the way back
+    page.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
+    page.wait("document.querySelector('.eco-window') === null && document.querySelectorAll('.home-quick-btn').length === 4", 10, "the home screen again")
+
+
 # ── runner ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 def main() -> int:
     only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else ""
