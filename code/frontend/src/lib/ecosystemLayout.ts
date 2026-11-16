@@ -33,13 +33,18 @@ export interface EcoArrow { d: string; from: string; to: string; depth: number }
 export interface EcoGroup { id: string; x: number; y: number; w: number; h: number }   // the box round the tables of one database
 export interface EcoLayout { width: number; height: number; nodes: EcoNode[]; arrows: EcoArrow[]; groups: EcoGroup[] }
 
-export const WIDTH = 1420;
 export const RY = 13; // vertical radius of a cylinder's top ellipse (as in the Diagram page)
 
 const ROOT = { cx: 108, w: 150, h: 108, maxCy: 330 }; // maxCy: with many connections the picture is taller than the window; the root stays in the first screen
-const CONN = { cx: 400, w: 176, h: 78 };
-const DB = { cx: 690, w: 136, h: 66 };
-const GRID = { left: 858, boxW: 546, cols: 5, cell: 104, pitch: 60, tableW: 88, tableH: 44 };
+// The three arrows between the columns (RuSQL -> connection -> database -> tables) all have the same horizontal length, ARROW (the length of the purple one, connection ->
+// database); the columns stand where that puts them. HEAD is the room the arrowhead takes before the next cylinder.
+const ARROW = 128;
+const HEAD = 6;
+const CONN_W = 176, DB_W = 136;
+const CONN = { cx: ROOT.cx + ROOT.w / 2 + ARROW + HEAD + CONN_W / 2, w: CONN_W, h: 78 };
+const DB = { cx: CONN.cx + CONN.w / 2 + ARROW + HEAD + DB_W / 2, w: DB_W, h: 66 };
+const GRID = { left: DB.cx + DB.w / 2 + ARROW + HEAD, boxW: 546, cols: 5, cell: 104, pitch: 60, tableW: 88, tableH: 44 };
+export const WIDTH = GRID.left + GRID.boxW + 16;
 const TOP = 30;
 const CONN_GAP = 16;
 const DB_GAP = 8;
@@ -86,16 +91,16 @@ export function layoutEcosystem(conns: EcoConn[], scans: Record<string, EcoScan 
     const connCy = p.top + p.height / 2;
     const connId = `c:${p.conn.id}`;
     nodes.push({ id: connId, kind: "connection", parent: rootId, depth: 1, order: order++, cx: CONN.cx, cy: connCy, w: CONN.w, h: CONN.h, conn: p.conn, scan: p.scan });
-    arrows.push({ d: curve(ROOT.cx + ROOT.w / 2, rootCy, CONN.cx - CONN.w / 2 - 6, connCy), from: rootId, to: connId, depth: 1 });
+    arrows.push({ d: curve(ROOT.cx + ROOT.w / 2, rootCy, CONN.cx - CONN.w / 2 - HEAD, connCy), from: rootId, to: connId, depth: 1 });
     for (const d of p.dbs) {
       const dbCy = d.top + d.height / 2;
       const dbId = `${connId}/d:${d.db.name}`;
       nodes.push({ id: dbId, kind: "database", parent: connId, depth: 2, order: order++, cx: DB.cx, cy: dbCy, w: DB.w, h: DB.h, conn: p.conn, scan: p.scan, db: d.db });
-      arrows.push({ d: curve(CONN.cx + CONN.w / 2, connCy, DB.cx - DB.w / 2 - 6, dbCy), from: connId, to: dbId, depth: 2 });
+      arrows.push({ d: curve(CONN.cx + CONN.w / 2, connCy, DB.cx - DB.w / 2 - HEAD, dbCy), from: connId, to: dbId, depth: 2 });
       const cells = d.shown.length + (d.hidden ? 1 : 0);
       const rows = Math.max(1, Math.ceil(cells / GRID.cols));
       groups.push({ id: dbId, x: GRID.left, y: d.top + 6, w: GRID.boxW, h: d.height - 12 });
-      arrows.push({ d: `M${DB.cx + DB.w / 2} ${dbCy} H${GRID.left - 6}`, from: dbId, to: dbId, depth: 3 });
+      arrows.push({ d: `M${DB.cx + DB.w / 2} ${dbCy} H${GRID.left - HEAD}`, from: dbId, to: dbId, depth: 3 });
       const firstY = dbCy - ((rows - 1) * GRID.pitch) / 2;
       const cellAt = (i: number) => ({ cx: GRID.left + 13 + GRID.cell / 2 + (i % GRID.cols) * GRID.cell, cy: firstY + Math.floor(i / GRID.cols) * GRID.pitch });
       d.shown.forEach((table, i) => {

@@ -446,14 +446,20 @@ test("ecosystem: the path that stays lit under the mouse is the parents and ever
   assert.ok(!eco.relatedTo(l.nodes, "c:a").has("c:b"));
   assert.deepEqual([...eco.relatedTo(l.nodes, "nowhere")], ["nowhere"]);
 });
-test("ecosystem: the horizontal arrows are long enough to be seen (R93: root 95 -> 123, connection 88 -> 128, tables 46 -> 94)", () => {
+test("ecosystem: the three horizontal arrows (root -> connection -> database -> tables) all have the length of the purple one, 128", () => {
   const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1")])]) };
   const l = eco.layoutEcosystem([ecoConn("a")], scans);
   assert.equal(l.arrows.length, 3);
-  for (const a of l.arrows) {
+  const spans = l.arrows.map(a => {
     const n = a.d.match(/-?\d+(\.\d+)?/g).map(Number);
-    const x1 = n[0], x2 = a.d.includes("H") ? n[2] : n[n.length - 2];
-    assert.ok(x2 - x1 >= 90, `${a.from} -> ${a.to} is ${x2 - x1} long`);
+    return (a.d.includes("H") ? n[2] : n[n.length - 2]) - n[0]; // end x - start x (a curve's last two numbers are its end point)
+  });
+  assert.deepEqual(spans, [128, 128, 128]);
+  // and it holds with several connections, databases and tables
+  const many = eco.layoutEcosystem([ecoConn("a"), ecoConn("b")], { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1"), ecoTable("t2")]), ecoDb("d2", [])]), b: ecoScan("b", [ecoDb("d3", [ecoTable("t3")])]) });
+  for (const a of many.arrows) {
+    const n = a.d.match(/-?\d+(\.\d+)?/g).map(Number);
+    assert.equal((a.d.includes("H") ? n[2] : n[n.length - 2]) - n[0], 128, `${a.from} -> ${a.to}`);
   }
 });
 test("ecosystem: the numbers over the picture, sizes and cut names", () => {

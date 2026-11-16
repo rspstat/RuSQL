@@ -22,7 +22,8 @@ const ZOOM_MIN = 30, ZOOM_MAX = 200; // percent, like the zoom slider of the ERD
 
 // The zoom the picture starts at: the whole width in the window (never above 100%). After that the picture keeps its size however the window is dragged: the slider
 // zooms, and what does not fit is reached with the scrollbars.
-const fitZoom = () => Math.max(ZOOM_MIN, Math.min(100, Math.floor(((window.innerWidth - 64) / WIDTH) * 100)));
+// (80 px off the window: the 56 px padding of the scroll area, its 10 px vertical scrollbar and a little air -- with 64 the picture was 1 px too wide and the horizontal scrollbar was there at once.)
+const fitZoom = () => Math.max(ZOOM_MIN, Math.min(100, Math.floor(((window.innerWidth - 80) / WIDTH) * 100)));
 
 function loadLang(): Lang {
   try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }

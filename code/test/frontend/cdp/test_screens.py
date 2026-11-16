@@ -298,11 +298,17 @@ def the_ecosystem_window_replaces_the_home_screen(page: Page):
 
 @scenario
 def the_ecosystem_window_zooms_and_scrolls_sideways(page: Page):
+    if page.count(".menu-logout-btn"):  # (run alone, the scenarios before it have left the app signed in)
+        page.click(".menu-logout-btn")
+    page.wait("document.querySelectorAll('.home-quick-btn').length === 4", 20, "the home screen")
     page.click(".home-quick-btn", "View Topology")
     page.wait("document.querySelector('.eco-window') !== null && document.querySelectorAll('.eco-node').length > 3", 20, "the Ecosystem window")
     width = lambda: page.eval("document.querySelector('.eco-svg').getBoundingClientRect().width")  # noqa: E731
     set_zoom = lambda value: page.eval("""(() => { const s = document.querySelector('.eco-zoom input');
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(s, %d); s.dispatchEvent(new Event('input', {bubbles: true})); })()""" % value)  # noqa: E731
+    # at the zoom it opens with the whole picture fits the window: no horizontal scrollbar until the user zooms in or narrows the window
+    first = page.eval("(() => { const s = document.querySelector('.eco-scroll'); return [s.scrollWidth, s.clientWidth, window.innerWidth]; })()")
+    assert first[0] <= first[1], ("the picture overflows at its first zoom", first)
     # the slider is a small one left of Refresh (like the ERD's), with its percentage
     assert page.eval("(() => { const z = document.querySelector('.eco-zoom').getBoundingClientRect(), r = document.querySelector('.eco-refresh').getBoundingClientRect(); return z.right <= r.left && Math.abs(z.top - r.top) < 30; })()"), "the slider is left of Refresh"
     set_zoom(100)
