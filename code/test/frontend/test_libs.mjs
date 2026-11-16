@@ -446,6 +446,16 @@ test("ecosystem: the path that stays lit under the mouse is the parents and ever
   assert.ok(!eco.relatedTo(l.nodes, "c:a").has("c:b"));
   assert.deepEqual([...eco.relatedTo(l.nodes, "nowhere")], ["nowhere"]);
 });
+test("ecosystem: the horizontal arrows are long enough to be seen (R93: root 95 -> 123, connection 88 -> 128, tables 46 -> 94)", () => {
+  const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1")])]) };
+  const l = eco.layoutEcosystem([ecoConn("a")], scans);
+  assert.equal(l.arrows.length, 3);
+  for (const a of l.arrows) {
+    const n = a.d.match(/-?\d+(\.\d+)?/g).map(Number);
+    const x1 = n[0], x2 = a.d.includes("H") ? n[2] : n[n.length - 2];
+    assert.ok(x2 - x1 >= 90, `${a.from} -> ${a.to} is ${x2 - x1} long`);
+  }
+});
 test("ecosystem: the numbers over the picture, sizes and cut names", () => {
   const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1", 10), ecoTable("t2", 5)]), ecoDb("d2", [ecoTable("t3", 100)])]), b: ecoScan("b", [], false) };
   assert.deepEqual(eco.ecosystemTotals([ecoConn("a"), ecoConn("b"), ecoConn("c")], scans), { connections: 3, opened: 1, databases: 2, tables: 3, rows: 115, bytes: 20000 });

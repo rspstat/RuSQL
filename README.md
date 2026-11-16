@@ -769,7 +769,7 @@ code/
     │   └── live_check.py             the same tools and max_connections against a real engine_server (starts it on free ports, ends it again)
     ├── frontend/
     │   ├── test_libs.mjs             the DOM-free libs of the app (plan diagram, index advice, schema diff, chart, sessions, ecosystem layout) and that the AI MCP panel lists exactly the tools of mcp_server.py
-    │   └── cdp/                      screen tests: starts the app and goes through 13 screen scenarios (home, SQL editor, plan diagram, ERD, Server Manager, Compare Schema, Ecosystem, ...) over the DevTools Protocol (py -3 code/test/frontend/cdp/test_screens.py)
+    │   └── cdp/                      screen tests: starts the app and goes through 14 screen scenarios (home, SQL editor, plan diagram, ERD, Server Manager, Compare Schema, Ecosystem, ...) over the DevTools Protocol (py -3 code/test/frontend/cdp/test_screens.py)
     ├── diff/
     │   ├── diff_builds.py         runs one random SELECT corpus on two engine_server builds and compares the output (for changes that must not alter a result)
     │   ├── verify_orderby_distinct.py  checks ORDER BY / DISTINCT of one build on that corpus (tables sharing column names, columns spelled `t.id`) against the same statements without them

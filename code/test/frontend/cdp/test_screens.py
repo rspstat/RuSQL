@@ -296,6 +296,39 @@ def the_ecosystem_window_replaces_the_home_screen(page: Page):
     page.wait("document.querySelector('.eco-window') === null && document.querySelectorAll('.home-quick-btn').length === 4", 10, "the home screen again")
 
 
+@scenario
+def the_ecosystem_window_zooms_and_scrolls_sideways(page: Page):
+    page.click(".home-quick-btn", "View Topology")
+    page.wait("document.querySelector('.eco-window') !== null && document.querySelectorAll('.eco-node').length > 3", 20, "the Ecosystem window")
+    width = lambda: page.eval("document.querySelector('.eco-svg').getBoundingClientRect().width")  # noqa: E731
+    set_zoom = lambda value: page.eval("""(() => { const s = document.querySelector('.eco-zoom input');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(s, %d); s.dispatchEvent(new Event('input', {bubbles: true})); })()""" % value)  # noqa: E731
+    # the slider is a small one left of Refresh (like the ERD's), with its percentage
+    assert page.eval("(() => { const z = document.querySelector('.eco-zoom').getBoundingClientRect(), r = document.querySelector('.eco-refresh').getBoundingClientRect(); return z.right <= r.left && Math.abs(z.top - r.top) < 30; })()"), "the slider is left of Refresh"
+    set_zoom(100)
+    page.wait("document.querySelector('.eco-zoom-label').textContent === '100%'", 5, "100%")
+    full = width()
+    set_zoom(50)
+    page.wait("document.querySelector('.eco-zoom-label').textContent === '50%'", 5, "50%")
+    assert abs(width() - full / 2) < 2, (width(), full)
+    # dragging the window's edge no longer zooms the picture (only the slider does)
+    page.call("Emulation.setDeviceMetricsOverride", width=900, height=700, deviceScaleFactor=1, mobile=False)
+    try:
+        time.sleep(0.5)
+        assert abs(width() - full / 2) < 2, ("the picture changed with the window", width())
+        # wider than the window: the horizontal scrollbar is there and moves the picture
+        set_zoom(100)
+        page.wait("document.querySelector('.eco-zoom-label').textContent === '100%'", 5, "100% again")
+        box = page.eval("(() => { const s = document.querySelector('.eco-scroll'); return [s.scrollWidth, s.clientWidth]; })()")
+        assert box[0] > box[1], ("no horizontal overflow", box)
+        left = page.eval("(() => { const s = document.querySelector('.eco-scroll'); s.scrollLeft = 300; return s.scrollLeft; })()")
+        assert left >= 250, left
+    finally:
+        page.call("Emulation.clearDeviceMetricsOverride")
+    page.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
+    page.wait("document.querySelector('.eco-window') === null && document.querySelectorAll('.home-quick-btn').length === 4", 10, "the home screen again")
+
+
 # ── runner ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 def main() -> int:
     only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else ""

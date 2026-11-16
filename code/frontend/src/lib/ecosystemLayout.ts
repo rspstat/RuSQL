@@ -33,13 +33,13 @@ export interface EcoArrow { d: string; from: string; to: string; depth: number }
 export interface EcoGroup { id: string; x: number; y: number; w: number; h: number }   // the box round the tables of one database
 export interface EcoLayout { width: number; height: number; nodes: EcoNode[]; arrows: EcoArrow[]; groups: EcoGroup[] }
 
-export const WIDTH = 1300;
+export const WIDTH = 1420;
 export const RY = 13; // vertical radius of a cylinder's top ellipse (as in the Diagram page)
 
 const ROOT = { cx: 108, w: 150, h: 108, maxCy: 330 }; // maxCy: with many connections the picture is taller than the window; the root stays in the first screen
-const CONN = { cx: 372, w: 176, h: 78 };
-const DB = { cx: 622, w: 136, h: 66 };
-const GRID = { left: 742, boxW: 546, cols: 5, cell: 104, pitch: 60, tableW: 88, tableH: 44 };
+const CONN = { cx: 400, w: 176, h: 78 };
+const DB = { cx: 690, w: 136, h: 66 };
+const GRID = { left: 858, boxW: 546, cols: 5, cell: 104, pitch: 60, tableW: 88, tableH: 44 };
 const TOP = 30;
 const CONN_GAP = 16;
 const DB_GAP = 8;

@@ -7,17 +7,22 @@
 // so what another RuSQL window or Claude does shows up. A connection that was never opened has no data folder yet and is drawn dashed. The geometry is
 // lib/ecosystemLayout.ts (tested); this file draws it and writes the words. Every visible string is an English/Korean pair, the language is the one of the Diagram page.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowDefs, C, L, LangContext, headId, tint, useT } from "./diagramShared";
 import type { Lang, Text } from "./diagramShared";
-import { RY, ecosystemTotals, fitName, humanBytes, layoutEcosystem, relatedTo } from "../lib/ecosystemLayout";
+import { RY, WIDTH, ecosystemTotals, fitName, humanBytes, layoutEcosystem, relatedTo } from "../lib/ecosystemLayout";
 import type { EcoConn, EcoNode, EcoScan } from "../lib/ecosystemLayout";
 import "./DiagramView.css";
 import "./EcosystemView.css";
 
 const LANG_KEY = "rusql_diagram_lang"; // shared with the Diagram page: one choice for both
 const REFRESH_MS = 4000;
+const ZOOM_MIN = 30, ZOOM_MAX = 200; // percent, like the zoom slider of the ERD
+
+// The zoom the picture starts at: the whole width in the window (never above 100%). After that the picture keeps its size however the window is dragged: the slider
+// zooms, and what does not fit is reached with the scrollbars.
+const fitZoom = () => Math.max(ZOOM_MIN, Math.min(100, Math.floor(((window.innerWidth - 64) / WIDTH) * 100)));
 
 function loadLang(): Lang {
   try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
@@ -163,6 +168,22 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
   const [again, setAgain] = useState(0);
   const [hover, setHover] = useState<string | null>(null);
   const seen = useRef("");
+  const [zoom, setZoom] = useState(fitZoom);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const keepCenter = useRef<{ left: number; top: number } | null>(null);
+  // Zooming keeps the point in the middle of the window where it is (the scrollbars are moved after the picture has its new size).
+  const zoomTo = (next: number) => {
+    const box = scrollRef.current;
+    if (box) {
+      const k = next / zoom;
+      keepCenter.current = { left: (box.scrollLeft + box.clientWidth / 2) * k - box.clientWidth / 2, top: (box.scrollTop + box.clientHeight / 2) * k - box.clientHeight / 2 };
+    }
+    setZoom(next);
+  };
+  useLayoutEffect(() => {
+    const box = scrollRef.current, keep = keepCenter.current;
+    if (box && keep) { box.scrollLeft = keep.left; box.scrollTop = keep.top; keepCenter.current = null; }
+  }, [zoom]);
   const requestKey = useMemo(() => JSON.stringify(connections.map(c => [c.id, c.dataDir])), [connections]);
 
   useEffect(() => {
@@ -199,20 +220,25 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
         <span><b>{num(totals.tables)}</b>{t(L(" tables", "개 테이블"))}</span>
         <span><b>{num(totals.rows)}</b>{t(L(" rows", "개 행"))}</span>
         <span><b>{humanBytes(totals.bytes)}</b>{t(L(" on disk", " 디스크"))}</span>
+        <div className="eco-zoom">
+          <input type="range" min={ZOOM_MIN} max={ZOOM_MAX} value={zoom} onChange={e => zoomTo(Number(e.target.value))}
+            title={t(L(`Zoom (${ZOOM_MIN}~${ZOOM_MAX}%)`, `확대/축소 (${ZOOM_MIN}~${ZOOM_MAX}%)`))} aria-label={t(L("Zoom", "확대/축소"))} />
+          <span className="eco-zoom-label">{zoom}%</span>
+        </div>
         <button className="eco-refresh" onClick={() => setAgain(n => n + 1)} title={t(L("Read the data folders again", "데이터 폴더를 다시 읽기"))}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0012 4a8 8 0 108 8h-2a6 6 0 11-1.76-4.24L13 11h7V4l-2.35 2.35z" /></svg>
           {t(L("Refresh", "새로 고침"))}
         </button>
       </div>
 
-      <div className="eco-scroll">
+      <div className="eco-scroll" ref={scrollRef}>
         {!loaded ? (
           <div className="eco-note">{t(L("Reading the data folders…", "데이터 폴더를 읽는 중…"))}</div>
         ) : connections.length === 0 ? (
           <div className="eco-note">{t(L("There is no saved connection yet. Add one on the home screen and it appears here.", "저장된 연결이 아직 없습니다. 홈 화면에서 연결을 추가하면 여기에 나타납니다."))}</div>
         ) : (
-          <div className="eco-wrap">
-            <svg className="eco-svg" viewBox={`0 0 ${layout.width} ${layout.height}`} role="group"
+          <div className="eco-wrap" style={{ width: (layout.width * zoom) / 100, height: (layout.height * zoom) / 100 }}>
+            <svg className="eco-svg" width={(layout.width * zoom) / 100} height={(layout.height * zoom) / 100} viewBox={`0 0 ${layout.width} ${layout.height}`} role="group"
               aria-label={t(L("Cylinder picture of every connection, database and table", "모든 연결 · 데이터베이스 · 테이블의 원통 그림"))}>
               {layout.groups.map(g => (
                 <rect key={g.id} className={`eco-group${related && !related.has(g.id) ? " dim" : ""}`} x={g.x} y={g.y} width={g.w} height={g.h} rx="12" />

@@ -91,11 +91,32 @@
   font-variant-numeric: tabular-nums;
 }
 
+.eco-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.eco-zoom input[type="range"] {
+  width: 96px;
+  height: 4px;
+  accent-color: #4ec9b0;
+  cursor: pointer;
+}
+
+.eco-zoom-label {
+  min-width: 36px;
+  text-align: right;
+  font: 11px 'Consolas', monospace;
+  color: #858585;
+}
+
 .eco-refresh {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
+  margin-left: 4px;
   padding: 4px 12px;
   background: transparent;
   border: 1px solid #3a3a3d;
@@ -124,17 +145,14 @@
   padding: 4px 28px 20px;
 }
 
+/* the picture has the size the zoom slider says (set in the page), so dragging the window does not zoom it: what does not fit is reached with the scrollbars */
 .eco-wrap {
   position: relative;
-  max-width: 1500px;
-  min-width: 940px;
   margin: 0 auto;
 }
 
 .eco-svg {
   display: block;
-  width: 100%;
-  height: auto;
 }
 
 .eco-note {
