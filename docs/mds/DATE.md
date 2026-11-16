@@ -3560,6 +3560,27 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 6번 표에 새 줄 둘):
 ① **`ROUND` · `TRUNCATE`의 D가 보이는 자릿수보다 클 때** — MySQL은 인수가 *보이는* 자릿수에서 멈춘다(`ROUND(10 / 3, 6)`은 `3.3333`, `TRUNCATE(10 / 3, 6)`도). 여기는 들고 있는 9자리를 쓴다(`3.333333`). 나눗셈에 있던 차이인데 `AVG`가 같은 몫을 들게 되어 `ROUND(AVG(v) * 3, 6)`도 `5.000000`(MySQL `5.0000`)이 된다 — `fn_round`가 값 글자만 받아 보이는 자릿수를 모르기 때문. ② **결과 자릿수 맞춤**: `COALESCE(1.5, 2.25)`가 `1.50`(MySQL), `IFNULL(n, 0)`이 `0.00`, `LEAST`, `UNION`의 열은 가장 넓은 자릿수 — 값은 같고 글자만 다르다(비교기를 `--exact`로 돌리면 17문장; RECOMMAND의 같은 줄에 묶여 있던 것을 갈랐다). ③ 평균을 `IFNULL`/`COALESCE`/`CASE` 말고 다른 함수로 감싸면 보이는 값이 넘어간다 — `ABS(AVG(v)) * 3` · `GREATEST(AVG(v), 1) * 3` · `NULLIF(AVG(v), 0) * 3`은 `5.0001`(MySQL `5.0000`), `CAST(AVG(v) AS DECIMAL(20,9)) * 3`은 `5.000100000`(MySQL `4.999999998`) — 그런 함수는 인수를 글자로 받는다(`-AVG(v) * 3` · `(AVG(v)) * 3` · `CAST(… AS DECIMAL(10,4)) * 3`은 이미 같음). ④ 저장한 평균(`CREATE TABLE … AS SELECT AVG(v)`)은 보이는 4자리로 저장돼 `a * 3`이 `5.0001`이다(MySQL도 같아 코퍼스로 확인).
 
+### 11월 16일 — R92: 설치 파일에 엔진을 묶음 (발표 PC에서 앱이 뜨게)
+
+**왜 이 항목인가**: R91 뒤에 "엔진 묶기란?"을 물으셨고 설명을 드린 다음 "**코드 수정 진행해주세요**"라고 했다. RECOMMAND 1번 표에서 "고장 나면 나머지가 소용없는 항목"으로 맨 앞에 둔 것: 발표 PC에 설치 파일만 깔면 앱은 뜨는데 엔진이 없어 연결이 안 되는 위험. 엔진 · C++ 시험은 건드리지 않았다(그래서 전체 시험 · 점수판 · 문서 숫자는 그대로).
+
+**무엇이 문제였나**: 앱(`main.rs`)은 엔진을 `code_dir()/build/backend/server/Release/engine_server.exe`에서만 찾았고, 릴리즈 exe에서 `code_dir()`은 "exe 위로 다섯 단계 = `code/`"라는 가정이었다. 연결 목록 · `ui_commands.json` · `app_instances.json` · MCP 스크립트도 `code/` 아래. `tauri.conf.json`에는 `resources`/`externalBin`이 없어 설치 파일에 엔진이 없었고 설치 폴더에는 `code/`가 없었다. 엔진 자체도 `MSVCP140.dll` · `VCRUNTIME140.dll` · `VCRUNTIME140_1.dll`(VC++ 런타임)을 import해서, 재배포 패키지를 깐 적 없는 PC에서는 엔진이 안 뜬다(`engine_server.exe`의 import 표로 확인).
+
+**고친 것**
+- `tauri.conf.json`: NSIS 설치 파일만(`targets = ["nsis"]`, 사용자 단위 설치라 관리자 권한이 필요 없고 설치 폴더에 쓸 수 있음), `resources`로 `engine/engine_server.exe` + 런타임 DLL 셋 + `mcp/mcp_server.py` · `requirements.txt`를 실행 파일 옆에 설치, `webviewInstallMode = embedBootstrapper`, `productName = "RuSQL"`, `beforeBuildCommand`에 `npm run stage-engine` 추가.
+- `scripts/stage-engine.mjs`(새): Release 엔진과 System32의 런타임 DLL 셋을 `src-tauri/engine/`(gitignore)로 복사하고, 없거나 작으면 **빌드를 멈춘다** — 엔진 없는 설치 파일이 만들어질 수 없다. `build.rs`는 개발 중 그 파일이 없으면 빈 자리표시 파일을 만들어 `tauri-build`(리소스가 없으면 실패)가 개발 빌드를 막지 않게 한다.
+- `main.rs`: `in_code_tree()`(소스 트리 안인가) → 예전 그대로; 트리 밖이고 `exe 옆/engine/engine_server.exe`(1 MB 넘음)가 있으면 그것(`bundled_engine_path`). 데이터는 `data_root()`: `RUSQL_DATA_DIR` > 번들이면 `%APPDATA%\RuSQL\data` > `code/data`. 연결 목록 · `ui_commands.json` · `app_instances.json` · `get_app_data_dir` · MCP 설정(`RUSQL_DATA_DIR`을 같이 써 줌)이 모두 이것을 쓴다. `mcp_server.py`는 `RUSQL_DATA_DIR`이 있으면 그 폴더를 쓴다.
+- **같이 찾은 잠복 버그**: 시작할 때 `data` 폴더를 만들지 않아서, 폴더가 없으면 앱의 백그라운드 스레드(`UiCommandsLock::acquire`, 락 파일을 `create_new`로 만드는 무한 루프)가 영원히 돌았다 — 처음 설치한 PC에서 MCP · 하트비트가 안 되는 문제. 시작할 때 폴더를 만든다.
+- 한 번 틀린 판단: 처음에는 번들 엔진이 있으면 항상 그것을 쓰게 했는데, `tauri-build`가 `target/release/engine/`에도 복사해 두는 바람에 **트리 안에서 `target/release/rusql-ui.exe`를 그냥 실행하는 개발 흐름**도 번들 엔진 + `%APPDATA%` 데이터로 바뀌었다 — 시험으로 알아내 `in_code_tree()`로 구분했다.
+
+**확인**
+- 설치 파일을 만들어(`RuSQL_2.3.0_x64-setup.exe` 6.2 MB) 설치하지 않고 Bandizip으로 풀어 내용을 봤다: `rusql-ui.exe` · `engine/`(엔진 + DLL 3개) · `mcp/` · `uninstall.exe` · WebView2 부트스트래퍼 — 코드가 기대하는 배치 그대로.
+- 새 시험 `code/test/frontend/cdp/test_installed_layout.py`(Windows Python, 앱의 DevTools 포트와 앱 자신의 명령을 씀): 풀어 낸 폴더를 코드 트리와 떨어진 곳에서 실행(APPDATA · WebView2 프로필은 임시)해 **19개 전부 통과** — 데이터 폴더가 `%APPDATA%\RuSQL\data`, 로그인이 되고 엔진이 그 폴더의 `engine/engine_server.exe`이며, 엔진이 **그 폴더의 `msvcp140.dll` · `vcruntime140.dll` · `vcruntime140_1.dll`을 읽었고**(프로세스의 모듈 경로로 확인), `SELECT` · 표 생성이 되고, 연결 목록이 `%APPDATA%` 아래에 저장되고, 하트비트 스레드가 돌고, 코드 트리의 `data/connections.json`은 그대로.
+- **반증**: 엔진 없이 exe만 복사한 폴더에서는 같은 시험이 **14개 실패**(로그인 불가 포함). `--tree`(트리 안의 릴리즈 exe)는 `code/build`의 엔진을 쓴다. 기존 화면 시험 12개(디버그 빌드)는 그대로 통과.
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md` 1번 표):
+① **깨끗한 PC(또는 새 사용자 계정)에서 설치 파일 실행 → 연결 → 질의를 직접 한 번**: 이 PC에는 VC++ 재배포 패키지와 WebView2가 이미 있어 "없을 때"를 재현할 수 없다(런타임 DLL은 번들 쪽을 읽는다는 것까지만 증명했다). ② WebView2가 없는 오프라인 PC: 설치 파일은 부트스트래퍼만 품어 설치 때 인터넷이 필요하다(전체 런타임을 품으면 +170 MB). ③ MCP를 쓰려면 그 PC에 Python과 `mcp` 패키지가 따로 필요하다. ④ 설치 파일을 실제로 실행(설치)해 보지는 않았다(레지스트리 · 시작 메뉴를 건드리므로 풀어 내는 것으로 대신함 — 설치 관련 NSIS 동작은 `tauri build`가 만든 표준 스크립트).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

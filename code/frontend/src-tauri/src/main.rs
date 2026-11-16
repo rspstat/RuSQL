@@ -107,9 +107,9 @@ struct ServerStatus {
 // 빌드 당시 소스 체크아웃 경로를 실행 파일에 그대로 박아 넣어서, 빌드한 PC와 다른 곳에
 // 복사하면 존재하지 않는 디렉터리를 가리키게 됐다. 디버그 빌드(`cargo tauri dev`)에서는
 // 그대로 CARGO_MANIFEST_DIR 기준으로 계산하고(개발 중엔 항상 유효), 릴리즈 빌드에서는
-// 실행 파일이 실제로 지금 있는 위치(`current_exe()`) 기준으로 계산한다. 이 프로젝트는
-// 정식 인스톨러/사이드카 바이너리 번들링 파이프라인이 없고 "code/ 트리 전체를 복사해서
-// 어디서든 실행"하는 모델이므로, 그 모델은 유지한 채 컴파일타임 하드코딩만 없앤다.
+// 실행 파일이 실제로 지금 있는 위치(`current_exe()`) 기준으로 계산한다. "code/ 트리 전체를
+// 복사해서 어디서든 실행"하는 모델은 그대로 두고 컴파일타임 하드코딩만 없앴다. 인스톨러로 설치한 앱은
+// code/ 트리가 없으므로 아래 bundled_engine_path()/data_root()가 설치 폴더와 %APPDATA%를 쓴다.
 fn code_dir() -> std::path::PathBuf {
     if cfg!(debug_assertions) {
         // CARGO_MANIFEST_DIR = .../code/frontend/src-tauri → 두 단계 상위 = code/
@@ -128,6 +128,58 @@ fn code_dir() -> std::path::PathBuf {
     }
 }
 
+// ─── 설치본(번들) 위치 ───────────────────────────────────────
+// 설치본에는 code/ 트리가 없다. tauri.conf.json의 bundle.resources가 실행 파일 옆에 engine/(engine_server.exe와 그것이 쓰는 VC++ 런타임 DLL)와
+// mcp/(mcp_server.py)를 같이 설치하므로, 그 모양이면 엔진과 MCP 스크립트를 거기서 찾고 데이터는 사용자별로 쓸 수 있는 %APPDATA%\RuSQL\data에 둔다
+// (설치 폴더는 쓸 수 없을 수 있다). 소스 트리 안(디버그 빌드 cargo tauri dev, 트리 안에서 실행한 릴리즈 exe)에서는 번들을 쓰지 않고 예전 방식 그대로다.
+fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))
+}
+
+// 소스 트리(code/) 안에서 실행 중인가. 그 트리에는 방금 빌드한 엔진 · MCP 스크립트 · data 폴더가 있으므로 번들보다 그것을 쓴다 (target/release/rusql-ui.exe를 트리 안에서
+// 그냥 실행하는 개발자의 흐름 -- UI · CLI · MCP가 같은 code/data를 본다). tauri-build는 target/release/engine/에도 번들 파일을 복사해 두므로 구분이 필요하다.
+fn in_code_tree() -> bool {
+    let root = code_dir();
+    root.is_absolute() && root.join("mcp").join("mcp_server.py").is_file()
+}
+
+// 번들된 엔진: 실행 파일 옆 engine/engine_server.exe. 1 MB가 안 되는 파일은 build.rs가 만든 자리표시 파일(릴리즈 빌드 전 scripts/stage-engine.mjs가 진짜로 바꾼다)이라 없는 것으로 본다.
+fn bundled_engine_path() -> Option<std::path::PathBuf> {
+    if cfg!(debug_assertions) || in_code_tree() {
+        return None;
+    }
+    let path = exe_dir()?.join("engine").join("engine_server.exe");
+    let big_enough = path.metadata().map(|m| m.len() > 1 << 20).unwrap_or(false);
+    big_enough.then_some(path)
+}
+
+// 앱 · MCP 서버 · 연결 목록이 함께 쓰는 data 폴더. RUSQL_DATA_DIR이 있으면 그것(MCP 서버에도 같은 값을 넘겨 두 프로세스가 같은 파일을 본다).
+fn data_root() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("RUSQL_DATA_DIR") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    if bundled_engine_path().is_some() {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return std::path::PathBuf::from(appdata).join("RuSQL").join("data");
+        }
+    }
+    code_dir().join("data")
+}
+
+fn mcp_server_script() -> std::path::PathBuf {
+    if bundled_engine_path().is_some() {
+        if let Some(dir) = exe_dir() {
+            let bundled = dir.join("mcp").join("mcp_server.py");
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+    }
+    code_dir().join("mcp").join("mcp_server.py")
+}
+
 // ─── C++ engine_server.exe 위치/포트 헬퍼 ─────────────────────
 // MSVC Debug 빌드는 최적화가 전혀 없어 Release 대비 한 자릿수~두 자릿수 배 느리다
 // (실측: 단건 INSERT 9x, Bulk DELETE 21x, SeqScan 22x 등) -- UI가 항상 Debug 바이너리를
@@ -136,6 +188,9 @@ fn code_dir() -> std::path::PathBuf {
 // 빌드된 쪽을 쓴다 (특정 설정 하나로 고정하면 반대 방향의 "왜 최신 빌드가 반영 안 되지"
 // 혼란이 재발할 뿐이라 mtime 비교가 더 안전하다).
 fn engine_server_path() -> std::path::PathBuf {
+    if let Some(bundled) = bundled_engine_path() {
+        return bundled; // 설치본: 실행 파일 옆에 같이 설치된 엔진
+    }
     let build_dir = code_dir().join("build").join("backend").join("server");
     let release = build_dir.join("Release").join("engine_server.exe");
     let debug = build_dir.join("Debug").join("engine_server.exe");
@@ -816,8 +871,8 @@ fn start_server(conn_id: String, port: u16, mysql_port: u16, state: State<AppSta
 
 #[tauri::command]
 fn get_app_data_dir(_app: tauri::AppHandle) -> String {
-    // code/ 폴더를 기준으로 사용 → UI와 CLI/서버가 같은 데이터 공유
-    code_dir().join("data").to_string_lossy().to_string()
+    // code/ 폴더를 기준으로 사용 → UI와 CLI/서버가 같은 데이터 공유 (설치본은 %APPDATA%\RuSQL\data)
+    data_root().to_string_lossy().to_string()
 }
 
 // ─── 저장된 연결 목록 ──────────────────────────────────────────
@@ -845,7 +900,7 @@ struct ConnectionEntry {
 }
 
 fn connections_file_path() -> std::path::PathBuf {
-    code_dir().join("data").join("connections.json")
+    data_root().join("connections.json")
 }
 
 #[tauri::command]
@@ -1168,7 +1223,7 @@ fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> R
 
 #[tauri::command]
 fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> Result<String, String> {
-    let mcp_server_path = code_dir().join("mcp").join("mcp_server.py");
+    let mcp_server_path = mcp_server_script();
 
     if !mcp_server_path.exists() {
         return Err(format!("mcp_server.py를 찾을 수 없습니다:\n{}", mcp_server_path.display()));
@@ -1192,6 +1247,8 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
             "RUSQL_USER": user,
             "RUSQL_PASS": password,
             "RUSQL_APP_PATH": app_path,
+            // 앱과 같은 data 폴더(connections.json · ui_commands.json · app_instances.json) -- 설치본은 MCP 스크립트가 code/ 옆이 아니라 설치 폴더에 있어 알려 줘야 한다
+            "RUSQL_DATA_DIR": data_root().to_string_lossy().to_string(),
         },
         // 파괴적이거나(삭제·자격증명 변경) 위험 SQL 확인 우회처럼 사람이 매번 다시 확인해야
         // 하는 도구는 일부러 뺐다 — Claude Desktop 자체 권한 팝업이 마지막 방어선.
@@ -1236,7 +1293,10 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
 
 #[tauri::command]
 fn open_terminal() {
-    let frontend_dir = code_dir().join("frontend");
+    let mut frontend_dir = code_dir().join("frontend");
+    if !frontend_dir.is_dir() { // 설치본에는 소스 트리가 없다: 실행 파일 폴더에서 연다
+        frontend_dir = exe_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    }
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "cmd"])
         .current_dir(frontend_dir)
@@ -1360,7 +1420,7 @@ struct UiCommand {
 }
 
 fn ui_commands_file_path() -> std::path::PathBuf {
-    code_dir().join("data").join("ui_commands.json")
+    data_root().join("ui_commands.json")
 }
 
 // ui_commands.json에 대한 파일 기반 상호 배제 락. 이 파일은 이 배경 스레드/
@@ -1418,7 +1478,7 @@ struct AppInstance {
 }
 
 fn app_instances_file_path() -> std::path::PathBuf {
-    code_dir().join("data").join("app_instances.json")
+    data_root().join("app_instances.json")
 }
 
 fn instances_lock_path() -> std::path::PathBuf {
@@ -1567,6 +1627,8 @@ fn generate_instance_id() -> String {
 
 // ─── 엔트리포인트 ─────────────────────────────────────────────
 fn main() {
+    // data 폴더가 없으면 UiCommandsLock::acquire()가 락 파일을 못 만들어 영원히 도므로(설치본의 첫 실행) 먼저 만든다
+    let _ = std::fs::create_dir_all(data_root());
     tauri::Builder::default()
         .manage(AppState {
             db: Arc::new(Mutex::new(None)),

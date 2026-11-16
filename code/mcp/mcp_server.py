@@ -1485,7 +1485,8 @@ def explain_schema(database: str) -> str:
 # 그대로 공유 — 이 파일이 두 프로세스 사이의 유일한 다리다(웹뷰 localStorage는 이 프로세스가
 # 접근할 방법이 없음). UI가 홈 화면(로그인 전)에서 3초마다 이 파일을 다시 읽으므로, 여기서
 # 추가/삭제하면 앱을 재시작하지 않아도 잠시 후 화면에 반영된다.
-_CONNECTIONS_FILE = Path(__file__).resolve().parent.parent / "data" / "connections.json"
+_DATA_DIR = Path(os.environ["RUSQL_DATA_DIR"]) if os.environ.get("RUSQL_DATA_DIR") else Path(__file__).resolve().parent.parent / "data"  # (an installed app: the UI passes its %APPDATA% folder)
+_CONNECTIONS_FILE = _DATA_DIR / "connections.json"
 
 
 def _load_connections() -> list[dict]:
@@ -1597,7 +1598,7 @@ def update_connection(id_or_name: str, name: str = "", host: str = "", port: int
 # 여기서 잠깐 폴링해 기다렸다가 돌려준다. Phase 17에서 제거됐던 UI 제어 도구들과
 # 겉모습은 비슷하지만, 그때는 응답하는 쪽이 아예 없는 죽은 프로토콜이었고 이번엔
 # main.rs 스레드 + App.tsx의 uiCmdHandlerRef가 실제로 응답한다.
-_UI_COMMANDS_FILE = Path(__file__).resolve().parent.parent / "data" / "ui_commands.json"
+_UI_COMMANDS_FILE = _DATA_DIR / "ui_commands.json"
 _UI_COMMAND_TIMEOUT_SEC = 30.0
 _UI_COMMAND_POLL_SEC = 0.2
 _MAX_UI_COMMAND_TIMEOUT_SEC = 600.0  # execute_in_editor의 timeout_seconds 상한
@@ -1792,7 +1793,7 @@ def execute_in_editor(query: str = "", tab: str = "", timeout_seconds: float = 3
 # 간격) 기록한다. 위의 모든 UI 제어 도구(write_to_editor 등)는 여기서 얻은 id를
 # `instance` 파라미터로 넘기면 그 창만 골라서 조작할 수 있다 - 안 넘기면(기본값) 지금처럼
 # 아무 인스턴스나(먼저 집어가는 쪽이) 처리한다.
-_APP_INSTANCES_FILE = Path(__file__).resolve().parent.parent / "data" / "app_instances.json"
+_APP_INSTANCES_FILE = _DATA_DIR / "app_instances.json"
 _INSTANCE_STALE_SEC = 15.0  # main.rs의 STALE_SECS와 동일 — 이보다 오래된 하트비트는 죽은 창
 
 

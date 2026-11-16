@@ -52,7 +52,13 @@ mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 
 # UI mode
 cd code/frontend && npm run tauri dev
+
+# Installer for another PC (NSIS): needs the Release engine built first; it carries engine_server.exe, the three Visual C++ runtime DLLs it imports and the MCP script
+cmake --build code/build --config Release --target engine_server
+cd code/frontend && npm run tauri build   # -> src-tauri/target/release/bundle/nsis/RuSQL_<version>_x64-setup.exe
 ```
+
+An installed app starts the engine of its own install folder (`engine/`) and keeps its data and connection list in `%APPDATA%\RuSQL\data`; run from inside the source tree (`tauri dev`, `target/release/rusql-ui.exe`) it uses `code/build/` and `code/data` as before. Check an install folder (or a folder made by extracting the setup file) on any PC: `py -3 code/test/frontend/cdp/test_installed_layout.py <folder>`.
 
 <br/>
 

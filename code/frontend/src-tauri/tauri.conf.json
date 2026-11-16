@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "rusql-ui",
+  "productName": "RuSQL",
   "version": "2.3.0",
   "identifier": "com.rusql.ui",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run stage-engine",
     "frontendDist": "../dist"
   },
   "app": {
@@ -26,13 +26,28 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "engine/engine_server.exe": "engine/engine_server.exe",
+      "engine/msvcp140.dll": "engine/msvcp140.dll",
+      "engine/vcruntime140.dll": "engine/vcruntime140.dll",
+      "engine/vcruntime140_1.dll": "engine/vcruntime140_1.dll",
+      "../../mcp/mcp_server.py": "mcp/mcp_server.py",
+      "../../mcp/requirements.txt": "mcp/requirements.txt"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Korean", "English"]
+      }
+    }
   }
 }

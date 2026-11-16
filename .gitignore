@@ -13,6 +13,9 @@ __pycache__/
 
 # DB 데이터
 data/
+
+# the engine and its runtime DLLs the installer carries (made by code/frontend/scripts/stage-engine.mjs)
+code/frontend/src-tauri/engine/
 *.log
 
 # C++ port build output

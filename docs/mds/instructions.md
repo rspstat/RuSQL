@@ -77,7 +77,7 @@ cd code/frontend
 npm install
 npm run tauri dev
 ```
-`npm run build`는 타입 검사(`tsc`)와 Vite 빌드만 하고, `npm run tauri build`는 설치 파일을 만듭니다. 앱은 엔진을 내장하지 않고 `engine_server`에 TCP로 접속하므로, 서버를 먼저 띄우거나 앱의 서버 관리 화면에서 기동합니다.
+`npm run build`는 타입 검사(`tsc`)와 Vite 빌드만 하고, `npm run tauri build`는 설치 파일(`src-tauri/target/release/bundle/nsis/RuSQL_<버전>_x64-setup.exe`)을 만듭니다. 설치 파일에는 `engine_server.exe`(Release)와 그것이 쓰는 VC++ 런타임 DLL 셋(`msvcp140` · `vcruntime140` · `vcruntime140_1`; 재배포 패키지가 없는 PC에서도 뜨도록 엔진 옆에 둠), `mcp_server.py`가 들어가므로 먼저 `cmake --build code/build --config Release --target engine_server`로 엔진을 빌드해 둡니다(없으면 `npm run stage-engine`이 설치 파일을 만들기 전에 멈춥니다). 앱은 로그인할 때 엔진을 직접 띄웁니다: 설치본은 설치 폴더의 `engine/`을, 소스 트리 안(`tauri dev`, 트리 안의 릴리즈 exe)에서는 `code/build/`의 엔진을 씁니다. 설치본의 데이터와 연결 목록은 `%APPDATA%\RuSQL\data`에 있고(소스 트리에서는 `code/data`), MCP 서버에도 같은 폴더를 `RUSQL_DATA_DIR`로 알려 줍니다. 새 PC 점검: `py -3 code/test/frontend/cdp/test_installed_layout.py <설치 폴더>`(설치 파일을 풀어 낸 폴더도 되고, 소스 트리 안의 exe는 `--tree`).
 
 <br/>
 
