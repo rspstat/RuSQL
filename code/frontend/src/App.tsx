@@ -7,7 +7,7 @@ import type * as Monaco from "monaco-editor";
 import "./App.css";
 import { format as sqlFormat } from "sql-formatter";
 import DiagramView from "./components/DiagramView";
-import EcosystemView from "./components/EcosystemView";
+import EcosystemView, { EcosystemLogo } from "./components/EcosystemView";
 import CompatView from "./components/CompatView";
 import BTreeView from "./components/BTreeView";
 import MvccView from "./components/MvccView";
@@ -1900,19 +1900,8 @@ function App() {
                 Visit GitHub
               </button>
               <button className="home-quick-btn home-quick-eco" onClick={() => setShowEcosystem(true)} title="Every connection, database and table in one animated picture">
-                {/* 로고: 원통(데이터베이스) 하나에서 세 갈래로 퍼지는 선과 점 = 연결 → 데이터베이스 → 테이블 */}
-                <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
-                  <path d="M2.2 9.2v5.6c0 1 1.5 1.8 3.4 1.8s3.4-.8 3.4-1.8V9.2" />
-                  <ellipse cx="5.6" cy="9.2" rx="3.4" ry="1.6" fill="currentColor" fillOpacity="0.25" />
-                  <g className="eco-logo-lines">
-                    <path d="M9 11.2C12.4 11.2 12.6 5 16.6 5" />
-                    <path d="M9 12H16.6" />
-                    <path d="M9 12.8C12.4 12.8 12.6 19 16.6 19" />
-                  </g>
-                  <circle cx="19" cy="5" r="2.1" fill="currentColor" stroke="none" />
-                  <circle cx="19" cy="12" r="2.1" fill="currentColor" stroke="none" />
-                  <circle cx="19" cy="19" r="2.1" fill="currentColor" stroke="none" />
-                </svg>
+                {/* 로고: 큰 원통(RuSQL) → 중간 둘(연결) → 작은 넷(테이블)의 3단 트리 — 생태계 창과 같은 그림 */}
+                <EcosystemLogo size={52} />
                 Ecosystem
               </button>
             </div>

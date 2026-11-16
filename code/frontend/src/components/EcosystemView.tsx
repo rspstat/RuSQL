@@ -144,18 +144,28 @@ function tipLabel(n: EcoNode): Text {
   return `+${n.hidden ?? 0}`;
 }
 
-// The logo of the window (the same drawing as the button on the home screen).
-function Logo({ size = 28 }: { size?: number }) {
+// The logo (the Ecosystem button of the home screen and the title of this window): the picture in small -- one big cylinder (RuSQL) over two (connections) over four small
+// ones (tables), joined by the same kind of lines. Colors are currentColor, so the button's hover colour and the window's teal both work.
+const LOGO_TIERS = [
+  { cx: [12], w: 8, ry: 1.4, cy: 2.6, h: 2.8, fill: 0.45 },
+  { cx: [6.5, 17.5], w: 6, ry: 1.1, cy: 10.9, h: 2.4, fill: 0.3 },
+  { cx: [3.5, 9.5, 14.5, 20.5], w: 4, ry: 0.8, cy: 19.4, h: 2, fill: 0.2 },
+];
+
+export function EcosystemLogo({ size = 28 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true">
-      <path d="M2.2 9.2v5.6c0 1 1.5 1.8 3.4 1.8s3.4-.8 3.4-1.8V9.2" />
-      <ellipse cx="5.6" cy="9.2" rx="3.4" ry="1.6" fill="currentColor" fillOpacity="0.25" />
-      <path d="M9 11.2C12.4 11.2 12.6 5 16.6 5" />
-      <path d="M9 12H16.6" />
-      <path d="M9 12.8C12.4 12.8 12.6 19 16.6 19" />
-      <circle cx="19" cy="5" r="2.1" fill="currentColor" stroke="none" />
-      <circle cx="19" cy="12" r="2.1" fill="currentColor" stroke="none" />
-      <circle cx="19" cy="19" r="2.1" fill="currentColor" stroke="none" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <g className="eco-logo-lines">
+        <path d="M12 6.8V8.3M6.5 9.8V8.3H17.5V9.8" />
+        <path d="M6.5 14.4V16.5M3.5 18.6V16.5H9.5V18.6" />
+        <path d="M17.5 14.4V16.5M14.5 18.6V16.5H20.5V18.6" />
+      </g>
+      {LOGO_TIERS.flatMap(t => t.cx.map(cx => (
+        <g key={`${t.cy}-${cx}`}>
+          <path d={`M${cx - t.w / 2} ${t.cy}V${t.cy + t.h}a${t.w / 2} ${t.ry} 0 0 0 ${t.w} 0V${t.cy}`} />
+          <ellipse cx={cx} cy={t.cy} rx={t.w / 2} ry={t.ry} fill="currentColor" fillOpacity={t.fill} />
+        </g>
+      )))}
     </svg>
   );
 }
@@ -300,7 +310,7 @@ export default function EcosystemView({ connections, onBack }: { connections: Ec
             {lang === "ko" ? "홈으로" : "Back to Home"}
           </button>
           <div className="eco-title">
-            <Logo />
+            <EcosystemLogo />
             <h1>{lang === "ko" ? "RuSQL 생태계" : "RuSQL Ecosystem"}</h1>
             <span>{lang === "ko" ? "모든 연결 · 데이터베이스 · 테이블을 한눈에" : "Every connection, database and table at a glance"}</span>
           </div>
