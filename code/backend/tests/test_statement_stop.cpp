@@ -636,3 +636,96 @@ TEST_CASE("R67: the filling of an index asks KILL QUERY only when it is built ap
     REQUIRE_NOTHROW(bucket.fill(whole)); // (the default: not stopped)
     REQUIRE(whole.search("3").has_value());
 }
+
+// R95: the list of sessions has to be readable WHILE a long statement runs -- that is when it is needed (the Activity panel, list_locks, kill_session, every test above that waits for
+// a statement to show in it). R94 sent a SELECT of an information_schema table to the exclusive path to stop it changing the shared maps, and every poll then waited for the long statement
+// to end (0.00 s -> 3.13 s). Since R95 such a SELECT runs on a private database under the shared lock. A regression to the exclusive path makes this test fail on the first poll.
+TEST_CASE("R95: a poll of information_schema.processlist does not wait for a long statement", "[r95][kill][info_schema]") {
+    TempDataDir dir("r95_poll_during_long");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    fill(ex, "a", 300);
+    fill(ex, "b", 300);
+    fill(ex, "c", 300);
+    auto shared = ex.get_shared();
+    Executor victim = Executor::new_session(shared);
+    victim.auth_user = "bob";
+    victim.register_process("bob", "localhost");
+    ok(victim, "USE d");
+    const std::string victim_id = session_of(ex, "bob");
+
+    std::atomic<bool> running{true};
+    std::string answer;
+    std::thread runner([&] {
+        auto r = victim.execute_sql("SELECT COUNT(*) FROM a x, b y, c z WHERE x.id + y.id + z.id = 7");
+        answer = r.is_err() ? r.error() : r.value();
+        running = false;
+    });
+    // (the first polls: the statement shows as a Query, so it is running; every poll has to come back at once)
+    wait_for_command(ex, "bob", "Query");
+    long long slowest_ms = 0;
+    int polls = 0;
+    for (int i = 0; i < 20 && running.load(); i++) {
+        const auto began = std::chrono::steady_clock::now();
+        auto rows = q(ex, "SELECT ID, USER, COMMAND FROM information_schema.processlist");
+        const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+        slowest_ms = std::max<long long>(slowest_ms, took);
+        polls++;
+        REQUIRE(rows.size() == 2);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    const bool was_running = running.load(); // (the statement is still going on after the polls: they were made while it ran)
+    REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+    runner.join();
+    std::fprintf(stderr, "[r95] %d polls while a cross join ran: the slowest took %lld ms\n", polls, slowest_ms);
+    INFO("the statement ended too soon to show the polls came back while it ran; answer: " << answer.substr(0, 120));
+    REQUIRE(was_running);
+    REQUIRE(polls >= 5);
+    REQUIRE(slowest_ms < 1000);
+    REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+}
+
+// R95: a SELECT of information_schema tables that is stopped half way (KILL QUERY) gives its temporary tables back: nothing of it stays in the shared database, and the next
+// SELECT of the same tables answers as always.
+TEST_CASE("R95: a SELECT of information_schema tables that is stopped leaves nothing behind", "[r95][kill][info_schema]") {
+    TempDataDir dir("r95_kill_private_select");
+    Executor ex(dir.path);
+    ex.register_process("root", "localhost");
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    for (int t = 1; t <= 10; t++) { // (10 tables of 30 columns: 300 rows in information_schema.columns, 27 million combinations of three of them)
+        std::string sql = "CREATE TABLE t" + std::to_string(t) + " (id INT PRIMARY KEY";
+        for (int c = 1; c < 30; c++) sql += ", c" + std::to_string(c) + " INT";
+        ok(ex, sql + ")");
+    }
+    const auto before = q(ex, "SELECT COUNT(*) FROM information_schema.columns WHERE TABLE_SCHEMA = 'd'");
+    REQUIRE(before == Rows{{"300"}});
+    auto shared = ex.get_shared();
+    Executor victim = Executor::new_session(shared);
+    victim.auth_user = "bob";
+    victim.register_process("bob", "localhost");
+    ok(victim, "USE d");
+    const std::string victim_id = session_of(ex, "bob");
+
+    std::string answer;
+    std::thread runner([&] {
+        auto r = victim.execute_sql("SELECT COUNT(*) FROM information_schema.columns a, information_schema.columns b, information_schema.columns c "
+                                    "WHERE a.ORDINAL_POSITION + b.ORDINAL_POSITION + c.ORDINAL_POSITION = 7");
+        answer = r.is_err() ? r.error() : r.value();
+    });
+    wait_for_command(ex, "bob", "Query");
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    REQUIRE(ex.execute_sql("KILL QUERY " + victim_id).is_ok());
+    runner.join();
+    INFO("answer: " << answer.substr(0, 160));
+    REQUIRE(answer.find("ERROR 1317 (70100): Query execution was interrupted") != std::string::npos);
+    {
+        auto database = shared->read();
+        for (const auto& [name, rows] : database->tables) REQUIRE(name.rfind("information_schema.", 0) != 0);
+        for (const auto& [name, schema] : database->catalog.tables) REQUIRE(name.rfind("information_schema.", 0) != 0);
+    }
+    REQUIRE(q(victim, "SELECT COUNT(*) FROM information_schema.columns WHERE TABLE_SCHEMA = 'd'") == Rows{{"300"}}); // (the stopped session reads again)
+    REQUIRE(q(ex, "SELECT COUNT(*) FROM information_schema.columns WHERE TABLE_SCHEMA = 'd'") == Rows{{"300"}});
+}

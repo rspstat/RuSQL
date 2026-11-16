@@ -17,8 +17,8 @@ acknowledged.
                                                   is gone (a COMMIT in flight lands whole or not at all); the killed session left no row lock (its keys can be written at once);
                                                   a SELECT that is not stopped answers right. At the end: no dead session is left on the process list, the secondary index agrees
                                                   with the table scan, CHECK TABLE is clean, no row stays locked. Odd seeds also kill -9 the whole server while the KILLs are in
-                                                  flight and compare after the restart. It found an OPEN race: a SELECT of an information_schema table changes the shared table maps
-                                                  under other sessions (docs/mds/DATE.md, R94); FUZZ_KILL_INFOSCHEMA=1 reads the session list that way and reproduces it (about once in 100 rounds). FUZZ_KILL_TRACE=1 prints violations as found; FUZZ_KILL_BIG=<rows> sizes the long SELECT's table
+                                                  flight and compare after the restart. It found a race (closed in R95): a SELECT of an information_schema table changed the shared table maps
+                                                  under other sessions (docs/mds/DATE.md, R94, R95); FUZZ_KILL_INFOSCHEMA=1 reads the session list that way (it failed about once in 100 rounds before R95; 180 rounds, 0 now). FUZZ_KILL_TRACE=1 prints violations as found; FUZZ_KILL_BIG=<rows> sizes the long SELECT's table
                                                   (lower it on a Debug build); FUZZ_KILL_PORT=<port> runs a second copy beside the first; RUSQL_SERVER_EXE=<path> tests another build.
 
   python fuzz_crash_fk.py [rounds] [base_seed]    the same for a parent table p and a child table c with a FOREIGN KEY whose ON DELETE / ON UPDATE actions

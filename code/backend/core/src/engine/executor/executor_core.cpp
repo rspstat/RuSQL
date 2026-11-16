@@ -6,6 +6,7 @@
 
 #include "engine/executor/executor.hpp"
 #include "engine/explain_trace.hpp"
+#include "engine/info_schema_scope.hpp"
 #include "engine/result_text.hpp"
 #include "engine/statement_deadline.hpp"
 #include "engine/storage/numeric_key.hpp"
@@ -820,6 +821,9 @@ std::string qualify_local(const std::string& name, const std::string& current_db
     return current_db + "." + name;
 }
 
+// (a name in a lock set that stands for all the tables of the database: R95, see select_tables_ok)
+const std::string kEveryTable = "\x01*";
+
 bool cond_tables_ok(const CondExpr& e, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out);
 bool stmt_tables_ok(const Statement& stmt, const std::string& current_db, const SharedDatabase& s, std::vector<std::string>& out);
 
@@ -845,22 +849,27 @@ bool select_tables_ok(const Statement::Select& sel, const std::string& current_d
     for (const Statement* sq : select_expression_subqueries(sel)) {
         if (!stmt_tables_ok(*sq, current_db, s, out)) return false;
     }
-    // KNOWN RACE, deliberately left as it is (R94, found by code/test/crash/fuzz_kill.py): a SELECT of an information_schema table puts the rows it has now into a temporary table
-    // of the SHARED database (s.tables, s.catalog) and takes it away again, and this function lets that SELECT in on the per-table path, whose structural lock is only SHARED -- so
-    // it changes maps that other sessions read at the same moment (an UPDATE's CascadeSim walks s.catalog.tables twice: "Internal error: invalid unordered_map<K, T> key" now and
-    // then, a crash under a hard enough load). is_pure_read_only() calls such a SELECT a writer, i.e. the exclusive path -- but then every poll of information_schema.processlist
-    // (the Activity panel, the MCP list_locks and kill_session) has to wait for any long statement to end, which is exactly when the list is needed (measured: 0.00 s became 3.13 s
-    // behind a 3.5 s SELECT, and a pending exclusive request holds back the statements behind it too), and the R53 / R63 / R67 KILL tests read the list that way. So routing the
-    // SELECT to the exclusive path is NOT the fix; the fix has to stop changing the shared maps. See docs/mds/DATE.md (R94) and the hidden test [r94-open] in
-    // backend/tests/test_info_schema_concurrency.cpp, which reproduces it.
     std::string qtable = qualify_local(sel.table, current_db);
     if (s.views.count(qtable)) return false;
     out.push_back(qtable);
+    std::vector<std::string> from{qtable};
     for (auto& j : sel.joins) {
         std::string qj = qualify_local(j.table, current_db);
         if (s.views.count(qj)) return false;
         out.push_back(qj);
+        from.push_back(qj);
         if (!cond_tables_ok(j.on_expr, current_db, s, out)) return false;
+    }
+    // R95: a SELECT of information_schema tables alone (and no subquery in it) runs on a private database (engine/info_schema_scope.hpp), so it is as safe under the shared lock as
+    // a SELECT of a table -- and it must be there: a poll of information_schema.processlist (the Activity panel, the MCP list_locks and kill_session, the tests of KILL) may not wait
+    // for a long statement to end, which is exactly when the list is needed (R94 measured it: 0.00 s became 3.13 s behind a 3.5 s SELECT). One that is mixed with a real table
+    // or a subquery still makes its temporary tables in the shared maps (s.tables, s.catalog), and that is only safe under the exclusive lock: before R95 it ran here under the
+    // shared one and raced with every other session ("Internal error: invalid unordered_map<K, T> key", a crash under a hard enough load -- test_info_schema_concurrency.cpp).
+    if (info_schema_use(from, false, sel.columns, sel.condition, sel.having, sel.joins, sel.for_update, sel.for_share) == InfoSchemaUse::Mixed) return false;
+    // ... and the ones that make their rows from the rows of the other tables (`tables`, `statistics`, `row_versions`) need those tables locked like a SELECT of them would: the
+    // lock set gets "every table" (table_lock_set_for puts the names in; a statement that is not of the SELECT family, which does not take the data locks up front, goes exclusive).
+    for (const std::string& t : from) {
+        if (info_schema_reads_rows(t)) out.push_back(kEveryTable);
     }
     if (sel.condition && !cond_tables_ok(*sel.condition, current_db, s, out)) return false;
     // HAVING subqueries are a non-issue: eval_single's ConditionValue::Subquery case
@@ -1031,6 +1040,17 @@ std::optional<std::vector<std::string>> Executor::table_lock_set_for(const Share
         // is_pure_read_only()-based dispatch (DDL/DCL/SHOW*/session-variable statements,
         // VACUUM/CHECKPOINT, BEGIN/COMMIT/ROLLBACK/SAVEPOINT-family, CALL, etc.).
         return std::nullopt;
+    }
+
+    // R95: a SELECT of information_schema.tables / statistics / row_versions reads the rows of every table. Only the SELECT family takes the data locks of the whole set up front
+    // (execute()), so for it the set becomes all the tables; any other statement with such a SELECT inside (INSERT ... SELECT, an UPDATE with a subquery) takes the exclusive path.
+    if (std::find(out.begin(), out.end(), kEveryTable) != out.end()) {
+        const bool select_family = std::holds_alternative<Statement::Select>(stmt.data) || std::holds_alternative<Statement::Union>(stmt.data) ||
+                                   std::holds_alternative<Statement::Intersect>(stmt.data) || std::holds_alternative<Statement::Except>(stmt.data) ||
+                                   std::holds_alternative<Statement::Explain>(stmt.data) || std::holds_alternative<Statement::ExplainAnalyze>(stmt.data);
+        if (!select_family) return std::nullopt;
+        out.erase(std::remove(out.begin(), out.end(), kEveryTable), out.end());
+        for (const auto& [name, rows] : s.tables) out.push_back(name);
     }
 
     std::sort(out.begin(), out.end());

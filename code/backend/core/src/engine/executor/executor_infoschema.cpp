@@ -2,6 +2,8 @@
 // rusql-core/src/engine/executor.rs (Phase 8f): info_schema_rows (a select on one of these tables runs on a temporary table of the rows: see exec_select).
 
 #include "engine/executor/executor.hpp"
+#include "engine/info_schema_scope.hpp"
+#include "engine/subquery_walk.hpp"
 #include "engine/view_rename.hpp"
 #include "engine/check_names.hpp"
 #include "engine/fk_name.hpp"
@@ -14,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1266,6 +1270,123 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
     }
 
     return rows; // unknown IS table -> empty result
+}
+
+// ---------------------------------------------------------------------------
+// R95: the private database of a SELECT of information_schema tables (engine/info_schema_scope.hpp)
+// ---------------------------------------------------------------------------
+
+InfoSchemaUse info_schema_use(const std::vector<std::string>& tables, bool derived, const std::vector<SelectColumn>& columns, const std::optional<CondExpr>& condition,
+                              const std::optional<CondExpr>& having, const std::vector<Join>& joins, bool for_update, bool for_share) {
+    std::size_t virtual_tables = 0;
+    for (const std::string& t : tables) {
+        if (Executor::info_schema_bare(t)) virtual_tables++;
+    }
+    if (virtual_tables == 0) return InfoSchemaUse::None;
+    // (a real table in the list, a derived table, a lock clause: these need the world the statement runs in, which the private database does not have)
+    if (derived || virtual_tables != tables.size() || for_update || for_share) return InfoSchemaUse::Mixed;
+    // a subquery anywhere is a select of its own, which has to find the real tables
+    for (const SelectColumn& c : columns) {
+        if (std::holds_alternative<SelectColumn::Subquery>(c.data)) return InfoSchemaUse::Mixed;
+        if (auto* e = std::get_if<SelectColumn::Expr>(&c.data)) {
+            std::vector<const Statement*> found;
+            collect_arith_subqueries(e->expr, found);
+            if (!found.empty()) return InfoSchemaUse::Mixed;
+        } else if (auto* a = std::get_if<SelectColumn::Agg>(&c.data)) {
+            if (a->filter && cond_has_any_subquery(*a->filter)) return InfoSchemaUse::Mixed;
+        } else if (auto* a = std::get_if<SelectColumn::AggAlias>(&c.data)) {
+            if (a->filter && cond_has_any_subquery(*a->filter)) return InfoSchemaUse::Mixed;
+        } else if (auto* w = std::get_if<SelectColumn::CaseWhen>(&c.data)) {
+            for (const CaseWhenBranch& b : w->branches) {
+                if (cond_has_any_subquery(b.condition)) return InfoSchemaUse::Mixed;
+            }
+        }
+    }
+    if (condition && cond_has_any_subquery(*condition)) return InfoSchemaUse::Mixed;
+    if (having && cond_has_any_subquery(*having)) return InfoSchemaUse::Mixed;
+    for (const Join& j : joins) {
+        if (cond_has_any_subquery(j.on_expr)) return InfoSchemaUse::Mixed;
+    }
+    return InfoSchemaUse::Private;
+}
+
+bool info_schema_reads_rows(const std::string& table) {
+    auto bare = Executor::info_schema_bare(table);
+    return bare && (*bare == "tables" || *bare == "statistics" || *bare == "row_versions");
+}
+
+namespace {
+
+std::mutex g_scratch_mutex;
+std::vector<std::unique_ptr<SharedDatabase>> g_scratch_free; // (the private databases nobody is using)
+constexpr std::size_t kScratchKept = 8;
+
+// A database with nothing in it. Its files are never written (the pages of a temporary table stay in the buffer pool, which has room for far more of them than a
+// statement has), the folder is only what a DiskManager is made on.
+std::unique_ptr<SharedDatabase> make_scratch(const SharedDatabase& real) {
+    namespace fs = std::filesystem;
+    std::string dir;
+    try {
+        dir = (fs::temp_directory_path() / "rusql_info_scratch").string();
+        DiskManager probe(dir);
+    } catch (...) {
+        dir = real.data_dir; // (no temp folder to make one in: the folder of the data exists)
+    }
+    return std::make_unique<SharedDatabase>(SharedDatabase{.buffer_pool = BufferPool(BUFFER_POOL_SIZE), .disk = DiskManager(dir), .data_dir = dir});
+}
+
+} // namespace
+
+InfoSchemaScratch::InfoSchemaScratch(const SharedDatabase& real, std::uint64_t txn_id) : txn_id_(txn_id) {
+    {
+        std::lock_guard<std::mutex> g(g_scratch_mutex);
+        if (!g_scratch_free.empty()) {
+            db_ = std::move(g_scratch_free.back());
+            g_scratch_free.pop_back();
+        }
+    }
+    if (!db_) db_ = make_scratch(real);
+    // the transaction bookkeeping is the real one (a snapshot is of the real transactions; a row of a temporary table has no _xmin, but the statement asks), and the
+    // accounts and functions a parallel scan hands to its workers
+    db_->txn_io = real.txn_io;
+    db_->active_txn_ids = real.active_txn_ids;
+    db_->snapshot_floors = real.snapshot_floors;
+    db_->users = real.users;
+    db_->role_grants = real.role_grants;
+    db_->user_functions = real.user_functions;
+}
+
+void InfoSchemaScratch::add_table(const std::string& name, const std::vector<ColumnDef>& columns, std::vector<Row> rows) {
+    names_.push_back(name);
+    db_->buffer_pool.write_page(name, rows);
+    db_->tables[name] = std::move(rows);
+    db_->catalog.create_table(name, columns);
+}
+
+InfoSchemaScratch::~InfoSchemaScratch() {
+    if (!db_) return;
+    try {
+        SharedDatabase& d = *db_;
+        for (const std::string& name : names_) {
+            d.tables.erase(name);
+            d.buffer_pool.invalidate(name);
+            d.catalog.drop_table(name);
+        }
+        if (txn_id_ != 0) d.lock_mgr.release(txn_id_);
+        // (nothing of the real database stays in it, and what it holds for the statement is gone)
+        d.txn_io.reset();
+        d.active_txn_ids.reset();
+        d.snapshot_floors.reset();
+        d.users.clear();
+        d.role_grants.clear();
+        d.user_functions.clear();
+        // (a private database that is not empty after all -- the statement made something of its own in it -- is not kept)
+        if (!d.tables.empty() || !d.indexes.empty() || !d.composite_indexes.empty() || !d.hash_indexes.empty() || !d.views.empty()) return;
+        std::lock_guard<std::mutex> g(g_scratch_mutex);
+        if (g_scratch_free.size() < kScratchKept) g_scratch_free.push_back(std::move(db_));
+    } catch (...) {
+        // (it is dropped with its tables)
+    }
 }
 
 } // namespace engine

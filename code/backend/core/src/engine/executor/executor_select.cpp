@@ -6,6 +6,7 @@
 // INFORMATION_SCHEMA, FROM `_dual_`, SELECT-list subqueries).
 
 #include "engine/executor/executor.hpp"
+#include "engine/info_schema_scope.hpp"
 #include "engine/routine_privilege.hpp"
 
 #include <algorithm>
@@ -1773,21 +1774,51 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
                 }
                 made.emplace_back(std::move(schema_columns), std::move(rows));
             }
+            // R95: a SELECT of information_schema tables alone, with no subquery, runs on a private database -- it changes nothing of the shared maps, which other sessions
+            // read at the same moment under a lock that is only shared (engine/info_schema_scope.hpp). Anything else puts its temporary tables in the shared maps, and
+            // table_lock_set_for has sent it to the exclusive path.
+            std::vector<std::string> from_tables{table};
+            for (const Join& j : joins) from_tables.push_back(j.table);
+            bool derived = subquery.has_value();
+            for (const Join& j : joins) derived = derived || j.lateral || j.subquery.has_value();
+            if (info_schema_use(from_tables, derived, columns, condition, having, joins, for_update, for_share) == InfoSchemaUse::Private) {
+                InfoSchemaScratch scratch(s, txn.is_active() ? txn.current_txn_id() : 0);
+                // (the temporary tables are the statement's own: the session forgets them when it is over, also when it stops)
+                struct Forget {
+                    std::unordered_set<std::string>& names;
+                    const std::vector<std::string>& wanted;
+                    ~Forget() { for (const std::string& name : wanted) names.erase(name); }
+                } forget{temporary_tables_, wanted};
+                for (std::size_t i = 0; i < wanted.size(); i++) {
+                    temporary_tables_.insert(wanted[i]);
+                    scratch.add_table(wanted[i], made[i].first, std::move(made[i].second));
+                }
+                return exec_select(scratch.db(), table, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
+                                   std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
+            }
+            // (the exclusive path: the temporary tables go in the shared maps, and go out again when the statement is over -- also when it stops: a table left behind by a KILL
+            // would be read, stale, by the next SELECT of that information_schema table)
+            struct SharedTemporaries {
+                SharedDatabase& db;
+                std::unordered_set<std::string>& names;
+                const std::vector<std::string>& wanted;
+                ~SharedTemporaries() {
+                    for (const std::string& name : wanted) {
+                        names.erase(name);
+                        db.tables.erase(name);
+                        db.buffer_pool.invalidate(name);
+                        db.catalog.drop_table(name);
+                    }
+                }
+            } shared_temporaries{s, temporary_tables_, wanted};
             for (std::size_t i = 0; i < wanted.size(); i++) {
                 s.tables[wanted[i]] = made[i].second;
                 temporary_tables_.insert(wanted[i]);
                 s.buffer_pool.write_page(wanted[i], made[i].second);
                 s.catalog.create_table(wanted[i], made[i].first);
             }
-            auto result = exec_select(s, table, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
-                                      std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
-            for (const std::string& name : wanted) {
-                temporary_tables_.erase(name);
-                s.tables.erase(name);
-                s.buffer_pool.invalidate(name);
-                s.catalog.drop_table(name);
-            }
-            return result;
+            return exec_select(s, table, std::nullopt, distinct, std::move(columns), std::move(condition), std::move(joins), std::move(order_by),
+                               std::move(group_by), std::move(having), limit, offset, for_update, for_share, with_rollup);
         }
     }
 

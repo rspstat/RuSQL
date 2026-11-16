@@ -3606,12 +3606,12 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 
 **왜 이 항목인가**: R93 뒤에 "이제 또 해야 할 것 추천"을 물으셨고, 추천 표(7개)에서 사용자가 "**Ecosystem 창 마무리, 누적 점검 한 바퀴(Debug 전체 시험 + `KILL`을 섞은 크래시 시험 + 빌드 간 차분)**"를 골랐다.
 
-**가장 큰 발견 — 열린 경합 하나 (고치지 못했고, 선택지를 남김)**
+**가장 큰 발견 — 열린 경합 하나 (R94에서는 고치지 못하고 선택지를 남김 → 바로 다음 R95에서 선택지 C로 닫음)**
 - **새 퍼저 `code/test/crash/fuzz_kill.py`**: 기존 퍼저는 프로세스만 죽였지 SQL의 `KILL`을 쓰지 않았다. 킬러 스레드가 세션 목록에서 무작위 세션을 골라 `KILL QUERY n`(문장 중단)이나 `KILL n`(세션 종료)을 쏘는 동안, 네 스레드가 자기 키 범위에 자동 커밋 문장 · 작은 명시적 트랜잭션(COMMIT 또는 ROLLBACK) · 범위 전체 `UPDATE` · 긴 `SELECT`를 돌리고 정확한 오라클로 확인한다: 멈춘 문장(ERROR 1317)은 아무것도 바꾸지 않았다 · 끊긴 세션의 트랜잭션은 사라졌다(진행 중이던 COMMIT은 통째로 반영되거나 통째로 안 됨) · 끊긴 세션이 행 잠금을 남기지 않았다 · 멈추지 않은 SELECT는 맞는 답을 낸다 · 끝나면 죽은 세션이 목록에 없고 보조 인덱스가 표와 맞고 `CHECK TABLE`이 깨끗하고 잠긴 행이 없다. 홀수 시드는 `KILL`이 날아다니는 중에 서버를 `kill -9`하고 재시작해 비교한다.
 - **증상**: 가끔 `UPDATE`가 `Internal error: invalid unordered_map<K, T> key`로 답했다(Release에서 약 100라운드에 한 번 꼴; 수정 전 코드에서 약 230라운드 중 3건). 진단용 벡터 예외 처리기를 넣은 `RelWithDebInfo` 서버로 던져지는 순간의 호출 스택을 잡았다(진단 코드는 되돌림): `CascadeSim::CascadeSim`(`executor_cascade_plan.cpp:68`) — 공유 카탈로그의 표 맵을 두 번 훑으며 두 번째에 `.at(name)`을 쓰는데, 그 사이 항목이 사라졌다.
 - **원인**: `SELECT … FROM information_schema.*`는 그 시점의 행을 **공유 데이터베이스**(`s.tables`, `s.catalog`)에 임시 표로 넣었다가 빼는데(`executor_select.cpp`), `table_lock_set_for` → `select_tables_ok`가 이 조회를 구조 락이 **공유**인 표별 잠금 경로로 받아들여서, 다른 세션이 그 맵을 읽는 순간에 맵을 바꾼다(데이터 경합). 같은 맵을 `UPDATE`(`CascadeSim`)가 읽는 것이 가장 약한 증상(예외)이고, 프로세스 안 재현 시험(세션 둘이 쉬지 않고 조회, 셋이 갱신)은 **세그멘테이션 오류로 프로세스가 죽는다**(수정 전 3/3). `is_pure_read_only`는 이 조회를 쓰기로 분류해 두었는데(독점 경로가 맞다), `table_lock_set_for`가 먼저 받아 버려서 소용이 없었다. 앱의 Activity 패널은 1초마다 `information_schema.processlist`를 읽으므로 실제 노출이 있다(확률은 낮음).
 - **고치려다 기각한 것(측정으로)**: `select_tables_ok`가 `information_schema` 표를 거르게 해서 독점 경로로 보냈더니 경합은 사라졌지만, **긴 SELECT가 도는 동안 `processlist` 조회가 그 SELECT가 끝날 때까지 기다린다**(3.5초짜리 SELECT 뒤에서 0.00초 → 3.13초; 독점 요청이 대기하면 뒤의 문장도 막힘). 이러면 Activity 패널 · MCP `list_locks` · `kill_session`이 긴 질의를 보고 끊어야 하는 바로 그 순간에 멈추고, 실제로 R53 · R63 · R67 `KILL` 시험이 세 모드 모두에서 깨졌다(시험들이 질의가 도는 동안 목록을 읽는다). **수정을 되돌렸고**(엔진 코드는 설명 주석만 늘었다), 되돌린 뒤 전체 시험이 다시 통과했다 — 그 실패가 내 수정 때문이었다는 확인이다.
-- **재현**: 숨김 시험 `engine_tests "[r94-open]"`(`test_info_schema_concurrency.cpp`; 최종 코드에서 2/2 SIGSEGV; 기본 시험 목록에는 없음). 같은 구성에서 읽기만 평범한 표 조회로 바꾼 대조 시험은 기본 시험에 있고 수정 전후 모두 통과한다(시험 장치가 멀쩡하다는 증거). 퍼저는 기본이 `SHOW PROCESSLIST`(이 문제 없는 경로)로 목록을 읽고, `FUZZ_KILL_INFOSCHEMA=1`이면 `information_schema`로 읽어 이 문제를 일부러 재현한다.
+- **재현**: 숨김 시험 `engine_tests "[r94-open]"`(`test_info_schema_concurrency.cpp`; 최종 코드에서 2/2 SIGSEGV; 기본 시험 목록에는 없음 — R95에서 기본 시험 `[r95]`가 됨). 같은 구성에서 읽기만 평범한 표 조회로 바꾼 대조 시험은 기본 시험에 있고 수정 전후 모두 통과한다(시험 장치가 멀쩡하다는 증거). 퍼저는 기본이 `SHOW PROCESSLIST`(이 문제 없는 경로)로 목록을 읽고, `FUZZ_KILL_INFOSCHEMA=1`이면 `information_schema`로 읽어 이 문제를 일부러 재현한다.
 - **진짜 해법은 구조 변경이고 범위 결정이 필요하다**(`RECOMMAND.md` 2번 표): 공유 맵의 구조를 공유 락만 쥔 채 바꾸지 않아야 한다. 맵을 조회하는 곳이 `s.tables` 123곳 · 카탈로그 171곳 · 순회 22곳이라 조용히 끼워 넣을 수 없다. 선택지: **A** 알려진 위험으로 두기(드묾) / **B** 독점 경로(작지만 위 측정으로 기각) / **C** 가상 표만 읽는 조회는 공유 맵 밖의 임시 문맥에서 돌리고 섞인 조회는 독점 경로로(중~대, 하루 정도; 코퍼스 점수판과 `KILL` 시험으로 확인) / **D** 가상 표를 시작할 때 상시 등록하고 열거하는 22곳에서 거름(대; 점수판 위험).
 
 **누적 점검 결과**
@@ -3632,6 +3632,34 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 - 한계: 한 번 "처음 읽기가 실패해 연결 50개만 10초쯤 보이다가 다음 읽기(4초 뒤)에 복구"로 보이는 현상을 봤고 이후 다섯 번 다시 해 봐도 재현하지 못해 원인을 모른다. 8,000개 표를 읽는 데 약 10초 걸린다(그동안 "데이터 폴더를 읽는 중…"). 다른 RuSQL 프로세스의 엔진에는 `CHECKPOINT`를 시키지 않는다(그 연결의 파일은 그 엔진이 쓸 때까지 뒤처질 수 있음).
 
 **확인**: 화면 시험 14개 · 라이브러리 시험 35개 · Rust 단위 3개 · `tsc` 모두 통과. 데이터가 바뀐 곳(엔진 쪽)은 위 점검 결과. 앱은 릴리즈로 다시 빌드해 띄웠다.
+
+### 11월 17일 — R95: `information_schema` 조회를 공유 표 맵 밖에서 돌림 (R94의 열린 경합 닫기, 선택지 C)
+
+**왜 이 항목인가**: R94가 찾은 열린 경합(`RECOMMAND.md` 2번 표)의 선택지 A~D 가운데 사용자가 "**C 진행**"을 골랐다.
+
+**한 일** (엔진; 새 헤더 `engine/info_schema_scope.hpp`, 정의는 `executor_infoschema.cpp`)
+- **`information_schema` 표만 읽는 조회(서브쿼리 · 락 절 · 실제 표가 없는 것)는 비공개 데이터베이스에서 돈다.** `InfoSchemaScratch`는 빈 `SharedDatabase` 하나를 빌려(다음 조회를 위해 최대 8개를 보관하므로 세션끼리 거는 락이 없다) 그 안에 임시 표를 만들고 `exec_select`를 그 위에서 돌린다. 공유 맵(`s.tables` · `s.catalog` · 버퍼 풀)은 건드리지 않는다. 트랜잭션 장부(`txn_io` · 열린 트랜잭션 · 스냅샷 하한)와 계정 · 역할 · 사용자 함수는 진짜 것을 빌려 와서 스냅샷 · 격리 수준 · 병렬 스캔의 작업자가 전과 같다. 끝나면(오류 · `KILL` 포함) 임시 표를 돌려주고, 이 조회가 비공개 DB에 건 잠금도 풀며, 비어 있지 않게 되었으면 보관하지 않고 버린다. 누가 무엇을 볼 수 있는지(`PROCESS` · 권한 거름)는 임시 표를 만들기 **전에** 진짜 DB로 해 두므로 그대로다.
+- **섞인 조회**(`information_schema` ↔ 실제 표 조인, 서브쿼리가 든 조회, `FOR UPDATE` · `FOR SHARE`)는 옛 방식(공유 맵에 임시 표)을 그대로 쓰되 `select_tables_ok`가 `false`를 돌려 **독점 경로**로 보낸다(독점 락 아래에서는 안전하다). 전에는 이것도 공유 락 아래에서 돌았다. 서브쿼리 안의 조회는 각자의 규칙으로 가른다: 실제 표를 읽는 바깥 조회가 속의 `information_schema` 서브쿼리를 품는 것은 공유 경로에 남고(속이 비공개로 돈다), 바깥이 `information_schema`이고 속이 실제 표인 것은 독점 경로로 간다.
+- **고치다 찾은 두 번째 경합**: 비공개로 옮기고도 프로세스 안 재현 시험이 **여전히 SIGSEGV**였다. 읽기를 갈라 돌려 보니(임시 시험) `processlist`만 · `columns`만은 통과하고 **`tables`만 죽었다** — `information_schema.tables`(`TABLE_ROWS` · 크기), `statistics`(카디널리티), `row_versions`는 **다른 표의 행**을 읽는데 그 표의 `table_data_locks`를 쥐지 않아서, `UPDATE`가 행 버전을 `push_back`해 벡터가 옮겨지는 순간 읽던 쪽이 옛 메모리를 읽었다(이 경합은 R94의 임시 표 경합과 따로 있었고, 그 뒤에 가려져 있었다). 정석대로 고쳤다: 이 세 표를 읽는 조회는 `select_tables_ok`가 잠금 집합에 "모든 표"(표식 `kEveryTable`)를 넣고 `table_lock_set_for`가 실제 표 이름으로 풀어서, `execute()`가 SELECT 계열에 하는 대로 **한 번, 맨 앞에서** 데이터 잠금을 공유로 쥔다(`exec_select`는 스스로 데이터 잠금을 쥐지 않는다는 기존 규칙). SELECT 계열이 아닌 문장(`INSERT … SELECT` 등)이 이런 조회를 품으면 독점 경로다. `processlist` · `columns` 같은 나머지 표는 행을 읽지 않으므로 잠글 것이 없다.
+- **옛 경로의 누수도 고침**: 섞인 조회는 임시 표를 공유 맵에 넣었다가 끝에서 지웠는데, `KILL`이나 오류로 중간에 나가면 지우지 않아서 **다음 조회가 낡은 임시 표를 읽을 수** 있었다 → 이제 예외에도 지운다.
+
+**시험**: 기본 시험 5개 추가(1,046 → **1,051케이스**).
+- 숨김이던 재현 시험이 기본이 됨(`R95: information_schema SELECTs run while other sessions write, and neither fails`): 쓰기 세션 셋 × `UPDATE` 1,500번 동안 읽기 세션 둘이 `processlist` · `tables` · `columns`를 쉬지 않고 읽음. 수정 전 SIGSEGV(3/3) → 지금 **연속 30회 통과**.
+- 생존성 시험 `R95: a poll of information_schema.processlist does not wait for a long statement`: 3중 교차 조인이 도는 동안 목록을 20번 읽어 가장 느린 읽기가 1,000ms 미만(실측 **0ms**), 문장은 그동안 계속 도는 중이었고, 그 뒤 `KILL QUERY`로 멈춘다. 독점 경로(R94에서 기각한 B)로 돌아가면 첫 읽기에서 깨진다.
+- `R95: a SELECT of information_schema tables that is stopped leaves nothing behind`: `information_schema.columns` 세 번 교차 조인(300행 → 2,700만 조합)을 `KILL`하면 1317로 멈추고, 공유 `tables` · `catalog`에 `information_schema.*`가 남지 않으며, 멈춘 세션과 다른 세션이 이어서 읽는다.
+- `R95: SELECTs of information_schema tables alone, mixed with a table and with a subquery answer, and leave nothing in the shared database`: 단독 · 두 표 조인 + 집계 · 실제 표와 조인 · 서브쿼리 안과 밖 · 스칼라 서브쿼리 열 · 실패하는 조회.
+- `R95: an information_schema SELECT inside a transaction, at every isolation level`: READ COMMITTED · REPEATABLE READ · SERIALIZABLE에서 `BEGIN` 뒤 읽기, 다른 세션의 쓰기와 `CREATE TABLE` 뒤의 읽기(목록은 지금 것), `COMMIT`.
+
+**점검 결과**
+- **C++ 전체 시험(Release)**: **1,051케이스** 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 통과(단언 1,526,448 / 1,526,446 / 1,526,448), 한가한 기계에서 모드를 하나씩.
+- **C++ 관련 시험(Debug)**: __DEBUG__
+- **`KILL`을 섞은 퍼저**: **300라운드 위반 0** — 세션 목록을 `information_schema.processlist`로 읽는 쪽 180라운드(수정 전에는 약 100라운드에 한 번 실패) + 기본(`SHOW PROCESSLIST`) 120라운드.
+- **기존 크래시 퍼저 6종**(30 · 30 · 20 · 20 · 20 · 15라운드) 불일치 0. **빌드 간 차분**(R94 빌드 `1483598` 대비, 시드 4 × 1,500 = 6,000질의) 차이 0. **검산 12종**(시드 7, 기본 횟수) 위반 0. `test_full.sql` 의도한 오류 17개 · `test_full-ver2.sql` 5개(R94와 같음).
+- **`information_schema`를 쓰는 코퍼스 22개 · 2,330문장**을 R94 빌드와 이 빌드에 같은 순서로 돌려 답을 비교: **차이 0**(진짜 MySQL 서버가 켜져 있지 않아 MySQL 대비 점수판은 다시 돌리지 못했다 — 빌드 간 비교다).
+- **시험이 정말 잡는지(심은 버그)**: __MUTANTS__
+- **앱 화면**: __CDP__
+
+**정직한 한계**: ① 섞인 조회와 서브쿼리가 든 조회는 여전히 독점 경로라 긴 문장 뒤에서 기다린다(감시 도구가 보내는 `processlist` 조회는 단독이라 해당 없음). ② `tables` · `statistics` · `row_versions`를 읽는 조회는 모든 표의 데이터 잠금을 공유로 쥐므로 `MERGE` · 다중 표 `UPDATE` · `DELETE`(표 잠금을 독점으로 쥠)가 돌 때는 기다릴 수 있다 — 대신 안전하다. ③ 비공개 데이터베이스는 파일을 쓰지 않지만 `DiskManager`가 `%TEMP%\rusql_info_scratch` 빈 폴더를 만든다(만들 수 없으면 데이터 폴더를 쓴다). ④ 다른 표의 행 칸을 읽는 것은 일반 SELECT와 같은 노출(제자리에서 `_xmax` 같은 칸을 바꾸는 쓰기와 동시)이다. ⑤ 스칼라 서브쿼리 열이나 `IN (SELECT …)`가 든 `information_schema` 조회는 섞인 조회로 보아 독점 경로를 쓴다(가려내는 규칙이 보수적이다).
 
 ## 요약: 1학기 대비 2학기에 달라진 것
 

@@ -44,7 +44,7 @@ mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 
 3. 시험
 ```
-# C++ 단위 시험 (Catch2, 현재 1,046 케이스)
+# C++ 단위 시험 (Catch2, 현재 1,051 케이스)
 code/build/backend/tests/Release/engine_tests.exe
 code/build/backend/tests/Release/engine_tests.exe "[write_integrity]"
 code/build/backend/tests/Release/engine_tests.exe --list-tests
@@ -66,7 +66,7 @@ code/build/backend/cli/Release/engine_cli.exe < code/test/test_full-ver2.sql
 | `py -3 code/test/frontend/cdp/test_screens.py` | 앱을 실제로 띄워 화면을 하나씩 점검 |
 | `py -3 code/test/frontend/cdp/stress_ecosystem.py <연결> <DB> <표> [--release]` | View Topology(Ecosystem) 창의 규모 시험(R94): 가짜 데이터 폴더를 임시 폴더에 만들어 연결 수십 개 · 표 수천 개로 그려 보고 그리는 시간 · 프레임 · 마우스 반응을 출력하며 구조를 확인(`connections.json`은 원래대로 되돌림) |
 | `py code/test/crash/fuzz_crash.py [횟수] [시드]` | `kill -9` 뒤 복구가 맞는지 보는 무작위 시험 (같은 폴더에 외래 키 · 동시 접속용도 있습니다) |
-| `py code/test/crash/fuzz_kill.py [횟수] [시드]` | 프로세스가 아니라 SQL의 `KILL QUERY` · `KILL <id>`을 무작위 세션에 쏘면서 쓰기를 시킴(R94; 세션 목록은 `SHOW PROCESSLIST`로 읽고 `FUZZ_KILL_INFOSCHEMA=1`이면 열린 경합을 일부러 재현): 멈춘 문장은 아무것도 안 바꾸고, 끊긴 세션의 트랜잭션은 되돌려지고, 잠금이 안 남고, 끝나면 죽은 세션이 목록에 없고 인덱스가 표와 맞는지 확인. 홀수 시드는 `kill -9`까지 섞음. `RUSQL_SERVER_EXE`로 다른 빌드(Debug 등)를 시험 |
+| `py code/test/crash/fuzz_kill.py [횟수] [시드]` | 프로세스가 아니라 SQL의 `KILL QUERY` · `KILL <id>`을 무작위 세션에 쏘면서 쓰기를 시킴(R94; 세션 목록은 `SHOW PROCESSLIST`로 읽고 `FUZZ_KILL_INFOSCHEMA=1`이면 `information_schema.processlist`로 읽음 — R94에는 이것이 경합을 일으켰고 R95에서 닫혔다): 멈춘 문장은 아무것도 안 바꾸고, 끊긴 세션의 트랜잭션은 되돌려지고, 잠금이 안 남고, 끝나면 죽은 세션이 목록에 없고 인덱스가 표와 맞는지 확인. 홀수 시드는 `kill -9`까지 섞음. `RUSQL_SERVER_EXE`로 다른 빌드(Debug 등)를 시험 |
 | `py code/test/diff/diff_builds.py <옛 engine_server.exe> <새 engine_server.exe>` | 같은 질의를 두 빌드에서 돌려 결과를 비교 |
 
 실제 MySQL과 결과를 대조하는 도구(`code/test/diff/*.py`)는 MySQL 8.4를 `127.0.0.1:3391`(사용자 root, 비밀번호 없음)에 따로 띄워야 하며, 자세한 사용법은 `code/test/diff/README.txt`에 있습니다. 성능 측정은 `code/test/perf/README.txt`를 봅니다.

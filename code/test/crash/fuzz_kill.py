@@ -33,9 +33,9 @@ SLOW = 8.0   # a statement that waits this long (seconds) for a row lock after a
 HEAVY = "SELECT COUNT(*) FROM big a WHERE EXISTS (SELECT 1 FROM big b WHERE b.v = a.v AND b.g = a.g + 1000)"
 ROW = re.compile(r"^\|\s*(-?\d+)\s*\|\s*(-?\d+)\s*\|", re.M)
 ID_ROW = re.compile(r"^\|\s*(\d+)\s*\|", re.M)
-# The session list is read with SHOW PROCESSLIST. information_schema.processlist (FUZZ_KILL_INFOSCHEMA=1) trips the OPEN race of R94 -- a SELECT of an information_schema table changes the
-# shared table maps under every other session (docs/mds/DATE.md, backend/tests/test_info_schema_concurrency.cpp) -- about once in a hundred rounds on a Release build; with it the
-# fuzzer reproduces that issue on purpose, without it the fuzzer looks for everything else.
+# The session list is read with SHOW PROCESSLIST. information_schema.processlist (FUZZ_KILL_INFOSCHEMA=1) tripped a race in R94 -- a SELECT of an information_schema table changed the
+# shared table maps under every other session (docs/mds/DATE.md R94, R95; backend/tests/test_info_schema_concurrency.cpp) -- about once in a hundred rounds on a Release build. R95 closed
+# it (180 rounds, 0 failures); the switch stays as the regression check, and without it the fuzzer looks for everything else.
 PROCESSLIST = "SELECT ID, USER, COMMAND FROM information_schema.processlist" if os.environ.get("FUZZ_KILL_INFOSCHEMA") == "1" else "SHOW PROCESSLIST"
 
 
