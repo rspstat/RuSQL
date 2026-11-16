@@ -150,7 +150,7 @@ export function EcosystemLogo({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 6V18a8 3.4 0 0 0 16 0V6" />
-      <ellipse cx="12" cy="6" rx="8" ry="3.4" fill="currentColor" fillOpacity="0.45" />
+      <ellipse cx="12" cy="6" rx="8" ry="3.4" />
     </svg>
   );
 }
