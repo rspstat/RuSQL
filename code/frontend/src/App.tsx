@@ -1902,7 +1902,7 @@ function App() {
               <button className="home-quick-btn" onClick={() => setShowEcosystem(true)} title="Every connection, database and table in one animated picture">
                 {/* 로고: 원통 하나 — 생태계 창을 이루는 그 모양 (창 제목 줄과 같은 컴포넌트) */}
                 <EcosystemLogo size={52} />
-                Ecosystem
+                View Ecosystem
               </button>
             </div>
 

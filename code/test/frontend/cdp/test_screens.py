@@ -267,8 +267,8 @@ def compare_schema_names_what_differs(page: Page):
 def the_ecosystem_window_replaces_the_home_screen(page: Page):
     page.click(".menu-logout-btn")
     page.wait("document.querySelectorAll('.home-quick-btn').length === 4", 20, "the home screen with its four buttons")
-    assert page.eval("[...document.querySelectorAll('.home-quick-btn')].map(b => b.innerText.trim()).join('|')") == "New Connection|Open Terminal|Visit GitHub|Ecosystem"
-    page.click(".home-quick-btn", "Ecosystem")
+    assert page.eval("[...document.querySelectorAll('.home-quick-btn')].map(b => b.innerText.trim()).join('|')") == "New Connection|Open Terminal|Visit GitHub|View Ecosystem"
+    page.click(".home-quick-btn", "View Ecosystem")
     page.wait("document.querySelector('.eco-window') !== null", 10, "the Ecosystem window")
     # the whole window is the new one: nothing of the home screen is left (menu bar, connection list, the buttons)
     for left_over in (".home-bg", ".menu-bar", ".home-sidebar-item", ".home-quick-btn"):
