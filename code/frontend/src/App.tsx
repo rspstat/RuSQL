@@ -1899,8 +1899,8 @@ function App() {
                 </svg>
                 Visit GitHub
               </button>
-              <button className="home-quick-btn home-quick-eco" onClick={() => setShowEcosystem(true)} title="Every connection, database and table in one animated picture">
-                {/* 로고: 큰 원통(RuSQL) → 중간 둘(연결) → 작은 넷(테이블)의 3단 트리 — 생태계 창과 같은 그림 */}
+              <button className="home-quick-btn" onClick={() => setShowEcosystem(true)} title="Every connection, database and table in one animated picture">
+                {/* 로고: 원통 하나 — 생태계 창을 이루는 그 모양 (창 제목 줄과 같은 컴포넌트) */}
                 <EcosystemLogo size={52} />
                 Ecosystem
               </button>

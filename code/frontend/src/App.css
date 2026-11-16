@@ -2510,10 +2510,6 @@ body {
   transition: border-color 0.15s, color 0.15s;
 }
 .home-quick-btn:hover { border-color: #4ec9b0; color: #4ec9b0; }
-/* Ecosystem 버튼의 로고(원통 3단 트리): 올리면 원통을 잇는 선 위로 점선이 흐른다 (생태계 창의 화살표처럼) */
-.home-quick-eco:hover .eco-logo-lines path { stroke-dasharray: 1.4 1.4; animation: home-eco-flow 0.7s linear infinite; }
-@keyframes home-eco-flow { to { stroke-dashoffset: -2.8; } }
-@media (prefers-reduced-motion: reduce) { .home-quick-eco:hover .eco-logo-lines path { animation: none; } }
 .home-rdbms-desc {
   border-left: 2px solid #2a2a2a;
   padding-left: 14px;

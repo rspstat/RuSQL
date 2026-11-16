@@ -144,28 +144,13 @@ function tipLabel(n: EcoNode): Text {
   return `+${n.hidden ?? 0}`;
 }
 
-// The logo (the Ecosystem button of the home screen and the title of this window): the picture in small -- one big cylinder (RuSQL) over two (connections) over four small
-// ones (tables), joined by the same kind of lines. Colors are currentColor, so the button's hover colour and the window's teal both work.
-const LOGO_TIERS = [
-  { cx: [12], w: 8, ry: 1.4, cy: 2.6, h: 2.8, fill: 0.45 },
-  { cx: [6.5, 17.5], w: 6, ry: 1.1, cy: 10.9, h: 2.4, fill: 0.3 },
-  { cx: [3.5, 9.5, 14.5, 20.5], w: 4, ry: 0.8, cy: 19.4, h: 2, fill: 0.2 },
-];
-
+// The logo (the Ecosystem button of the home screen and the title of this window): one plain cylinder, the shape the whole picture is made of. Colors are currentColor,
+// so the button's hover colour and the window's teal both work.
 export function EcosystemLogo({ size = 28 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <g className="eco-logo-lines">
-        <path d="M12 6.8V8.3M6.5 9.8V8.3H17.5V9.8" />
-        <path d="M6.5 14.4V16.5M3.5 18.6V16.5H9.5V18.6" />
-        <path d="M17.5 14.4V16.5M14.5 18.6V16.5H20.5V18.6" />
-      </g>
-      {LOGO_TIERS.flatMap(t => t.cx.map(cx => (
-        <g key={`${t.cy}-${cx}`}>
-          <path d={`M${cx - t.w / 2} ${t.cy}V${t.cy + t.h}a${t.w / 2} ${t.ry} 0 0 0 ${t.w} 0V${t.cy}`} />
-          <ellipse cx={cx} cy={t.cy} rx={t.w / 2} ry={t.ry} fill="currentColor" fillOpacity={t.fill} />
-        </g>
-      )))}
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 6V18a8 3.4 0 0 0 16 0V6" />
+      <ellipse cx="12" cy="6" rx="8" ry="3.4" fill="currentColor" fillOpacity="0.45" />
     </svg>
   );
 }
