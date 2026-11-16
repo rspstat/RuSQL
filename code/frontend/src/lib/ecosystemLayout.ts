@@ -36,9 +36,9 @@ export interface EcoLayout { width: number; height: number; nodes: EcoNode[]; ar
 export const RY = 13; // vertical radius of a cylinder's top ellipse (as in the Diagram page)
 
 const ROOT = { cx: 108, w: 150, h: 108, maxCy: 330 }; // maxCy: with many connections the picture is taller than the window; the root stays in the first screen
-// The three arrows between the columns (RuSQL -> connection -> database -> tables) all have the same horizontal length, ARROW (the length of the purple one, connection ->
-// database); the columns stand where that puts them. HEAD is the room the arrowhead takes before the next cylinder.
-const ARROW = 128;
+// The three arrows between the columns (RuSQL -> connection -> database -> tables) all have the same horizontal length, ARROW (115: the user's choice, first 128 -- the
+// length of the purple one, connection -> database); the columns stand where that puts them. HEAD is the room the arrowhead takes before the next cylinder.
+const ARROW = 115;
 const HEAD = 6;
 const CONN_W = 176, DB_W = 136;
 const CONN = { cx: ROOT.cx + ROOT.w / 2 + ARROW + HEAD + CONN_W / 2, w: CONN_W, h: 78 };
