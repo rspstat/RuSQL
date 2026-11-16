@@ -265,6 +265,11 @@ def compare_schema_names_what_differs(page: Page):
 
 @scenario
 def the_ecosystem_window_replaces_the_home_screen(page: Page):
+    # 100 rows are deleted and 100 replaced (an UPDATE writes a new row version): the table file lists far more versions than rows, and the window must show the live rows
+    page.click('[title="SQL Editor"]')
+    run_statement(page, "DELETE FROM orders WHERE id <= 100;\nUPDATE orders SET total = total + 1 WHERE id > 1400;", "query(s)", button=RUN_ALL)
+    run_statement(page, "SELECT COUNT(*) AS n FROM orders", "1 row(s)")
+    assert "1400" in result_text(page), result_text(page)[:200]
     page.click(".menu-logout-btn")
     page.wait("document.querySelectorAll('.home-quick-btn').length === 4", 20, "the home screen with its four buttons")
     assert page.eval("[...document.querySelectorAll('.home-quick-btn')].map(b => b.innerText.trim()).join('|')") == "New Connection|Open Terminal|Visit GitHub|View Topology"
@@ -286,11 +291,18 @@ def the_ecosystem_window_replaces_the_home_screen(page: Page):
     page.wait("document.querySelector('.eco-tip') !== null", 5, "the tooltip")
     tip = page.eval("document.querySelector('.eco-tip').innerText")
     assert "shop.orders" in tip and "4 column(s)" in tip and "primary key id" in tip and "1 foreign key(s)" in tip, tip
-    assert page.count(".eco-node.dim") > 0 and page.count(".eco-arrow.dim") > 0, "what is off the path steps back"
-    assert page.count('[data-id="%s/d:shop/t:customers"].dim' % mine) == 1 and page.count('[data-id="%s/d:shop"].dim' % mine) == 0, "its own database stays lit, its sibling table steps back"
+    # the live rows (what COUNT(*) says), not the row versions of the file; the window reads the table files again every 4 s
+    for _ in range(100):
+        shown = page.eval("(document.querySelector('.eco-tip') || {innerText: ''}).innerText")
+        if "1,400 row(s)" in shown:
+            break
+        time.sleep(0.25)
+    assert "1,400 row(s)" in shown, ("the tooltip of orders should say the live rows (1,400), it says", shown)
+    assert page.count(".eco-wrap.hovering .eco-node:not(.lit)") > 0 and page.count(".eco-wrap.hovering .eco-arrow:not(.lit)") > 0, "what is off the path steps back"
+    assert page.count('.eco-wrap.hovering [data-id="%s/d:shop/t:customers"]:not(.lit)' % mine) == 1 and page.count('[data-id="%s/d:shop"].lit' % mine) == 1, "its own database stays lit, its sibling table steps back"
     page.screenshot(OUT / "ecosystem.png")
     page.eval("""document.querySelector('[data-id="%s/d:shop/t:orders"]').dispatchEvent(new MouseEvent('mouseout', {bubbles: true}))""" % mine)
-    page.wait("document.querySelector('.eco-tip') === null && document.querySelectorAll('.eco-node.dim').length === 0", 5, "the tooltip is gone")
+    page.wait("document.querySelector('.eco-tip') === null && document.querySelector('.eco-wrap.hovering') === null", 5, "the tooltip is gone")
     # Esc is the way back
     page.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
     page.wait("document.querySelector('.eco-window') === null && document.querySelectorAll('.home-quick-btn').length === 4", 10, "the home screen again")
@@ -298,6 +310,9 @@ def the_ecosystem_window_replaces_the_home_screen(page: Page):
 
 @scenario
 def the_ecosystem_window_zooms_and_scrolls_sideways(page: Page):
+    if page.count(".eco-window"):  # (the scenario before it failed in the window)
+        page.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")
+        page.wait("document.querySelector('.eco-window') === null", 10, "the home screen")
     if page.count(".menu-logout-btn"):  # (run alone, the scenarios before it have left the app signed in)
         page.click(".menu-logout-btn")
     page.wait("document.querySelectorAll('.home-quick-btn').length === 4", 20, "the home screen")
@@ -329,6 +344,22 @@ def the_ecosystem_window_zooms_and_scrolls_sideways(page: Page):
         assert box[0] > box[1], ("no horizontal overflow", box)
         left = page.eval("(() => { const s = document.querySelector('.eco-scroll'); s.scrollLeft = 300; return s.scrollLeft; })()")
         assert left >= 250, left
+        # zoomed in and scrolled, the cylinders at the edges of the part the window shows get a tooltip that stays inside that part (it is not cut by the window's edge)
+        page.eval("(() => { const s = document.querySelector('.eco-scroll'); s.scrollLeft = s.scrollWidth; s.scrollTop = 0; })()")
+        time.sleep(0.4)
+        for side in ("left", "right", "bottom"):
+            pick = {"left": "a.r.left - b.r.left", "right": "b.r.right - a.r.right", "bottom": "b.r.bottom - a.r.bottom"}[side]
+            node = page.eval("""(() => { const box = document.querySelector('.eco-scroll').getBoundingClientRect();
+                const inside = [...document.querySelectorAll('.eco-node')].map(e => ({id: e.dataset.id, r: e.getBoundingClientRect()}))
+                    .filter(x => x.r.left >= box.left && x.r.right <= box.right && x.r.top >= box.top && x.r.bottom <= box.bottom);
+                inside.sort((a, b) => %s); return inside.length ? inside[0].id : null; })()""" % pick)
+            assert node, f"a cylinder at the {side} edge"
+            page.eval("""document.querySelector('[data-id="%s"]').dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))""" % node)
+            page.wait("document.querySelector('.eco-tip') !== null", 5, f"the tooltip at the {side} edge")
+            fits = page.eval("""(() => { const b = document.querySelector('.eco-scroll').getBoundingClientRect(), t = document.querySelector('.eco-tip').getBoundingClientRect();
+                return [t.left >= b.left - 1, t.right <= b.right + 1, t.top >= b.top - 1, t.bottom <= b.bottom + 1, Math.round(t.left - b.left), Math.round(b.right - t.right), Math.round(t.top - b.top), Math.round(b.bottom - t.bottom)]; })()""")
+            assert all(fits[:4]), (f"the tooltip of {node} at the {side} edge sticks out of the window", fits)
+            page.eval("""document.querySelector('[data-id="%s"]').dispatchEvent(new MouseEvent('mouseout', {bubbles: true}))""" % node)
     finally:
         page.call("Emulation.clearDeviceMetricsOverride")
     page.eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))")

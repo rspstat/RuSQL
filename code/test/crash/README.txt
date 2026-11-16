@@ -10,6 +10,17 @@ acknowledged.
   python fuzz_concurrent.py [rounds] [base_seed]  4 concurrent clients on one table; in-flight statement may
                                                   land or not, explicit transactions must be all-or-nothing
 
+  python fuzz_kill.py [rounds] [base_seed]        (R94) the SQL statement KILL, not the process: a killer thread picks random sessions from SHOW PROCESSLIST
+                                                  and sends KILL QUERY n (stop the running statement) or KILL n (end the session) while four client threads, each with a key range
+                                                  of its own, run autocommit statements, small explicit transactions (COMMIT or ROLLBACK), a whole-range UPDATE and a long SELECT.
+                                                  Every thread keeps an exact oracle and checks: a stopped statement (ERROR 1317) changed nothing; a killed session's transaction
+                                                  is gone (a COMMIT in flight lands whole or not at all); the killed session left no row lock (its keys can be written at once);
+                                                  a SELECT that is not stopped answers right. At the end: no dead session is left on the process list, the secondary index agrees
+                                                  with the table scan, CHECK TABLE is clean, no row stays locked. Odd seeds also kill -9 the whole server while the KILLs are in
+                                                  flight and compare after the restart. It found an OPEN race: a SELECT of an information_schema table changes the shared table maps
+                                                  under other sessions (docs/mds/DATE.md, R94); FUZZ_KILL_INFOSCHEMA=1 reads the session list that way and reproduces it (about once in 100 rounds). FUZZ_KILL_TRACE=1 prints violations as found; FUZZ_KILL_BIG=<rows> sizes the long SELECT's table
+                                                  (lower it on a Debug build); FUZZ_KILL_PORT=<port> runs a second copy beside the first; RUSQL_SERVER_EXE=<path> tests another build.
+
   python fuzz_crash_fk.py [rounds] [base_seed]    the same for a parent table p and a child table c with a FOREIGN KEY whose ON DELETE / ON UPDATE actions
                                                   (RESTRICT, CASCADE, SET NULL) the seed picks: child/parent INSERT, REPLACE, IGNORE, ON DUPLICATE KEY UPDATE,
                                                   UPDATE, DELETE, transactions and savepoints, checked against a model of the actions; after recovery a child

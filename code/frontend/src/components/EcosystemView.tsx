@@ -7,12 +7,12 @@
 // so what another RuSQL window or Claude does shows up. A connection that was never opened has no data folder yet and is drawn dashed. The geometry is
 // lib/ecosystemLayout.ts (tested); this file draws it and writes the words. Every visible string is an English/Korean pair, the language is the one of the Diagram page.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowDefs, C, L, LangContext, headId, tint, useT } from "./diagramShared";
 import type { Lang, Text } from "./diagramShared";
-import { RY, WIDTH, ecosystemTotals, fitName, humanBytes, layoutEcosystem, relatedTo } from "../lib/ecosystemLayout";
-import type { EcoConn, EcoNode, EcoScan } from "../lib/ecosystemLayout";
+import { HEAVY_NODES, RY, WIDTH, ecosystemTotals, fitName, humanBytes, layoutEcosystem, relatedTo } from "../lib/ecosystemLayout";
+import type { EcoArrow, EcoConn, EcoGroup, EcoNode, EcoScan } from "../lib/ecosystemLayout";
 import "./DiagramView.css";
 import "./EcosystemView.css";
 
@@ -82,10 +82,11 @@ function tipOf(n: EcoNode, nodes: EcoNode[], lang: Lang): Tip {
   if (n.kind === "database" && n.db) {
     const d = n.db;
     const rows = d.tables.reduce((a, t) => a + t.rows, 0);
+    const approx = d.tables.some(t => !t.exact) ? "~" : ""; // (a very big table file is not counted: its row versions are shown)
     const indexes = d.tables.reduce((a, t) => a + t.indexes, 0);
     const lines: Text[] = [
       L(`${d.tables.length} table(s), ${d.views} view(s), ${indexes} index(es)`, `테이블 ${d.tables.length}개 · 뷰 ${d.views}개 · 인덱스 ${indexes}개`),
-      L(`${num(rows)} row(s) stored, ${humanBytes(d.bytes)} on disk`, `저장된 행 ${num(rows)}개 · 디스크 ${humanBytes(d.bytes)}`),
+      L(`${approx}${num(rows)} row(s), ${humanBytes(d.bytes)} on disk`, `행 ${approx}${num(rows)}개 · 디스크 ${humanBytes(d.bytes)}`),
     ];
     return { title: d.name, color, lines };
   }
@@ -95,7 +96,8 @@ function tipOf(n: EcoNode, nodes: EcoNode[], lang: Lang): Tip {
       L(`${t.columns} column(s)${t.primaryKey.length ? `, primary key ${t.primaryKey.join(", ")}` : ""}`,
         `열 ${t.columns}개${t.primaryKey.length ? ` · 기본키 ${t.primaryKey.join(", ")}` : ""}`),
       L(`${t.foreignKeys} foreign key(s), ${t.indexes} index(es)`, `외래키 ${t.foreignKeys}개 · 인덱스 ${t.indexes}개`),
-      L(`${num(t.rows)} row(s) stored in the table file, ${humanBytes(t.bytes)}`, `테이블 파일에 저장된 행 ${num(t.rows)}개 · ${humanBytes(t.bytes)}`),
+      t.exact ? L(`${num(t.rows)} row(s), ${humanBytes(t.bytes)}`, `행 ${num(t.rows)}개 · ${humanBytes(t.bytes)}`)
+        : L(`about ${num(t.rows)} row version(s) (a very big file is not counted exactly), ${humanBytes(t.bytes)}`, `행 버전 약 ${num(t.rows)}개 (아주 큰 파일이라 정확히 세지 않음) · ${humanBytes(t.bytes)}`),
     ];
     return { title: `${n.db?.name ?? ""}.${t.name}`, color, lines };
   }
@@ -113,12 +115,15 @@ function captionOf(n: EcoNode): Text | null {
   }
   if (n.kind === "database" && n.db) {
     const rows = n.db.tables.reduce((a, t) => a + t.rows, 0);
-    return L(`${n.db.tables.length} table${n.db.tables.length === 1 ? "" : "s"} · ${num(rows)} row${rows === 1 ? "" : "s"}`, `테이블 ${n.db.tables.length}개 · 행 ${num(rows)}개`);
+    const approx = n.db.tables.some(t => !t.exact) ? "~" : "";
+    return L(`${n.db.tables.length} table${n.db.tables.length === 1 ? "" : "s"} · ${approx}${num(rows)} row${rows === 1 ? "" : "s"}`, `테이블 ${n.db.tables.length}개 · 행 ${approx}${num(rows)}개`);
   }
   return null;
 }
 
-function Cylinder({ n, glow, onEnter, onLeave, dim }: { n: EcoNode; glow: number; onEnter: () => void; onLeave: () => void; dim: boolean }) {
+// The pieces of the picture are memo'd: while the mouse moves over a big picture only the pieces whose `lit` changed are drawn again (what is not lit is dimmed by CSS under
+// `.hovering`, see EcosystemView.css), and zooming does not draw them again at all.
+const Cylinder = memo(function Cylinder({ n, glow, lit, onEnter, onLeave }: { n: EcoNode; glow: number; lit: boolean; onEnter: (id: string) => void; onLeave: (id: string) => void }) {
   const t = useT();
   const rx = n.w / 2;
   const l = n.cx - rx, r = n.cx + rx, top = n.cy - n.h / 2, bottom = n.cy + n.h / 2;
@@ -131,16 +136,40 @@ function Cylinder({ n, glow, onEnter, onLeave, dim }: { n: EcoNode; glow: number
     : n.kind === "table" ? fitName(n.table?.name ?? "", 12)
     : `+${n.hidden ?? 0}`;
   return (
-    <g className={`eco-node eco-${n.kind}${empty ? " eco-empty" : ""}${dim ? " dim" : ""}`} data-id={n.id}
+    <g className={`eco-node eco-${n.kind}${empty ? " eco-empty" : ""}${lit ? " lit" : ""}`} data-id={n.id}
       style={{ ...tint(KIND_COLOR[n.kind]), ["--p" as string]: Math.min(n.order, 45), ["--g" as string]: glow }}
       tabIndex={small ? -1 : 0} role="img" aria-label={t(tipLabel(n))}
-      onMouseEnter={onEnter} onMouseLeave={onLeave} onFocus={onEnter} onBlur={onLeave}>
+      onMouseEnter={() => onEnter(n.id)} onMouseLeave={() => onLeave(n.id)} onFocus={() => onEnter(n.id)} onBlur={() => onLeave(n.id)}>
       <path className="eco-body" d={`M${l} ${top + ry} V${bottom - ry} A${rx} ${ry} 0 0 0 ${r} ${bottom - ry} V${top + ry} Z`} />
       <ellipse className="eco-top" cx={n.cx} cy={top + ry} rx={rx} ry={ry} />
       <text className="eco-name" x={n.cx} y={n.cy + ry / 2 + (small ? 4 : 5)} textAnchor="middle">{label}</text>
     </g>
   );
-}
+});
+
+const Arrow = memo(function Arrow({ a, i, lit }: { a: EcoArrow; i: number; lit: boolean }) {
+  const c = ARROW_COLOR[a.depth] ?? C.core;
+  return (
+    <g className={`eco-arrow${lit ? " lit" : ""}`} style={tint(c)}>
+      <path className="dg-aline" d={a.d} markerEnd={`url(#${headId(c)})`} />
+      <path className="dg-aflow" d={a.d} />
+      <circle className="dg-apacket" r="3.2">
+        <animateMotion dur="2.8s" begin={`${-((i * 0.53) % 2.8).toFixed(2)}s`} repeatCount="indefinite" path={a.d} />
+      </circle>
+    </g>
+  );
+});
+
+const Group = memo(function Group({ g, lit }: { g: EcoGroup; lit: boolean }) {
+  return <rect className={`eco-group${lit ? " lit" : ""}`} x={g.x} y={g.y} width={g.w} height={g.h} rx="12" />;
+});
+
+const Caption = memo(function Caption({ n, lit }: { n: EcoNode; lit: boolean }) {
+  const t = useT();
+  const caption = captionOf(n);
+  if (!caption) return null;
+  return <text className={`eco-caption${lit ? " lit" : ""}`} x={n.cx} y={n.cy + n.h / 2 + 16} textAnchor="middle">{t(caption)}</text>;
+});
 
 function tipLabel(n: EcoNode): Text {
   if (n.kind === "root") return "RuSQL";
@@ -189,8 +218,9 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
 
   useEffect(() => {
     let stopped = false;
-    const read = () => {
-      invoke<EcoScan[]>("scan_ecosystem", { requests: connections.map(c => ({ id: c.id, dataDir: c.dataDir })) })
+    // flush: the first read (the window opens) and the one the Refresh button asks for let the engine that is still running write its table files first (see main.rs scan_ecosystem)
+    const read = (flush: boolean) => {
+      invoke<EcoScan[]>("scan_ecosystem", { requests: connections.map(c => ({ id: c.id, dataDir: c.dataDir })), flush })
         .then(list => {
           if (stopped) return;
           const json = JSON.stringify(list);
@@ -200,8 +230,8 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
         })
         .catch(e => { if (!stopped) { setError(String(e)); setLoaded(true); } });
     };
-    read();
-    const timer = setInterval(read, REFRESH_MS);
+    read(true);
+    const timer = setInterval(() => read(false), REFRESH_MS);
     return () => { stopped = true; clearInterval(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestKey, again]);
@@ -209,9 +239,39 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
   const layout = useMemo(() => layoutEcosystem(connections, scans), [connections, scans]);
   const totals = useMemo(() => ecosystemTotals(connections, scans), [connections, scans]);
   const related = useMemo(() => (hover ? relatedTo(layout.nodes, hover) : null), [hover, layout]);
+  const heavy = layout.nodes.length > HEAVY_NODES; // (many cylinders: no endless animation, see HEAVY_NODES)
+  const enter = useCallback((id: string) => setHover(id), []);
+  const leave = useCallback((id: string) => setHover(h => (h === id ? null : h)), []);
+  // The picture is made again only when the data or the lit path changes: zooming changes the size of the <svg> alone.
+  const art = useMemo(() => (
+    <>
+      {layout.groups.map(g => <Group key={g.id} g={g} lit={related !== null && related.has(g.id)} />)}
+      <g>
+        {layout.arrows.map((a, i) => <Arrow key={`${a.from}>${a.to}>${i}`} a={a} i={i} lit={related !== null && related.has(a.from) && related.has(a.to)} />)}
+      </g>
+      {layout.nodes.map(n => <Caption key={`cap-${n.id}`} n={n} lit={related !== null && related.has(n.id)} />)}
+      {layout.nodes.map(n => <Cylinder key={n.id} n={n} glow={n.depth + (n.order % 4) * 0.12} lit={related !== null && related.has(n.id)} onEnter={enter} onLeave={leave} />)}
+    </>
+  ), [layout, related, enter, leave]);
   const tipNode = hover ? layout.nodes.find(n => n.id === hover) : undefined;
   const tip = tipNode ? tipOf(tipNode, layout.nodes, lang) : undefined;
-  const tipUp = tipNode !== undefined && tipNode.cy > layout.height - 190;
+  const tipRef = useRef<HTMLDivElement>(null);
+  // The tooltip stands under its cylinder (above it when there is no room below) and is moved to stay inside the part of the picture the window shows: zoomed in and scrolled,
+  // the cylinder can be at the window's edge, which the picture's own edges (what a percentage of the picture would use) know nothing about.
+  useLayoutEffect(() => {
+    const el = tipRef.current, box = scrollRef.current, wrap = el?.parentElement;
+    if (!el || !box || !wrap || !tipNode) return;
+    const k = zoom / 100, b = box.getBoundingClientRect(), w = wrap.getBoundingClientRect();
+    const vL = b.left - w.left, vR = vL + box.clientWidth, vT = b.top - w.top, vB = vT + box.clientHeight; // the visible part, in the picture's pixels
+    const cx = tipNode.cx * k, top = (tipNode.cy - tipNode.h / 2) * k, bottom = (tipNode.cy + tipNode.h / 2 + (captionOf(tipNode) ? 14 : 0)) * k;
+    const tw = el.offsetWidth, th = el.offsetHeight, gap = 10, edge = 8;
+    const left = Math.max(vL + edge, Math.min(cx - tw / 2, vR - tw - edge));
+    let y = bottom + gap;
+    if (y + th > vB - edge && top - gap - th >= vT + edge) y = top - gap - th;
+    y = Math.max(vT + edge, Math.min(y, vB - th - edge));
+    el.style.left = `${left}px`;
+    el.style.top = `${y}px`;
+  }, [tipNode, zoom, layout]);
 
   return (
     <>
@@ -219,8 +279,9 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
         <span><b>{totals.connections}</b>{t(L(" connections", "개 연결"))}</span>
         <span><b>{totals.databases}</b>{t(L(" databases", "개 데이터베이스"))}</span>
         <span><b>{num(totals.tables)}</b>{t(L(" tables", "개 테이블"))}</span>
-        <span><b>{num(totals.rows)}</b>{t(L(" rows", "개 행"))}</span>
+        <span><b>{totals.exactRows ? "" : "~"}{num(totals.rows)}</b>{t(L(" rows", "개 행"))}</span>
         <span><b>{humanBytes(totals.bytes)}</b>{t(L(" on disk", " 디스크"))}</span>
+        {heavy && <span className="eco-heavy-note" title={t(L("A picture this big would be painted again on every frame while anything moves", "이렇게 큰 그림은 무언가 움직이는 동안 매 프레임 전체를 다시 그리게 됩니다"))}>{t(L("many cylinders: animation off", "원통이 많아 애니메이션을 껐습니다"))}</span>}
         <div className="eco-zoom">
           <input type="range" min={ZOOM_MIN} max={ZOOM_MAX} value={zoom} onChange={e => zoomTo(Number(e.target.value))}
             title={t(L(`Zoom (${ZOOM_MIN}~${ZOOM_MAX}%)`, `확대/축소 (${ZOOM_MIN}~${ZOOM_MAX}%)`))} aria-label={t(L("Zoom", "확대/축소"))} />
@@ -238,47 +299,14 @@ function Picture({ connections, lang }: { connections: EcoConn[]; lang: Lang }) 
         ) : connections.length === 0 ? (
           <div className="eco-note">{t(L("There is no saved connection yet. Add one on the home screen and it appears here.", "저장된 연결이 아직 없습니다. 홈 화면에서 연결을 추가하면 여기에 나타납니다."))}</div>
         ) : (
-          <div className="eco-wrap" style={{ width: (layout.width * zoom) / 100, height: (layout.height * zoom) / 100 }}>
+          <div className={`eco-wrap${related ? " hovering" : ""}${heavy ? " eco-heavy" : ""}`} style={{ width: (layout.width * zoom) / 100, height: (layout.height * zoom) / 100 }}>
             <svg className="eco-svg" width={(layout.width * zoom) / 100} height={(layout.height * zoom) / 100} viewBox={`0 0 ${layout.width} ${layout.height}`} role="group"
               aria-label={t(L("Cylinder picture of every connection, database and table", "모든 연결 · 데이터베이스 · 테이블의 원통 그림"))}>
-              {layout.groups.map(g => (
-                <rect key={g.id} className={`eco-group${related && !related.has(g.id) ? " dim" : ""}`} x={g.x} y={g.y} width={g.w} height={g.h} rx="12" />
-              ))}
-              <g>
-                {layout.arrows.map((a, i) => {
-                  const c = ARROW_COLOR[a.depth] ?? C.core;
-                  const lit = !related || (related.has(a.from) && related.has(a.to));
-                  return (
-                    <g key={`${a.from}>${a.to}>${i}`} className={`eco-arrow${lit ? "" : " dim"}`} style={tint(c)}>
-                      <path className="dg-aline" d={a.d} markerEnd={`url(#${headId(c)})`} />
-                      <path className="dg-aflow" d={a.d} />
-                      <circle className="dg-apacket" r="3.2">
-                        <animateMotion dur="2.8s" begin={`${-((i * 0.53) % 2.8).toFixed(2)}s`} repeatCount="indefinite" path={a.d} />
-                      </circle>
-                    </g>
-                  );
-                })}
-              </g>
-              {layout.nodes.map(n => {
-                const caption = captionOf(n);
-                const below = n.cy + n.h / 2 + 16;
-                return caption ? (
-                  <text key={`cap-${n.id}`} className={`eco-caption${related && !related.has(n.id) ? " dim" : ""}`} x={n.cx} y={below} textAnchor="middle">{t(caption)}</text>
-                ) : null;
-              })}
-              {layout.nodes.map(n => (
-                <Cylinder key={n.id} n={n} glow={n.depth + (n.order % 4) * 0.12} dim={related !== null && !related.has(n.id)}
-                  onEnter={() => setHover(n.id)} onLeave={() => setHover(h => (h === n.id ? null : h))} />
-              ))}
+              {art}
             </svg>
 
             {tip && tipNode && (
-              <div className={`eco-tip${tipUp ? " up" : ""}`}
-                style={{
-                  ...tint(tip.color),
-                  left: `${Math.min(84, Math.max(16, (tipNode.cx / layout.width) * 100))}%`,
-                  top: `${((tipUp ? tipNode.cy - tipNode.h / 2 : tipNode.cy + tipNode.h / 2 + (captionOf(tipNode) ? 14 : 0)) / layout.height) * 100}%`,
-                }}>
+              <div className="eco-tip" ref={tipRef} style={tint(tip.color)}>
                 <b>{tip.title}</b>
                 {tip.lines.map((line, i) => <span key={i}>{t(line)}</span>)}
               </div>

@@ -7,7 +7,7 @@
 // Heights are not fixed: a connection takes the room its databases take, a database the room of its rows of tables, so a big database does not push its neighbours over.
 // The root stands in the middle of the picture, but never lower than ROOT.maxCy, so it is on the first screen however many connections there are.
 
-export interface EcoTable { name: string; columns: number; primaryKey: string[]; foreignKeys: number; indexes: number; rows: number; bytes: number }
+export interface EcoTable { name: string; columns: number; primaryKey: string[]; foreignKeys: number; indexes: number; rows: number; exact: boolean; bytes: number }   // exact: rows = the live rows (false: a very big file, rows = its row versions)
 export interface EcoDatabase { name: string; tables: EcoTable[]; views: number; bytes: number }
 // What the scan of a connection's data folder found (src-tauri main.rs: scan_ecosystem). `exists: false` is a connection that was never opened: it has no folder yet.
 export interface EcoScan { id: string; exists: boolean; users: number; routines: number; triggers: number; bytes: number; databases: EcoDatabase[] }
@@ -52,13 +52,26 @@ const MIN_CONN = 104;
 const MIN_DB = 88;
 
 export const MAX_TABLES = 40; // a database with more tables draws the first 39 and one "+N" cylinder
+// A picture with more cylinders than this is "heavy": measured with 979 cylinders, any one of the endless animations (the glow of the lids, the flow of the arrows, the packets) keeps
+// the whole picture painted again on every frame (47 frames a second with them, 177 without), so the window switches all of them off.
+export const HEAVY_NODES = 300;
+
+// How many tables of ONE database are drawn (the rest is one "+N" cylinder): 40, fewer when the whole picture would get too big -- measured, 979 cylinders draw in about 2 s and
+// stay smooth, 8,281 (50 connections x 4 databases x 40 tables) took 13 s to draw and 100 to 480 ms to answer the mouse.
+export function tableLimit(scans: Record<string, EcoScan | undefined>): number {
+  let total = 0;
+  for (const scan of Object.values(scans)) {
+    if (scan && scan.exists) for (const db of scan.databases) total += db.tables.length;
+  }
+  return total > 4000 ? 10 : total > 1500 ? 20 : MAX_TABLES;
+}
 
 const curve = (x1: number, y1: number, x2: number, y2: number): string => {
   const mid = (x1 + x2) / 2;
   return `M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2} ${y2}`;
 };
 
-export function layoutEcosystem(conns: EcoConn[], scans: Record<string, EcoScan | undefined>, maxTables: number = MAX_TABLES): EcoLayout {
+export function layoutEcosystem(conns: EcoConn[], scans: Record<string, EcoScan | undefined>, maxTables: number = tableLimit(scans)): EcoLayout {
   const nodes: EcoNode[] = [];
   const arrows: EcoArrow[] = [];
   const groups: EcoGroup[] = [];
@@ -115,10 +128,10 @@ export function layoutEcosystem(conns: EcoConn[], scans: Record<string, EcoScan 
   return { width: WIDTH, height, nodes, arrows, groups };
 }
 
-export interface EcoTotals { connections: number; opened: number; databases: number; tables: number; rows: number; bytes: number }
+export interface EcoTotals { connections: number; opened: number; databases: number; tables: number; rows: number; exactRows: boolean; bytes: number }
 
 export function ecosystemTotals(conns: EcoConn[], scans: Record<string, EcoScan | undefined>): EcoTotals {
-  const totals: EcoTotals = { connections: conns.length, opened: 0, databases: 0, tables: 0, rows: 0, bytes: 0 };
+  const totals: EcoTotals = { connections: conns.length, opened: 0, databases: 0, tables: 0, rows: 0, exactRows: true, bytes: 0 };
   for (const conn of conns) {
     const scan = scans[conn.id];
     if (!scan || !scan.exists) continue;
@@ -127,7 +140,7 @@ export function ecosystemTotals(conns: EcoConn[], scans: Record<string, EcoScan 
     for (const db of scan.databases) {
       totals.databases++;
       totals.tables += db.tables.length;
-      for (const table of db.tables) totals.rows += table.rows;
+      for (const table of db.tables) { totals.rows += table.rows; if (!table.exact) totals.exactRows = false; }
     }
   }
   return totals;

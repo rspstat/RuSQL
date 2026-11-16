@@ -582,6 +582,15 @@ TEST_CASE("R67: KILL QUERY stops a MERGE, a multi-table UPDATE and a multi-table
     REQUIRE(q(bob.session, "SELECT COUNT(*) FROM src") == Rows{{"20000"}}); // (the session is whole)
 }
 
+// How soon a stopped CREATE INDEX has to be over. The stop request is looked at once the build has got through the rows (the phase before the index is filled), and that takes well under
+// 700 ms on a Release build but about 1.4 s on a Debug build, which does the same work in many times the time (found by the Debug run of R94: the statement WAS stopped, with the right error,
+// only later than the Release bound). The bound is there to tell "stopped" from "ran to its end", and that takes seconds on either build.
+#ifdef NDEBUG
+constexpr std::chrono::milliseconds kIndexStopWithin{700};
+#else
+constexpr std::chrono::milliseconds kIndexStopWithin{5000};
+#endif
+
 TEST_CASE("R67: KILL QUERY stops a CREATE INDEX while it builds, with nothing changed, and an index that is not stopped finds the same rows", "[r67][kill]") {
     TempDataDir dir("r67_index_kill");
     Executor ex(dir.path);
@@ -600,7 +609,7 @@ TEST_CASE("R67: KILL QUERY stops a CREATE INDEX while it builds, with nothing ch
         INFO(create);
         const std::string name = std::string(create).substr(13, std::string(create).find(' ', 13) - 13);
         const bool listed = std::string(create).find("USING HASH") == std::string::npos; // (SHOW INDEX does not list a hash index)
-        require_stopped(run_and_kill(ex, bob.session, bob.id, create, 40), std::chrono::milliseconds(700)); // (a build that is not stopped goes on for a second or more)
+        require_stopped(run_and_kill(ex, bob.session, bob.id, create, 40), kIndexStopWithin); // (a build that is not stopped goes on for a second or more on Release)
         if (listed) REQUIRE(ex.execute_sql("SHOW INDEX FROM big").value().find(name) == std::string::npos);
         ok(ex, create); // (nothing was made: the same statement, not stopped, makes the index -- it would say "Duplicate key name" if half of one were there)
         if (listed) REQUIRE(ex.execute_sql("SHOW INDEX FROM big").value().find(name) != std::string::npos);

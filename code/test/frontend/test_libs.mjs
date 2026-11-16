@@ -360,7 +360,7 @@ test("MCP panel: every tool has a request to ask Claude, and every group has too
 // ── ecosystemLayout (R93: the Ecosystem window) ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 const eco = await load("ecosystemLayout");
 const ecoConn = (id, name = id) => ({ id, name, host: "localhost", port: 7878, user: "root", autoLogin: false, dataDir: "C:/data/" + id });
-const ecoTable = (name, rows = 0) => ({ name, columns: 3, primaryKey: ["id"], foreignKeys: 0, indexes: 1, rows, bytes: 4096 });
+const ecoTable = (name, rows = 0, exact = true) => ({ name, columns: 3, primaryKey: ["id"], foreignKeys: 0, indexes: 1, rows, exact, bytes: 4096 });
 const ecoDb = (name, tables) => ({ name, tables, views: 0, bytes: 8192 });
 const ecoScan = (id, databases, exists = true) => ({ id, exists, users: 1, routines: 0, triggers: 0, bytes: 20000, databases });
 const box = n => ({ l: n.cx - n.w / 2, r: n.cx + n.w / 2, t: n.cy - n.h / 2, b: n.cy + n.h / 2 });
@@ -436,6 +436,33 @@ test("ecosystem: a database with more tables than the limit draws the first ones
   assert.equal(exact.nodes.filter(n => n.kind === "table").length, 5, "exactly the limit is drawn whole");
   assert.equal(exact.nodes.filter(n => n.kind === "more").length, 0);
 });
+test("ecosystem: a big picture draws fewer tables per database, and is called heavy (no endless animation) above HEAVY_NODES cylinders", () => {
+  const many = (conns, dbs, tables) => {
+    const list = Array.from({ length: conns }, (_, i) => ecoConn("k" + i)), scans = {};
+    for (const c of list) scans[c.id] = ecoScan(c.id, Array.from({ length: dbs }, (_, d) => ecoDb("db" + d, Array.from({ length: tables }, (_, k) => ecoTable("t" + k)))));
+    return { list, scans };
+  };
+  const limit = (conns, dbs, tables) => eco.tableLimit(many(conns, dbs, tables).scans);
+  assert.equal(limit(2, 3, 250), 40, "1,500 tables: 40 of a database");
+  assert.equal(limit(2, 3, 251), 20, "1,506: 20");
+  assert.equal(limit(10, 4, 100), 20, "4,000: 20");
+  assert.equal(limit(10, 4, 101), 10, "4,040: 10");
+  assert.equal(eco.tableLimit({ a: ecoScan("a", [ecoDb("d", Array.from({ length: 9000 }, (_, k) => ecoTable("t" + k)))], false) }), 40, "a connection never opened has no tables to count");
+  // the biggest picture one can make out of 50 x 4 x 40 tables: fewer cylinders, made quickly
+  const huge = many(50, 4, 40), t0 = Date.now(), l = eco.layoutEcosystem(huge.list, huge.scans);
+  assert.ok(Date.now() - t0 < 1500, "the layout of 8,000 tables takes " + (Date.now() - t0) + " ms");
+  assert.equal(l.nodes.filter(n => n.kind === "table").length, 50 * 4 * 9, "9 tables and one +N cylinder in each database");
+  assert.equal(l.nodes.filter(n => n.kind === "more").length, 200);
+  assert.ok(l.nodes.length < 2500, l.nodes.length + " cylinders");
+  // 12 x 3 x 25 = 900 tables: all are drawn, the picture is heavy, and nothing overlaps
+  const mid = many(12, 3, 25), lm = eco.layoutEcosystem(mid.list, mid.scans);
+  assert.equal(lm.nodes.filter(n => n.kind === "table").length, 900);
+  assert.ok(lm.nodes.length > eco.HEAVY_NODES);
+  for (let i = 0; i < lm.nodes.length; i++) for (let j = i + 1; j < lm.nodes.length; j++) assert.ok(!overlap(lm.nodes[i], lm.nodes[j]), lm.nodes[i].id + " / " + lm.nodes[j].id);
+  // the pictures of a user's own few connections stay light
+  const few = many(9, 1, 3), lf = eco.layoutEcosystem(few.list, few.scans);
+  assert.ok(lf.nodes.length <= eco.HEAVY_NODES);
+});
 test("ecosystem: the path that stays lit under the mouse is the parents and everything below", () => {
   const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1"), ecoTable("t2")]), ecoDb("d2", [ecoTable("t3")])]), b: ecoScan("b", [ecoDb("d4", [ecoTable("t4")])]) };
   const l = eco.layoutEcosystem([ecoConn("a"), ecoConn("b")], scans);
@@ -464,7 +491,11 @@ test("ecosystem: the three horizontal arrows (root -> connection -> database -> 
 });
 test("ecosystem: the numbers over the picture, sizes and cut names", () => {
   const scans = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1", 10), ecoTable("t2", 5)]), ecoDb("d2", [ecoTable("t3", 100)])]), b: ecoScan("b", [], false) };
-  assert.deepEqual(eco.ecosystemTotals([ecoConn("a"), ecoConn("b"), ecoConn("c")], scans), { connections: 3, opened: 1, databases: 2, tables: 3, rows: 115, bytes: 20000 });
+  assert.deepEqual(eco.ecosystemTotals([ecoConn("a"), ecoConn("b"), ecoConn("c")], scans), { connections: 3, opened: 1, databases: 2, tables: 3, rows: 115, exactRows: true, bytes: 20000 });
+  // one very big table file that was not counted (its row versions are shown) makes the sum an "about"
+  const big = { a: ecoScan("a", [ecoDb("d1", [ecoTable("t1", 10), ecoTable("t2", 5000000, false)])]) };
+  assert.equal(eco.ecosystemTotals([ecoConn("a")], big).exactRows, false);
+  assert.equal(eco.ecosystemTotals([ecoConn("a")], big).rows, 5000010);
   assert.deepEqual([512, 2048, 5 * 1024 * 1024, 3 * 1024 ** 3].map(eco.humanBytes), ["512 B", "2.0 KB", "5.0 MB", "3.00 GB"]);
   assert.equal(eco.fitName("short", 12), "short");
   assert.equal(eco.fitName("a_very_long_table_name", 12), "a_very_long…");

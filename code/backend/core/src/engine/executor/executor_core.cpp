@@ -845,6 +845,14 @@ bool select_tables_ok(const Statement::Select& sel, const std::string& current_d
     for (const Statement* sq : select_expression_subqueries(sel)) {
         if (!stmt_tables_ok(*sq, current_db, s, out)) return false;
     }
+    // KNOWN RACE, deliberately left as it is (R94, found by code/test/crash/fuzz_kill.py): a SELECT of an information_schema table puts the rows it has now into a temporary table
+    // of the SHARED database (s.tables, s.catalog) and takes it away again, and this function lets that SELECT in on the per-table path, whose structural lock is only SHARED -- so
+    // it changes maps that other sessions read at the same moment (an UPDATE's CascadeSim walks s.catalog.tables twice: "Internal error: invalid unordered_map<K, T> key" now and
+    // then, a crash under a hard enough load). is_pure_read_only() calls such a SELECT a writer, i.e. the exclusive path -- but then every poll of information_schema.processlist
+    // (the Activity panel, the MCP list_locks and kill_session) has to wait for any long statement to end, which is exactly when the list is needed (measured: 0.00 s became 3.13 s
+    // behind a 3.5 s SELECT, and a pending exclusive request holds back the statements behind it too), and the R53 / R63 / R67 KILL tests read the list that way. So routing the
+    // SELECT to the exclusive path is NOT the fix; the fix has to stop changing the shared maps. See docs/mds/DATE.md (R94) and the hidden test [r94-open] in
+    // backend/tests/test_info_schema_concurrency.cpp, which reproduces it.
     std::string qtable = qualify_local(sel.table, current_db);
     if (s.views.count(qtable)) return false;
     out.push_back(qtable);

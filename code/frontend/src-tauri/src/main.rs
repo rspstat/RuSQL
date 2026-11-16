@@ -1312,6 +1312,7 @@ struct EcoTable {
     foreign_keys: usize,
     indexes: usize,
     rows: u64,
+    exact: bool, // rows is the number of live rows (false: a very big file, rows is the file's row versions)
     bytes: u64,
 }
 
@@ -1359,14 +1360,111 @@ fn dir_bytes(path: &std::path::Path, depth: u32) -> u64 {
     total
 }
 
-// .rdb 머리: 0..4 매직(바이트 00 'B' 'D' 'R'), 8..12 row_count (little endian)
-fn rdb_rows(path: &std::path::Path) -> u64 {
-    use std::io::Read;
-    let mut head = [0u8; 32];
-    match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)) {
-        Ok(()) if &head[1..4] == b"BDR" => u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as u64,
-        _ => 0,
+// ── 행 수: 표 파일이 담은 행 버전 가운데 살아 있는 것 ─────────────────────────────────────────────
+// .rdb = 32바이트 머리(0..4 매직 00 'B' 'D' 'R', 6 플래그(1: 압축), 8..12 row_count) + (압축이면 "원래 크기 u32 + LZ4 블록", 아니면 그대로) 본문. 본문은 [길이 u32][행 JSON]의 연속이다.
+// 머리의 row_count는 행 *버전*의 수라서 지워진 행과 갱신으로 대체된 옛 행도 센다(VACUUM 전까지) -- 그대로 보여 주면 SELECT COUNT(*)와 다르다. 행은 `"_xmax":"0"`일 때 살아 있다
+// (`_xmax`가 없으면 산 행). 압축을 풀어 세되, 파일이 바뀌지 않았으면(수정 시각과 크기가 같으면) 전에 센 값을 쓰고, 32MB가 넘는 파일은 머리의 값을 그대로 쓴다(exact: false).
+const LIVE_COUNT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const LIVE_COUNT_MAX_RAW: usize = 256 * 1024 * 1024;
+
+// LZ4 블록(압축 형식은 토큰 · 글자 · 되돌아갈 거리 · 길이)을 푼다. 크기가 안 맞거나 깨졌으면 None.
+fn lz4_block(src: &[u8], size: usize) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::with_capacity(size);
+    let mut i = 0usize;
+    while i < src.len() {
+        let token = src[i];
+        i += 1;
+        let mut literals = (token >> 4) as usize;
+        if literals == 15 {
+            loop {
+                let b = *src.get(i)?;
+                i += 1;
+                literals += b as usize;
+                if b != 255 { break; }
+            }
+        }
+        out.extend_from_slice(src.get(i..i.checked_add(literals)?)?);
+        i += literals;
+        if i >= src.len() { break; } // 마지막 묶음은 글자뿐이다
+        let offset = (*src.get(i)? as usize) | ((*src.get(i + 1)? as usize) << 8);
+        i += 2;
+        if offset == 0 || offset > out.len() { return None; }
+        let mut length = (token & 15) as usize;
+        if length == 15 {
+            loop {
+                let b = *src.get(i)?;
+                i += 1;
+                length += b as usize;
+                if b != 255 { break; }
+            }
+        }
+        length += 4;
+        if out.len() + length > size { return None; }
+        let start = out.len() - offset;
+        for k in 0..length {
+            let b = out[start + k]; // (거리가 길이보다 짧으면 방금 쓴 글자를 다시 베낀다)
+            out.push(b);
+        }
     }
+    if out.len() == size { Some(out) } else { None }
+}
+
+fn is_live_row(row: &[u8]) -> bool {
+    const KEY: &[u8] = b"\"_xmax\":\"";
+    match row.windows(KEY.len()).position(|w| w == KEY) {
+        Some(p) => row.get(p + KEY.len()) == Some(&b'0') && row.get(p + KEY.len() + 1) == Some(&b'"'),
+        None => true,
+    }
+}
+
+fn count_live_rows(raw: &[u8], row_count: u64) -> u64 {
+    let (mut pos, mut live) = (0usize, 0u64);
+    for _ in 0..row_count {
+        if pos + 4 > raw.len() { break; }
+        let len = u32::from_le_bytes([raw[pos], raw[pos + 1], raw[pos + 2], raw[pos + 3]]) as usize;
+        pos += 4;
+        if pos + len > raw.len() { break; }
+        if is_live_row(&raw[pos..pos + len]) { live += 1; }
+        pos += len;
+    }
+    live
+}
+
+type LiveCache = std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (std::time::SystemTime, u64, u64)>>;
+fn live_cache() -> &'static LiveCache {
+    static CACHE: std::sync::OnceLock<LiveCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+// (행 수, 정확한가): 읽을 수 없는 파일은 (0, false)
+fn rdb_rows(path: &std::path::Path) -> (u64, bool) {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else { return (0, false) };
+    let (len, modified) = (meta.len(), meta.modified().unwrap_or(std::time::UNIX_EPOCH));
+    if let Some(&(m, l, live)) = live_cache().lock().unwrap_or_else(|e| e.into_inner()).get(path) {
+        if m == modified && l == len { return (live, true); }
+    }
+    let Ok(mut file) = std::fs::File::open(path) else { return (0, false) };
+    let mut head = [0u8; 32];
+    if file.read_exact(&mut head).is_err() || &head[1..4] != b"BDR" { return (0, false); }
+    let versions = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as u64;
+    if len > LIVE_COUNT_MAX_BYTES { return (versions, false); }
+    let mut body = Vec::with_capacity(len as usize);
+    if file.read_to_end(&mut body).is_err() { return (versions, false); }
+    let raw = if head[6] & 1 != 0 {
+        if body.len() < 4 { return (versions, false); }
+        let size = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+        if size > LIVE_COUNT_MAX_RAW { return (versions, false); }
+        match lz4_block(&body[4..], size) {
+            Some(raw) => raw,
+            None => return (versions, false),
+        }
+    } else {
+        body
+    };
+    let live = count_live_rows(&raw, versions);
+    live_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), (modified, len, live));
+    (live, true)
 }
 
 fn scan_database(dir: &std::path::Path, name: String) -> EcoDatabase {
@@ -1393,15 +1491,27 @@ fn scan_database(dir: &std::path::Path, name: String) -> EcoDatabase {
             let indexes = index_tables.iter().filter(|t| t.ends_with(&suffix) || **t == table.to_lowercase()).count();
             let rdb = dir.join(format!("{}.rdb", table));
             let bytes = rdb.metadata().map(|m| m.len()).unwrap_or(0) + entry.metadata().map(|m| m.len()).unwrap_or(0);
-            tables.push(EcoTable { name: table.to_string(), columns: columns.len(), primary_key, foreign_keys, indexes, rows: rdb_rows(&rdb), bytes });
+            let (rows, exact) = rdb_rows(&rdb);
+            tables.push(EcoTable { name: table.to_string(), columns: columns.len(), primary_key, foreign_keys, indexes, rows, exact, bytes });
         }
     }
     tables.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     EcoDatabase { name, tables, views: json_len(&dir.join("views.json")), bytes: dir_bytes(dir, 3) }
 }
 
-#[tauri::command]
-fn scan_ecosystem(requests: Vec<EcoRequest>) -> Vec<EcoScan> {
+#[tauri::command(async)] // (동기 명령은 메인 스레드에서 돈다: 폴더가 크면 몇 초마다 창이 멈춘다 -- async는 스레드 풀에서 돈다)
+fn scan_ecosystem(requests: Vec<EcoRequest>, flush: bool, state: State<AppState>) -> Vec<EcoScan> {
+    // 엔진은 표 파일을 체크포인트 때만(redo 로그가 몇 MB 쌓였을 때) 다시 쓴다: 방금 한 일은 파일에 아직 없다. 로그아웃해도 마지막 연결의 엔진 프로세스는 살아 있으므로,
+    // 창을 열 때와 새로고침을 누를 때(flush) 그 엔진이 이 연결 것이면 CHECKPOINT를 한 번 시켜 파일을 최신으로 만든다(바뀐 표만 쓰므로 싸다). 4초마다의 읽기는 시키지 않는다.
+    if flush {
+        let mut guard = state.db.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = guard.as_mut() {
+            let same = |a: &str, b: &str| a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y);
+            if requests.iter().any(|r| same(&r.data_dir, &conn.data_dir)) {
+                let _ = send_one(conn, "CHECKPOINT;");
+            }
+        }
+    }
     requests.into_iter().map(|req| {
         let root = std::path::PathBuf::from(&req.data_dir);
         if req.data_dir.is_empty() || !root.is_dir() {
@@ -1936,5 +2046,82 @@ mod tests {
             *m.lock().unwrap_or_else(|e| e.into_inner())
         }));
         assert_eq!(recovered.ok(), Some(42), "lock() must recover from poisoning, not panic again");
+    }
+
+    // ── 생태계 창의 행 수 (R94) ──────────────────────────────────────────────────────────
+    #[test]
+    fn lz4_block_decodes_literals_matches_and_long_lengths() {
+        // "abc", then a match of 9 bytes at distance 3, then the literal "Z"
+        assert_eq!(lz4_block(&[0x35, b'a', b'b', b'c', 3, 0, 0x10, b'Z'], 13).unwrap(), b"abcabcabcabcZ");
+        // 20 literals: token 0xF0 and the extra length byte 5 (15 + 5)
+        let mut long = vec![0xF0u8, 5];
+        long.extend_from_slice(&[7u8; 20]);
+        assert_eq!(lz4_block(&long, 20).unwrap(), vec![7u8; 20]);
+        // a match that is longer than its distance copies what it has just written: "a", 8 more "a", "!"
+        assert_eq!(lz4_block(&[0x14, b'a', 1, 0, 0x10, b'!'], 10).unwrap(), b"aaaaaaaaa!");
+        // a wrong size, a distance of 0, a distance beyond what is written and a cut block are refused
+        assert!(lz4_block(&[0x35, b'a', b'b', b'c', 3, 0, 0x10, b'Z'], 12).is_none());
+        assert!(lz4_block(&[0x14, b'a', 0, 0, 0x10, b'!'], 10).is_none());
+        assert!(lz4_block(&[0x14, b'a', 2, 0, 0x10, b'!'], 10).is_none());
+        assert!(lz4_block(&[0x35, b'a', b'b'], 13).is_none());
+    }
+
+    fn rows_blob(rows: &[&str]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for r in rows {
+            raw.extend_from_slice(&(r.len() as u32).to_le_bytes());
+            raw.extend_from_slice(r.as_bytes());
+        }
+        raw
+    }
+
+    #[test]
+    fn live_rows_are_the_rows_whose_xmax_is_zero() {
+        let raw = rows_blob(&[
+            r#"{"_xmax":"0","_xmin":"1","id":1}"#,
+            r#"{"_xmax":"7","_xmin":"1","id":2}"#,
+            r#"{"id":3}"#,
+            r#"{"_xmax":"0","note":"a \"_xmax\":\"9\" b"}"#,
+        ]);
+        assert_eq!(count_live_rows(&raw, 4), 3, "rows 1, 3 (no _xmax) and 4 (the text in a string is escaped) are alive, row 2 was deleted");
+        assert_eq!(count_live_rows(&raw, 2), 1, "only the first row_count rows are read");
+        assert_eq!(count_live_rows(&raw, 9), 3, "a row_count past the end of the data stops at the end");
+    }
+
+    #[test]
+    fn rdb_rows_counts_live_rows_of_a_plain_and_a_compressed_file() {
+        let dir = std::env::temp_dir().join(format!("rusql_eco_rows_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = rows_blob(&[r#"{"_xmax":"0","id":1}"#, r#"{"_xmax":"3","id":2}"#, r#"{"_xmax":"0","id":3}"#]);
+        let header = |flags: u8| {
+            let mut h = vec![0u8, b'B', b'D', b'R', 1, 0, flags, 0];
+            h.extend_from_slice(&3u32.to_le_bytes());
+            h.resize(32, 0);
+            h
+        };
+        // plain
+        let plain = dir.join("plain.rdb");
+        let mut file = header(0);
+        file.extend_from_slice(&raw);
+        std::fs::write(&plain, &file).unwrap();
+        assert_eq!(rdb_rows(&plain), (2, true));
+        // compressed: size, then a block that is all literals (token with the length in the high nibble, extra bytes of 255 and a rest)
+        let compressed = dir.join("compressed.rdb");
+        let mut block = vec![0xF0u8];
+        let mut rest = raw.len() - 15;
+        while rest >= 255 { block.push(255); rest -= 255; }
+        block.push(rest as u8);
+        block.extend_from_slice(&raw);
+        let mut file = header(1);
+        file.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        file.extend_from_slice(&block);
+        std::fs::write(&compressed, &file).unwrap();
+        assert_eq!(rdb_rows(&compressed), (2, true));
+        assert_eq!(rdb_rows(&compressed), (2, true), "the second time the cached count is used");
+        // not a table file, a missing file
+        std::fs::write(dir.join("junk.rdb"), b"hello").unwrap();
+        assert_eq!(rdb_rows(&dir.join("junk.rdb")), (0, false));
+        assert_eq!(rdb_rows(&dir.join("missing.rdb")), (0, false));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -77,6 +77,7 @@ add_executable(engine_tests
     test_collation_sql.cpp
     test_unique_claims.cpp
     test_statement_stop.cpp
+    test_info_schema_concurrency.cpp
     test_index_advice.cpp
     test_explain_write.cpp
     test_r71_transactions.cpp
@@ -103,6 +104,12 @@ add_executable(engine_tests
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)
+# A Debug build has no inlining and far larger stack frames: the 16-level trigger recursion test ("Self-referential AFTER INSERT trigger recursion is bounded") overflowed the
+# default 1 MB stack there (SIGSEGV, the whole run stops) although the Release build, whose frames are small, passes it on 1 MB -- which is also what a server thread has, so the
+# Release test keeps the default. Only the Debug test program gets the room.
+if(MSVC)
+    target_link_options(engine_tests PRIVATE $<$<CONFIG:Debug>:/STACK:16777216>)
+endif()
 target_include_directories(engine_tests PRIVATE ${CMAKE_SOURCE_DIR}/backend/third_party/catch2)
 target_compile_definitions(engine_tests PRIVATE
     TEST_FULL_SQL_PATH="${CMAKE_SOURCE_DIR}/test/test_full.sql")

@@ -758,6 +758,8 @@ code/
     │   ├── fuzz_crash_selfref.py  the same for a table whose foreign key points at itself (row-by-row RESTRICT / CASCADE / SET NULL)
     │   ├── fuzz_crash_chain.py    the same for a chain of three tables a <- b <- c (the cascade goes down the chain, a RESTRICT below refuses the statement whole)
     │   ├── fuzz_crash_multifk.py  the same for a column that is in two foreign keys (a value has to be in both parents; each key acts on its own; REPLACE)
+    │   ├── fuzz_kill.py           the SQL statement KILL (QUERY / <id>) shot at random sessions while four clients write, with exact oracles (a stopped statement changes nothing, a killed session leaves no
+    │   │                          transaction and no lock, no dead session stays listed, index = table); odd seeds also kill -9 the server
     │   └── fuzz_concurrent.py     same with 4 concurrent clients (explicit transactions must be all-or-nothing)
     ├── demo/
     │   ├── seed.py                builds the demo database (5,000 customers + 100,000 orders in ~1 s) for a live walkthrough
@@ -769,7 +771,7 @@ code/
     │   └── live_check.py             the same tools and max_connections against a real engine_server (starts it on free ports, ends it again)
     ├── frontend/
     │   ├── test_libs.mjs             the DOM-free libs of the app (plan diagram, index advice, schema diff, chart, sessions, ecosystem layout) and that the AI MCP panel lists exactly the tools of mcp_server.py
-    │   └── cdp/                      screen tests: starts the app and goes through 14 screen scenarios (home, SQL editor, plan diagram, ERD, Server Manager, Compare Schema, Ecosystem, ...) over the DevTools Protocol (py -3 code/test/frontend/cdp/test_screens.py)
+    │   └── cdp/                      screen tests: starts the app and goes through 14 screen scenarios (home, SQL editor, plan diagram, ERD, Server Manager, Compare Schema, Ecosystem, ...) over the DevTools Protocol (py -3 code/test/frontend/cdp/test_screens.py); stress_ecosystem.py draws dozens of fake connections and thousands of tables and measures it
     ├── diff/
     │   ├── diff_builds.py         runs one random SELECT corpus on two engine_server builds and compares the output (for changes that must not alter a result)
     │   ├── verify_orderby_distinct.py  checks ORDER BY / DISTINCT of one build on that corpus (tables sharing column names, columns spelled `t.id`) against the same statements without them

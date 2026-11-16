@@ -61,7 +61,10 @@ class RuSQL:
     def _read_until_end(self):
         buf = ""
         while True:
-            chunk = self.sock.recv(4096).decode(errors="replace")
+            raw = self.sock.recv(4096)
+            if not raw:  # the server closed the connection (a KILLed session, a crash): without this an end of stream returned b"" for ever and this loop never ended
+                raise ConnectionError("the server closed the connection")
+            chunk = raw.decode(errors="replace")
             buf += chunk
             if "---END---" in buf:
                 return buf

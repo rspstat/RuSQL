@@ -262,15 +262,28 @@
   transition: opacity 0.2s ease;
 }
 
-/* while the mouse is on a cylinder, everything that is not on its path steps back */
-.eco-node.dim { opacity: 0.2; }
-.eco-arrow.dim { opacity: 0.1; }
-.eco-group.dim { opacity: 0.25; }
-.eco-caption.dim { opacity: 0.2; }
+/* while the mouse is on a cylinder (.hovering), everything that is not on its path (.lit) steps back: one class on the picture and a few on the path, not one on every piece */
+.eco-wrap.hovering .eco-node:not(.lit) { opacity: 0.2; }
+.eco-wrap.hovering .eco-arrow:not(.lit) { opacity: 0.1; }
+.eco-wrap.hovering .eco-group:not(.lit) { opacity: 0.25; }
+.eco-wrap.hovering .eco-caption:not(.lit) { opacity: 0.2; }
 
-/* ---- tooltip (HTML, positioned from the cylinder's SVG coordinates in %) ---- */
+/* a big picture (more than HEAVY_NODES cylinders): nothing moves for ever and nothing fades, or the whole picture would be painted again on every frame */
+.eco-heavy .eco-top { animation: none; }
+.eco-heavy .dg-aflow { animation: none; }
+.eco-heavy .dg-apacket { display: none; }
+.eco-heavy .eco-node, .eco-heavy .eco-arrow, .eco-heavy .eco-group, .eco-heavy .eco-caption { transition: none; }
+
+.eco-heavy-note {
+  font-size: 12px;
+  color: #dcdcaa;
+}
+
+/* ---- tooltip (HTML; left / top are set in pixels by EcosystemView after it has the tooltip's size: it stays inside the part of the picture the window shows) ---- */
 .eco-tip {
   position: absolute;
+  left: 0;
+  top: 0;
   z-index: 5;
   width: 330px;
   display: flex;
@@ -281,13 +294,8 @@
   border: 1px solid var(--c);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-  transform: translate(-50%, 10px);
   pointer-events: none;
   animation: eco-fade 0.15s ease-out;
-}
-
-.eco-tip.up {
-  transform: translate(-50%, calc(-100% - 10px));
 }
 
 .eco-tip b {
