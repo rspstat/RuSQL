@@ -1427,17 +1427,17 @@ TEST_CASE("aggregates inside expressions, functions and CASE in the select list"
     // text that merely reads like an aggregate is text: the statement is not an aggregate query
     REQUIRE(table_cells(ok_text(ex, "SELECT UPPER('max(v)') AS u FROM a ORDER BY aid")) == Rows(6, {"MAX(V)"}));
 
-    // a calculation goes on from the AVG the select list shows (4 places, rounded half away from zero): 1, 2, 2 is 1.6667 and 1.6667 * 3 is 5.0001.
-    // (MySQL 8.4 goes on from the 9 digits it holds -- 1.666666666 -- and gives 5.0000: a known difference, see RECOMMAND.md)
+    // a calculation goes on from the 9 digits the AVG holds (1, 2, 2 is 1.666666666, shown as 1.6667), as MySQL 8.4 does: 1.666666666 * 3 shows 5.0000 (R91)
     REQUIRE(ex.execute_sql("CREATE TABLE f (id INT PRIMARY KEY, v INT)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO f VALUES (1,1),(2,2),(3,2)").is_ok());
-    REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5.0001"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) * 3 AS t FROM f")) == Rows{{"5.0000"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT AVG(v) AS a FROM f")) == Rows{{"1.6667"}});
     // HAVING sees the same value whether or not the select list shows the aggregate
     REQUIRE(ex.execute_sql("CREATE TABLE f2 (id INT PRIMARY KEY, g INT, v INT)").is_ok());
     REQUIRE(ex.execute_sql("INSERT INTO f2 VALUES (1,1,1),(2,1,2),(3,1,2),(4,2,7)").is_ok());
-    REQUIRE(table_cells(ok_text(ex, "SELECT g FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")) == Rows{{"1"}});
-    REQUIRE(table_cells(ok_text(ex, "SELECT g, AVG(v) FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")) == Rows{{"1", "1.6667"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT g FROM f2 GROUP BY g HAVING AVG(v) > 1.6666 AND AVG(v) < 1.6667")) == Rows{{"1"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT g, AVG(v) FROM f2 GROUP BY g HAVING AVG(v) > 1.6666 AND AVG(v) < 1.6667")) == Rows{{"1", "1.6667"}});
+    REQUIRE(table_cells(ok_text(ex, "SELECT g, AVG(v) FROM f2 GROUP BY g HAVING AVG(v) = 1.6667")).empty()); // (it holds 1.666666666)
     REQUIRE(table_cells(ok_text(ex, "SELECT SUM(v) / 3 AS t FROM f")) == Rows{{"1.6667"}});
     REQUIRE(table_cells(ok_text(ex, "SELECT id FROM f GROUP BY id HAVING AVG(v) * 3 = 3 OR AVG(v) * 3 = 6 ORDER BY id")) == Rows{{"1"}, {"2"}, {"3"}});
 

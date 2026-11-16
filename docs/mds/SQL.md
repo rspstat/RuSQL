@@ -145,7 +145,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SELECT 식 [AS] 별칭 / SELECT 식 [AS] '문자열' : 결과 컬럼에 이름 붙이기(문자열도 이름이 됨: `AS 'Total'`, `id 'a2'`; 표 별칭에는 문자열을 못 씀 — MySQL과 같음; 별칭이 키워드이면 쓴 그대로의 대소문자로 이름이 됨, `AS Count`; R83)
 - SELECT DISTINCT ... : 중복 행 제거
 - SELECT [ALL | DISTINCT | DISTINCTROW] [HIGH_PRIORITY] [STRAIGHT_JOIN] [SQL_SMALL_RESULT] [SQL_BIG_RESULT] [SQL_BUFFER_RESULT] [SQL_NO_CACHE] ... : `SELECT` 바로 뒤의 수식어 — 읽기만 하고 아무것도 바꾸지 않음(최적화 힌트; `DISTINCT` · `DISTINCTROW`만 뜻이 있음; `mysqldump`가 `SELECT /*!40001 SQL_NO_CACHE */ * FROM t`를 보낸다; 같은 이름이라도 백틱 안이면 열 이름; R83)
-- SELECT ... FROM t [[AS] 별칭] : 테이블(별칭 포함)에서 조회(R90: 표 뒤의 인덱스 힌트 `USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름, ...)`은 읽고 **답을 바꾸지 않음** — `FROM`의 모든 표 · 조인한 표 · `UPDATE`의 표 뒤에서; `FORCE`가 표 이름이어도 별칭이어도 그대로 됨; 없는 인덱스 이름을 쓴 힌트에 MySQL이 내는 1176은 아직 안 냄)(R90: 표 뒤의 인덱스 힌트 `USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름, ...)`은 읽고 **답을 바꾸지 않음** — `FROM`의 모든 표 · 조인한 표 · `UPDATE`의 표 뒤에서; `FORCE`가 표 이름이어도 별칭이어도 그대로 됨; 없는 인덱스 이름을 쓴 힌트에 MySQL이 내는 1176은 아직 안 냄)
+- SELECT ... FROM t [[AS] 별칭] : 테이블(별칭 포함)에서 조회(R90: 표 뒤의 인덱스 힌트 `USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름, ...)`은 읽고 **답을 바꾸지 않음** — `FROM`의 모든 표 · 조인한 표 · `UPDATE`의 표 뒤에서; `FORCE`가 표 이름이어도 별칭이어도 그대로 됨; 없는 인덱스 이름을 쓴 힌트에 MySQL이 내는 1176은 아직 안 냄)
 - SELECT ... FROM db.t : 데이터베이스를 붙여 조회
 - SELECT ... FROM (SELECT ...) 별칭 : 파생 테이블(FROM 절 서브쿼리; R90: `FROM (WITH c AS (...) SELECT ...) d`도 됨; `UNION` · `INTERSECT` · `EXCEPT` · `WITH` 위의 파생 표 · CTE · 뷰는 **첫 질의의 이름**을 열로 가져 거기 없는 열은 1054 — 전에는 그런 열을 쓰면 오류 없이 0행이었음)
 - SELECT ... FROM DUAL [WHERE ...] : 표를 읽지 않는 SELECT(`FROM`을 쓰지 않은 것과 같음; `db.dual`은 그 이름의 표; R80)
@@ -189,7 +189,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 ### 서브쿼리 · 집합 · CTE
 
 - (SELECT ...) : 스칼라 서브쿼리(select 목록 · WHERE · HAVING · 식 안, 바깥 쿼리 컬럼 참조 가능)
-- SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지). 셋 이상 이으면 왼쪽부터 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶인다(R79; 전에는 오른쪽부터 읽어 `UNION ALL`과 `UNION`을 섞으면 다른 답이 나왔다). R90: 두 질의의 **열 개수가 다르면 1222**(`UNION` · `INTERSECT` · `EXCEPT` 모두, 파생 표 · CTE · 하위 질의 · `INSERT ... SELECT` · `CREATE TABLE ... AS SELECT` 안에서도 — 전에는 모자란 칸을 빈 값으로 채워 행을 돌려줌); 숫자 열과 글자 열을 이은 열은 MySQL처럼 글자 열(글자로 비교 · 정렬: `n = '7'`이 `'007'`을 잡지 않고 `ORDER BY`가 `'10' < '9'`). R90: 두 질의의 **열 개수가 다르면 1222**(`UNION` · `INTERSECT` · `EXCEPT` 모두, 파생 표 · CTE · 하위 질의 · `INSERT ... SELECT` · `CREATE TABLE ... AS SELECT` 안에서도 — 전에는 모자란 칸을 빈 값으로 채워 행을 돌려줌); 숫자 열과 글자 열을 이은 열은 MySQL처럼 글자 열(글자로 비교 · 정렬: `n = '7'`이 `'007'`을 잡지 않고 `ORDER BY`가 `'10' < '9'`)
+- SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지). 셋 이상 이으면 왼쪽부터 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶인다(R79; 전에는 오른쪽부터 읽어 `UNION ALL`과 `UNION`을 섞으면 다른 답이 나왔다). R90: 두 질의의 **열 개수가 다르면 1222**(`UNION` · `INTERSECT` · `EXCEPT` 모두, 파생 표 · CTE · 하위 질의 · `INSERT ... SELECT` · `CREATE TABLE ... AS SELECT` 안에서도 — 전에는 모자란 칸을 빈 값으로 채워 행을 돌려줌); 숫자 열과 글자 열을 이은 열은 MySQL처럼 글자 열(글자로 비교 · 정렬: `n = '7'`이 `'007'`을 잡지 않고 `ORDER BY`가 `'10' < '9'`)
 - SELECT ... INTERSECT [ALL] SELECT ... : 두 결과의 교집합
 - SELECT ... EXCEPT [ALL] SELECT ... : 첫 결과에서 두 번째 결과를 뺀 차집합
 - (SELECT ... ORDER BY ... LIMIT n) UNION (SELECT ...) : 괄호 안 피연산자가 자기 ORDER BY · LIMIT를 가지면 그 피연산자에만 걸린다(파생 표로 읽음), 뒤의 ORDER BY · LIMIT는 전체 결과에(R80)
@@ -264,7 +264,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - COUNT(*) / COUNT(col) / COUNT(DISTINCT a[, b]) : 행 수
 - SUM([DISTINCT] col) : 합계
-- AVG([DISTINCT] col) : 평균
+- AVG([DISTINCT] col) : 평균(보이는 자릿수는 인수의 자릿수 + 4: `1.6667`. R91: 식 · 비교 · `HAVING` · `ORDER BY`는 MySQL처럼 **몫을 9자리로 자른 값**(1, 2, 2의 평균은 `1.666666666`)으로 이어 계산해 `AVG(v) * 3`은 `5.0000`(전에는 `5.0001`), `AVG(v) = 1.6667`은 거짓, `AVG(v) / 1`은 `1.66666667`, `AVG(v) > 1.6666 AND AVG(v) < 1.6667`은 참; `IFNULL` · `COALESCE` · `IF`로 감싸도 같고, DECIMAL 인수도 같음(`AVG(d)` 6자리); 윈도 `AVG(…) OVER ()`는 MySQL도 보이는 값으로 둥글려 `* 3`이 `5.0001`; DOUBLE의 평균은 double)
 - MIN(col) / MAX(col) : 최솟값 / 최댓값
 - GROUP_CONCAT([DISTINCT] col [ORDER BY ...] [SEPARATOR '구분']) : 값을 이어 붙인 문자열
 - STDDEV / STD / STDDEV_POP / STDDEV_SAMP : 표준편차(모집단 / 표본)
@@ -526,7 +526,6 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 - LEAVE 라벨 : 반복문 빠져나가기
 - ITERATE 라벨 : 반복문의 다음 회차로
 - 라벨: LOOP / WHILE / REPEAT : 반복문에 이름 붙이기(R90: `lbl: LOOP … END LOOP lbl`, `END WHILE lbl`, `END REPEAT lbl`처럼 **끝 라벨**도 읽음 — 전에는 끝 라벨이 든 프로시저가 만들어지지 않았음)
-- SIGNAL SQLSTATE [VALUE] '45000' [SET MESSAGE_TEXT = 값, MYSQL_ERRNO = 번호] : 프로시저 · 트리거에서 오류를 던짐(R90; 기본 번호 1644, `02` 부류는 1643, `01` 부류는 경고라 계속 진행, `MYSQL_ERRNO`가 있으면 그 번호; 메시지가 없으면 "Unhandled user-defined exception condition"; 잘못된 SQLSTATE는 1407; BEFORE · AFTER 트리거에서 던지면 그 문장이 통째로 취소됨 — 여러 행 `INSERT`의 둘째 행에서 던져도 첫 행이 안 남음; MySQL은 `MESSAGE_TEXT`에 글자 · 변수만 받지만 여기는 `CONCAT(...)` 같은 식도 받음)(R90: `lbl: LOOP … END LOOP lbl`, `END WHILE lbl`, `END REPEAT lbl`처럼 **끝 라벨**도 읽음 — 전에는 끝 라벨이 든 프로시저가 만들어지지 않았음)
 - SIGNAL SQLSTATE [VALUE] '45000' [SET MESSAGE_TEXT = 값, MYSQL_ERRNO = 번호] : 프로시저 · 트리거에서 오류를 던짐(R90; 기본 번호 1644, `02` 부류는 1643, `01` 부류는 경고라 계속 진행, `MYSQL_ERRNO`가 있으면 그 번호; 메시지가 없으면 "Unhandled user-defined exception condition"; 잘못된 SQLSTATE는 1407; BEFORE · AFTER 트리거에서 던지면 그 문장이 통째로 취소됨 — 여러 행 `INSERT`의 둘째 행에서 던져도 첫 행이 안 남음; MySQL은 `MESSAGE_TEXT`에 글자 · 변수만 받지만 여기는 `CONCAT(...)` 같은 식도 받음)
 - RETURN 식 : 함수의 반환값(함수 본문은 `RETURN 식` 한 문장)
 

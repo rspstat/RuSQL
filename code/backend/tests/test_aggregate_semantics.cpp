@@ -264,17 +264,20 @@ TEST_CASE("integers and decimals are exact", "[aggregate_semantics][exact]") {
     REQUIRE(same_number(one(ex, "SELECT SUM(v) FROM big"), 18446744073709551616.0 + 1000.0));
 }
 
-TEST_CASE("AVG is rounded to 4 places and a HAVING or an expression computes with that value", "[aggregate_semantics][avg]") {
+TEST_CASE("AVG shows 4 places more than its values and a HAVING or an expression computes with the 9-digit quotient MySQL holds", "[aggregate_semantics][avg]") {
     TempDataDir dir("as_avg");
     Executor ex(dir.path);
     open_db(ex);
     ok(ex, "CREATE TABLE f (id INT PRIMARY KEY, g INT, v INT)");
     ok(ex, "INSERT INTO f VALUES (1, 1, 1), (2, 1, 2), (3, 1, 2), (4, 2, -1), (5, 2, -2), (6, 2, -2), (7, 3, 1), (8, 3, 2)");
-    REQUIRE(q(ex, "SELECT g, AVG(v), AVG(v) * 3 FROM f GROUP BY g ORDER BY g") == Rows{{"1", "1.6667", "5.0001"}, {"2", "-1.6667", "-5.0001"}, {"3", "1.5000", "4.5000"}});
-    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) = 1.6667") == Rows{{"1"}});
-    REQUIRE(q(ex, "SELECT g, AVG(v) FROM f GROUP BY g HAVING AVG(v) = -1.6667") == Rows{{"2", "-1.6667"}});
-    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) * 3 > 5 ORDER BY g") == Rows{{"1"}});
-    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) * 3 = 5.0001") == Rows{{"1"}});
+    REQUIRE(q(ex, "SELECT g, AVG(v), AVG(v) * 3 FROM f GROUP BY g ORDER BY g") == Rows{{"1", "1.6667", "5.0000"}, {"2", "-1.6667", "-5.0000"}, {"3", "1.5000", "4.5000"}});
+    // (MySQL 8.4.9: AVG over 1, 2, 2 holds 1.666666666 and shows 1.6667, so it is not equal to the 1.6667 it shows, and * 3 is 4.999999998)
+    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) = 1.6667").empty());
+    REQUIRE(q(ex, "SELECT g, AVG(v) FROM f GROUP BY g HAVING AVG(v) = -1.6667").empty());
+    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) * 3 > 5 ORDER BY g").empty());
+    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) * 3 = 5.0001").empty());
+    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) > 1.6666 AND AVG(v) < 1.6667 ORDER BY g") == Rows{{"1"}});
+    REQUIRE(q(ex, "SELECT g FROM f GROUP BY g HAVING AVG(v) * 3 < 5 ORDER BY g") == Rows{{"1"}, {"2"}, {"3"}});
     REQUIRE(q(ex, "SELECT AVG(v) + 0, ROUND(AVG(v), 2), AVG(v) - 1 FROM f WHERE g = 1") == Rows{{"1.6667", "1.67", "0.6667"}});
     REQUIRE(q(ex, "SELECT AVG(DISTINCT v), SUM(DISTINCT v), SUM(v), COUNT(DISTINCT v) FROM f WHERE g = 1") == Rows{{"1.5000", "3", "5", "2"}});
     // half away from zero at the 5th place: 1/32 = 0.03125

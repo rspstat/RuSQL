@@ -279,6 +279,12 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
         v.null = true;
         return v;
     }
+    // the second form of an AVG ("<digits>\x02<places shown>", see held_average): the quotient as MySQL goes on with it, and the places it shows
+    int shown_places = -1;
+    if (const std::size_t marker = text.find('\x02'); marker != std::string::npos) {
+        shown_places = std::atoi(text.c_str() + marker + 1);
+        text.resize(marker);
+    }
     // a hexadecimal or bit literal (0x41, b'101') where a number is asked of it is the unsigned integer its bytes make (0x41 + 0 is 65), not a text that is read for digits
     const auto* hex_literal = std::get_if<ArithExpr::Str>(&e.data);
     const bool hex = hex_literal && hex_literal->hex;
@@ -316,6 +322,7 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
             v.approx = true;
         }
     }
+    if (shown_places >= 0 && v.has_num) v.scale = shown_places;
     if (viewed) { // (a date or a time is a whole number or a decimal; an ENUM and a SET are read as a DOUBLE)
         v.approx = view.kind == ColKind::Enum || view.kind == ColKind::Set;
         return v;
@@ -349,6 +356,48 @@ bool takes_exact_numbers(const std::string& upper) {
                                                           "LOG2", "LOG10", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "COT", "DEGREES",
                                                           "RADIANS", "MOD", "SIGN", "FORMAT"};
     return names.count(upper) > 0;
+}
+
+// The second form of an AVG a row of aggregates holds under the byte 2 and the name of the aggregate (average_held_text, R91) when the expression `e` is that
+// aggregate: "<the quotient MySQL goes on with>\x02<places it shows>". An expression and a comparison go on with it, a result column shows the places.
+bool average_name(const std::string& n) { // `AVG(...)`, in any case: what a row of aggregates calls an average (everything else skips the lookup below)
+    return n.size() >= 5 && (n[0] == 'A' || n[0] == 'a') && (n[1] == 'V' || n[1] == 'v') && (n[2] == 'G' || n[2] == 'g') && n[3] == '(';
+}
+
+const std::string* held_average(const Row& row, const ArithExpr& e) {
+    auto* col = std::get_if<ArithExpr::Col>(&e.data);
+    if (!col || col->outer != 0 || !average_name(col->name)) return nullptr;
+    const auto found = row.find(std::string(1, '\x02') + col->name);
+    return found == row.end() ? nullptr : &found->second;
+}
+
+// ... also when `e` only hands it on: IFNULL / COALESCE (the first argument that is not NULL) and IF / CASE (the branch its condition picks) with the aggregate as that
+// argument -- `IFNULL(AVG(v), 0) * 3` goes on with the quotient too. `eval` gives the value of an expression of the row.
+template <class Eval>
+const std::string* held_average_through(const Row& row, const ArithExpr& e, Eval&& eval) {
+    if (const std::string* held = held_average(row, e)) return held;
+    auto* f = std::get_if<ArithExpr::Func>(&e.data);
+    if (!f || (f->name != "IFNULL" && f->name != "COALESCE" && f->name != "CASE")) return nullptr;
+    // (only where an argument is the average itself: nothing is evaluated twice for an IFNULL(price, 0))
+    const bool names_average = std::any_of(f->args.begin(), f->args.end(), [](const ArithExpr& a) {
+        auto* col = std::get_if<ArithExpr::Col>(&a.data);
+        return col && average_name(col->name);
+    });
+    if (!names_average) return nullptr;
+    if (f->name == "IFNULL" || f->name == "COALESCE") {
+        for (const ArithExpr& a : f->args) {
+            if (eval(a) != EXECUTOR_NULL_VALUE) return held_average_through(row, a, eval);
+        }
+        return nullptr;
+    }
+    if (f->name == "CASE") { // (IF(c, a, b) is read as a CASE: the (condition, result) pairs, the ELSE result last)
+        const std::size_t branches = f->args.size() / 2;
+        for (std::size_t i = 0; i < branches; i++) {
+            if (eval(f->args[2 * i]) == "1") return held_average_through(row, f->args[2 * i + 1], eval);
+        }
+        return f->args.size() % 2 == 1 ? held_average_through(row, f->args.back(), eval) : nullptr;
+    }
+    return nullptr;
 }
 
 // What a value written without quotes in an IN list or after BETWEEN is: a number, or (a name, @variable) not told.
@@ -480,8 +529,12 @@ std::string Executor::eval_arith_exact(const Row& row, const ArithExpr& expr, bo
     if (approx) *approx = false;
     if (std::holds_alternative<ArithExpr::Add>(expr.data) || std::holds_alternative<ArithExpr::Sub>(expr.data) ||
         std::holds_alternative<ArithExpr::Mul>(expr.data) || std::holds_alternative<ArithExpr::Div>(expr.data)) {
-        return arithmetic_text(expr, [&](const ArithExpr& leaf) { return eval_arith(row, leaf); }, true, approx);
+        return arithmetic_text(expr, [&](const ArithExpr& leaf) {
+            const std::string* held = held_average_through(row, leaf, [&](const ArithExpr& x) { return eval_arith(row, x); });
+            return held ? *held : eval_arith(row, leaf);
+        }, true, approx);
     }
+    if (const std::string* held = held_average_through(row, expr, [&](const ArithExpr& x) { return eval_arith(row, x); })) return held->substr(0, held->find('\x02')); // (AVG(v) = 1.6667: the quotient has 1.666666666)
     return eval_arith(row, expr);
 }
 
@@ -499,7 +552,10 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     // NULL in, NULL out: `NULL + 1` is NULL (not the text "NULL1"), `NULL * 2` is NULL (not 0); x / 0 is NULL, as in MySQL.
     if (std::holds_alternative<ArithExpr::Add>(expr.data) || std::holds_alternative<ArithExpr::Sub>(expr.data) ||
         std::holds_alternative<ArithExpr::Mul>(expr.data) || std::holds_alternative<ArithExpr::Div>(expr.data)) {
-        return arithmetic_text(expr, [&](const ArithExpr& leaf) { return eval_arith(row, leaf); });
+        return arithmetic_text(expr, [&](const ArithExpr& leaf) {
+            const std::string* held = held_average_through(row, leaf, [&](const ArithExpr& x) { return eval_arith(row, x); });
+            return held ? *held : eval_arith(row, leaf);
+        });
     }
     if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
         if (v->name == "CASE") {
@@ -769,6 +825,9 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         if (is_ident_like) {
             if (const std::string* v = get_col(row, lit)) {
                 resolved = *v;
+                if (compares_numbers && average_name(lit)) { // (`AVG(v) > AVG(w)`: the quotient MySQL goes on with, not the places it shows)
+                    if (const auto held = row.find(std::string(1, '\x02') + lit); held != row.end()) resolved = held->second.substr(0, held->second.find('\x02'));
+                }
                 effective_lit = &resolved;
                 right_is_column = true;
             }

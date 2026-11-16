@@ -757,6 +757,14 @@ DROP PROCEDURE r90_p;
 DROP TRIGGER r90_bi;
 DROP TABLE r90_t;
 
+-- AVG In An Expression Or A Comparison Goes On With The Quotient MySQL Holds (R91)
+CREATE TABLE r91_avg (id INT PRIMARY KEY, v INT, grp INT);
+INSERT INTO r91_avg VALUES (1, 1, 1), (2, 2, 1), (3, 2, 1), (4, 3, 2);
+SELECT AVG(v) AS shown, AVG(v) * 3 AS times_3, AVG(v) / 1 AS divided, AVG(v) = 1.6667 AS equals_shown FROM r91_avg WHERE grp = 1;
+SELECT grp, AVG(v) * 3 AS times_3 FROM r91_avg GROUP BY grp HAVING AVG(v) < 3 ORDER BY grp;
+SELECT IFNULL(AVG(v), 0) * 3 AS ifnull_times_3 FROM r91_avg WHERE grp = 1;
+DROP TABLE r91_avg;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

@@ -41,6 +41,7 @@ add_executable(engine_tests
     test_r88_alter_copy_rows.cpp
     test_r89_show_check_call.cpp
     test_r90_set_ops_update_time.cpp
+    test_r91_avg_expression.cpp
     test_executor_misc.cpp
     test_server_stmt_split.cpp
     test_concurrency.cpp

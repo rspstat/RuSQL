@@ -547,6 +547,14 @@
       "bothFail": 0
     },
     {
+      "name": "avg_expr_r91",
+      "en": "AVG in an expression or a comparison goes on with the quotient MySQL holds (9 digits, cut off: AVG over 1, 2, 2 is 1.666666666) and shows the places of the argument + 4: AVG(v) * 3 is 5.0000, AVG(v) = 1.6667 is false, AVG(v) / 1 is 1.66666667; in HAVING, ORDER BY, CASE, IFNULL / COALESCE / IF and on DECIMAL arguments; AVG(x) OVER () stays rounded",
+      "ko": "식·비교 안의 AVG는 MySQL이 들고 있는 몫(9자리, 자름: 1, 2, 2의 AVG는 1.666666666)으로 이어 계산하고 인수의 자릿수 + 4로 보임: AVG(v) * 3은 5.0000, AVG(v) = 1.6667은 거짓, AVG(v) / 1은 1.66666667; HAVING · ORDER BY · CASE · IFNULL / COALESCE / IF · DECIMAL 인수에서도; AVG(x) OVER ()는 둥글린 채",
+      "statements": 124,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -597,8 +605,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1042,
-    "assertions": 1526115
+    "cases": 1045,
+    "assertions": 1526252
   },
   "bugsFound": 206
 }

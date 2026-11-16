@@ -881,11 +881,33 @@ std::string Executor::resolve_arg_key(const std::vector<const Row*>& rows, const
     return col;
 }
 
+namespace {
+// AVG of exact numbers the way MySQL holds it while an expression or a comparison goes on with it (R91): the sum divided by the count with the digits of any
+// division -- the places of the sum + 4, up to a whole word of 9 digits, CUT OFF (1, 2, 2 hold 1.666666666) -- while the result only SHOWS the sum's places + 4
+// (1.6667): so AVG(v) * 3 shows 5.0000 and AVG(v) = 1.6667 is false. Written as "<digits>\x02<places shown>"; nullopt when the values are not all exact
+// decimals (the average of a DOUBLE is a double and has no second form).
+std::optional<std::string> average_held_text(const std::vector<const std::string*>& values) {
+    if (values.empty()) return std::nullopt;
+    DecimalSum sum;
+    for (const std::string* v : values) sum.add(*v);
+    if (!sum.exact) return std::nullopt;
+    const auto total = sqlval::Decimal::parse(sum.text());
+    if (!total) return std::nullopt;
+    const int shown = std::min(sum.max_places + 4, 30);
+    const int held = ((sum.max_places + 4 + 8) / 9) * 9;
+    const sqlval::Num quotient = sqlval::num_div(sqlval::Num::from_decimal(*total), sqlval::Num::from_int(static_cast<long long>(values.size())), held, /*cut=*/true);
+    return quotient.to_decimal().str(static_cast<std::size_t>(quotient.scale)) + '\x02' + std::to_string(shown);
+}
+} // namespace
+
 // An aggregate that HAVING or a select-list expression/function/CASE asks for by name (`SUM(v)`, `COUNT(DISTINCT x)`), computed
 // over the rows of one group with the rules of the select list: NULLs are skipped, COUNT(*) counts rows, SUM/AVG read the numeric
 // values, MIN/MAX compare numbers when every value is one and text otherwise, and MIN/MAX, SUM and AVG of nothing are NULL. The answer
 // is the one the select list shows (AVG with 4 places) except that a SUM keeps all its decimals.
-std::string Executor::compute_agg_from_key(const std::string& key, const std::vector<const Row*>& grp, ValueClass arg_class, bool approx) {
+std::string Executor::compute_agg_from_key(const std::string& named, const std::vector<const Row*>& grp, ValueClass arg_class, bool approx) {
+    // a key that starts with the byte 2 asks for the second form of an AVG (average_held_text); "" when it has none
+    const bool held = !named.empty() && named.front() == '\x02';
+    const std::string key = held ? named.substr(1) : named;
     std::string ku = key;
     std::transform(ku.begin(), ku.end(), ku.begin(), [](unsigned char c) { return std::toupper(c); });
     const auto lp = key.find('(');
@@ -911,6 +933,7 @@ std::string Executor::compute_agg_from_key(const std::string& key, const std::ve
     if (is_count) return std::to_string(present.size());
 
     if (ku.rfind("SUM(", 0) == 0) return sum_of_texts(present, false, approx).value_or(EXECUTOR_NULL_VALUE);
+    if (held) return ku.rfind("AVG(", 0) == 0 && !approx ? average_held_text(present).value_or(std::string()) : std::string();
     if (ku.rfind("AVG(", 0) == 0) return average_of_texts(present, approx).value_or(EXECUTOR_NULL_VALUE);
     const bool is_min = ku.rfind("MIN(", 0) == 0;
     if (!is_min && ku.rfind("MAX(", 0) != 0) return "0";
@@ -1818,6 +1841,18 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         return it == aggregate_classes.end() ? ValueClass::Unknown : it->second;
     };
     auto aggregate_approx = [&](const std::string& ref) { return aggregate_approx_refs.count(ref) > 0; };
+    // The row of aggregates holds `ref` (an aggregate an expression, HAVING or ORDER BY names); an AVG also holds its second form (the byte 2 and its name), the
+    // quotient MySQL goes on with in an expression or a comparison (average_held_text), which arithmetic and comparisons read
+    auto put_agg = [&](Row& row, const std::string& ref, const std::vector<const Row*>& group) {
+        if (!row.count(ref)) row[ref] = compute_agg_from_key(ref, group, aggregate_class(ref), aggregate_approx(ref));
+        if (ref.size() > 4 && (ref[0] == 'A' || ref[0] == 'a') && (ref[1] == 'V' || ref[1] == 'v') && (ref[2] == 'G' || ref[2] == 'g') && ref[3] == '(' && !aggregate_approx(ref)) {
+            const std::string held = std::string(1, '\x02') + ref;
+            if (!row.count(held)) {
+                std::string text = compute_agg_from_key(held, group, aggregate_class(ref), false);
+                if (!text.empty()) row[held] = std::move(text);
+            }
+        }
+    };
     bool has_agg = columns_have_aggregate(columns);
     // The window functions inside expressions (`SUM(v) / SUM(SUM(v)) OVER ()`, `ORDER BY RANK() OVER (...)`) are columns of the query that no result shows: they are
     // taken out of the select list and computed with the others; the expression or the sort reads the value as it reads a column.
@@ -3068,11 +3103,11 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             Row agg_row = compute_aggregates(grp, columns);
             for (auto& [k, v] : agg_row) out[k] = v;
             for (auto& ref : expr_agg_refs) {
-                if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
+                put_agg(out, ref, grp);
             }
             if (having) {
                 for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
-                    if (!out.count(agg_key)) out[agg_key] = compute_agg_from_key(agg_key, grp, aggregate_class(agg_key), aggregate_approx(agg_key));
+                    put_agg(out, agg_key, grp);
                 }
                 for (auto& a : having_aliases) { // `SELECT g, ANY_VALUE(v) AS a ... HAVING a > 5`: the item the alias names is worked out before HAVING reads it
                     const std::string value = having_alias_value(a, out);
@@ -3082,13 +3117,13 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             }
             for (auto& sort : group_sorts) {
                 for (auto& ref : sort.aggregates) {
-                    if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
+                    put_agg(out, ref, grp);
                 }
                 if (!out.count(sort.text) && sort.text.find("__win") == std::string::npos) out[sort.text] = eval_arith(out, sort.expr);
             }
             for (auto& w : window_sorts) {
                 for (auto& ref : w.aggregates) {
-                    if (!out.count(ref)) out[ref] = compute_agg_from_key(ref, grp, aggregate_class(ref), aggregate_approx(ref));
+                    put_agg(out, ref, grp);
                 }
                 if (!out.count(w.text)) out[w.text] = eval_arith(out, w.expr);
             }
@@ -3224,14 +3259,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
         // rows before they were aggregated, where `SUM(v)` is nothing, so the aggregates came out over no row at all
         if (having) {
             for (auto& agg_key : extract_agg_refs_from_cond(*having)) {
-                if (!agg_row.count(agg_key)) agg_row[agg_key] = compute_agg_from_key(agg_key, rows_p, aggregate_class(agg_key), aggregate_approx(agg_key));
+                put_agg(agg_row, agg_key, rows_p);
             }
             Row probe;
             const Row* having_row = &agg_row;
             if (!having_aliases.empty()) { // `SELECT SUM(v) * 2 AS d FROM t HAVING d > 5`: the alias of an item, read before a column of the same name
                 probe = agg_row;
                 for (auto& ref : expr_agg_refs) {
-                    if (!probe.count(ref)) probe[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
+                    put_agg(probe, ref, rows_p);
                 }
                 if (!rows_p.empty()) {
                     for (auto& [k, v] : *rows_p.front()) probe.try_emplace(k, v);
@@ -3270,7 +3305,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             // with no aggregate in it is not part of an aggregate result (as before). Formatted like any result, minus the row
             // count line a plain aggregate result does not carry.
             for (auto& ref : expr_agg_refs) {
-                if (!agg_row.count(ref)) agg_row[ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
+                put_agg(agg_row, ref, rows_p);
             }
             if (any_value_items && !rows_p.empty()) {
                 for (auto& [k, v] : *rows_p.front()) agg_row.try_emplace(k, v);
@@ -3284,7 +3319,7 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             if (has_win) { // `SELECT SUM(v), SUM(SUM(v)) OVER () FROM t`: the windows see the one row of aggregates
                 for (auto& w : window_sorts) {
                     for (auto& ref : w.aggregates) {
-                        if (!one_row[0].count(ref)) one_row[0][ref] = compute_agg_from_key(ref, rows_p, aggregate_class(ref), aggregate_approx(ref));
+                        put_agg(one_row[0], ref, rows_p);
                     }
                     if (!one_row[0].count(w.text)) one_row[0][w.text] = eval_arith(one_row[0], w.expr);
                 }
