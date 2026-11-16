@@ -389,7 +389,11 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
             }
             const TableSchema* made_table = s.catalog.get_table(name);
             r["CREATE_TIME"] = made_table && !made_table->created.empty() ? made_table->created : std::string(EXECUTOR_NULL_VALUE); // (a table made before R85 has no time)
-            r["UPDATE_TIME"] = EXECUTOR_NULL_VALUE;
+            {
+                auto updated = s.table_updated->lock(); // (the time of the last commit that wrote the table; none since the server started, or since ALTER / TRUNCATE made it new)
+                const auto when = updated->find(name);
+                r["UPDATE_TIME"] = when == updated->end() ? std::string(EXECUTOR_NULL_VALUE) : when->second;
+            }
             r["CHECK_TIME"] = EXECUTOR_NULL_VALUE;
             r["TABLE_COLLATION"] = "utf8mb4_0900_ai_ci";
             r["CHECKSUM"] = EXECUTOR_NULL_VALUE;

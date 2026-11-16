@@ -328,6 +328,38 @@ Statement Parser::parse_proc_stmt() {
         if (peek_is(TokenKind::Isolation) || peek_is(TokenKind::At)) return parse_set();
         return parse_proc_set_var();
     }
+    // SIGNAL SQLSTATE [VALUE] 'ccsss' [SET MESSAGE_TEXT = expr, MYSQL_ERRNO = n, ...]: the error it raises comes from the function __SIGNAL(state, message, errno),
+    // which a `SET @__signal = ...` evaluates (a SELECT would send its row to the client); a message or number that was not given is "\x01" / 0
+    if (p && p->kind == TokenKind::Signal && peek_at(1) && peek_at(1)->kind == TokenKind::Ident && to_upper(peek_at(1)->text) == "SQLSTATE") {
+        advance();
+        advance();
+        if (peek_is(TokenKind::Ident) && to_upper(peek()->text) == "VALUE") advance();
+        if (!peek_is(TokenKind::StringLit)) throw ParseError("Expected a SQLSTATE string after SIGNAL SQLSTATE");
+        const std::string state = advance()->text;
+        ArithExpr message(ArithExpr::Str{"\x01"}), number(ArithExpr::Num{"0"});
+        if (peek_is(TokenKind::Set)) {
+            advance();
+            for (;;) {
+                const Token* item = peek();
+                if (!item || (item->kind != TokenKind::Ident && item->text.empty() && item->word.empty())) throw ParseError("Expected a condition item name after SET in SIGNAL");
+                const std::string item_name = to_upper(!item->text.empty() ? item->text : item->word);
+                advance();
+                if (!peek_is_assign()) throw ParseError("Expected '=' after " + item_name + " in SIGNAL");
+                advance();
+                ArithExpr value = parse_value_expr();
+                if (item_name == "MESSAGE_TEXT") message = std::move(value);
+                else if (item_name == "MYSQL_ERRNO") number = std::move(value);
+                if (peek_is(TokenKind::Comma)) { advance(); continue; }
+                break;
+            }
+        }
+        ArithExpr::Func call;
+        call.name = "__SIGNAL";
+        call.args.push_back(ArithExpr(ArithExpr::Str{state}));
+        call.args.push_back(std::move(message));
+        call.args.push_back(std::move(number));
+        return Statement(Statement::SetUserVar{"__signal", ArithExpr(std::move(call))});
+    }
     return parse_stmt();
 }
 
@@ -486,6 +518,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_end_while() {
         if (peek_is(TokenKind::End)) {
             advance();
             if (peek_is(TokenKind::While)) advance();
+            if (peek_is(TokenKind::Ident) && (!peek_at(1) || peek_at_is(1, TokenKind::Semicolon) || peek_at_is(1, TokenKind::End))) advance(); // (`END LOOP lbl`: the label that closes it)
             break;
         }
         if (!peek()) break;
@@ -508,6 +541,7 @@ std::vector<Statement> Parser::parse_proc_stmts_until_end_loop() {
         if (peek_is(TokenKind::End)) {
             advance();
             if (peek_is(TokenKind::Loop)) advance();
+            if (peek_is(TokenKind::Ident) && (!peek_at(1) || peek_at_is(1, TokenKind::Semicolon) || peek_at_is(1, TokenKind::End))) advance(); // (`END LOOP lbl`: the label that closes it)
             break;
         }
         if (!peek()) break;
@@ -523,6 +557,7 @@ Statement Parser::parse_proc_repeat(std::optional<std::string> label) {
     CondExpr until = parse_condexpr();
     if (peek_is(TokenKind::End)) advance();
     if (peek_is(TokenKind::Repeat)) advance();
+    if (peek_is(TokenKind::Ident) && (!peek_at(1) || peek_at_is(1, TokenKind::Semicolon) || peek_at_is(1, TokenKind::End))) advance(); // (`END LOOP lbl`: the label that closes it)
     return Statement(Statement::ProcRepeat{label, std::move(body), std::move(until)});
 }
 

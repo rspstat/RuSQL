@@ -36,6 +36,7 @@ struct BindTable {
     const TableSchema* schema = nullptr;
     std::vector<std::string> own_columns; // a derived table's (a view's, a CTE's)
     std::vector<ValueClass> own_classes;  // what each of them holds
+    bool inexact = false; // own_columns may not be the columns `*` shows (its query has a `*` over a table of unknown columns, or over a USING join)
 };
 
 struct BindScope {
@@ -536,6 +537,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (sees_outer) sub.write_targets = write_targets; // (a derived table is made before the statement writes: it may read the table)
             sub.statement(inner);
             if (sub.error && !error) error = sub.error;
+            nested_exact = sub.outputs_exact;
             return std::move(sub.outputs);
         }
 
@@ -613,6 +615,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 t.own_columns = ex.derived_column_names(s, body);
                 for (auto& o : sub.outputs) t.own_classes.push_back(o.second);
                 t.open = t.own_columns.empty() || t.own_columns.size() != t.own_classes.size();
+                t.inexact = !sub.outputs_exact;
             } else if (const TableSchema* schema = s.catalog.get_table(qualified_name)) {
                 t.schema = schema;
             } else if (auto info = Executor::info_schema_bare(qualified_name)) {
@@ -632,6 +635,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             t.own_columns = ex.derived_column_names(s, inner);
             for (auto& o : out) t.own_classes.push_back(o.second);
             t.open = t.own_columns.empty() || t.own_columns.size() != t.own_classes.size();
+            t.inexact = !nested_exact;
             return t;
         }
 
@@ -978,6 +982,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             std::unordered_map<std::string, std::string> given; // the names the select list gives, and what each stands for
             std::vector<std::string> ambiguous; // the names two different items give
             std::size_t subquery_items = 0;     // the scalar subqueries of the select list seen so far
+            bool exact = true;                  // `out` has every column of the answer (see outputs_exact)
             // the window functions inside expressions (`SUM(v) / SUM(SUM(v)) OVER ()`) are columns of their own that no result shows: bound first, the
             // expressions that read them need their types
             auto hidden_window = [](const SelectColumn& c) {
@@ -1003,6 +1008,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
                     const std::size_t before = out.size();
                     star_columns(scope, all->table, out);
+                    if (!scope.merged.empty()) exact = false;
+                    for (const BindTable& t : scope.tables) {
+                        if ((t.open || t.inexact) && (all->table.empty() || t.full == all->table || t.bare == all->table)) exact = false;
+                    }
                     for (std::size_t i = before; i < out.size(); i++) positions.push_back(out[i].first);
                 } else {
                     out.emplace_back(std::string(), k);
@@ -1059,6 +1068,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             chain.pop_back();
             outputs = std::move(out);
+            outputs_exact = exact && !error;
         }
 
         // The columns an expression names itself -- not the ones inside an aggregate (the parser keeps those as the text `SUM(v)`), a column of a query
@@ -1330,26 +1340,38 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             chain.pop_back();
         }
 
+        // The columns of a UNION / INTERSECT / EXCEPT are named by its first query and typed by both: a column of two queries that hold
+        // different kinds of value (a number and a string) is of neither class (MySQL makes it a string, the number's text compares as text)
+        void set_operation(Statement& left, Statement& right) {
+            statement(left);
+            auto first = std::move(outputs);
+            const bool first_exact = outputs_exact;
+            statement(right);
+            if (error) return;
+            if (check && first_exact && outputs_exact && first.size() != outputs.size()) {
+                error = "ERROR 1222 (21000): The used SELECT statements have a different number of columns";
+                return;
+            }
+            for (std::size_t i = 0; i < first.size() && i < outputs.size(); i++) {
+                ValueClass& k = first[i].second;
+                const ValueClass other = outputs[i].second;
+                if (k == other) continue;
+                // a string and a number make a string column; anything else that differs is not told
+                k = (k == ValueClass::Text && other == ValueClass::Number) || (k == ValueClass::Number && other == ValueClass::Text) ? ValueClass::Text : ValueClass::Unknown;
+            }
+            outputs = std::move(first);
+            outputs_exact = first_exact;
+        }
+
         void statement(Statement& st) {
             if (error) return;
             outputs.clear();
+            outputs_exact = false;
             if (auto* sel = std::get_if<Statement::Select>(&st.data)) select(*sel);
-            else if (auto* u = std::get_if<Statement::Union>(&st.data)) {
-                statement(*u->left);
-                auto first = std::move(outputs); // (the columns of a UNION are named and typed by its first query)
-                statement(*u->right);
-                outputs = std::move(first);
-            } else if (auto* i = std::get_if<Statement::Intersect>(&st.data)) {
-                statement(*i->left);
-                auto first = std::move(outputs);
-                statement(*i->right);
-                outputs = std::move(first);
-            } else if (auto* x = std::get_if<Statement::Except>(&st.data)) {
-                statement(*x->left);
-                auto first = std::move(outputs);
-                statement(*x->right);
-                outputs = std::move(first);
-            } else if (auto* w = std::get_if<Statement::With>(&st.data)) {
+            else if (auto* u = std::get_if<Statement::Union>(&st.data)) set_operation(*u->left, *u->right);
+            else if (auto* i = std::get_if<Statement::Intersect>(&st.data)) set_operation(*i->left, *i->right);
+            else if (auto* x = std::get_if<Statement::Except>(&st.data)) set_operation(*x->left, *x->right);
+            else if (auto* w = std::get_if<Statement::With>(&st.data)) {
                 for (auto& cte : w->ctes) {
                     statement(*cte.second);
                     if (error) return;
@@ -1358,6 +1380,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     t.own_columns = ex.derived_column_names(s, *cte.second);
                     for (auto& o : outputs) t.own_classes.push_back(o.second);
                     t.open = t.own_columns.empty() || t.own_columns.size() != t.own_classes.size();
+                    t.inexact = !outputs_exact;
                     ctes[cte.first] = std::move(t);
                 }
                 if (w->query) statement(*w->query);
@@ -1370,6 +1393,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 if (is->query) statement(*is->query);
             } else if (auto* view = std::get_if<Statement::CreateView>(&st.data)) {
                 if (view->query) statement(*view->query); // a view over a column that is not there is refused when it is made
+            } else if (auto* ctas = std::get_if<Statement::CreateTableAs>(&st.data)) {
+                if (ctas->query) statement(*ctas->query);
             }
         }
 
@@ -1380,6 +1405,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // the target table of an UPDATE / DELETE / INSERT read in the FROM list of a select (1093) is told after the rest of that select is bound: MySQL names an ambiguous or
         // unknown column of its select list first (the last member: a Binder is made by listing its first members)
         std::string deferred_target;
+        // whether `outputs` has every column of the answer: false when a `*` is over a table whose columns are not known, or over a USING / NATURAL join
+        // (which shows a merged column once); only then is the number of columns of two queries compared (the last member, as above)
+        bool outputs_exact = false;
+        bool nested_exact = false; // outputs_exact of the statement nested() bound last
     };
 
     Binder binder{*this, s, check, {}, std::nullopt, {}, {}, {}};

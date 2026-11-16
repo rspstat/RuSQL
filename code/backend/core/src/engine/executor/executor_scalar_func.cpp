@@ -388,6 +388,20 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
     if (func_name == "ROW_COUNT") return std::to_string(g_row_count);
     if (func_name == "FOUND_ROWS") return std::to_string(g_found_rows);
     if (func_name == "SLEEP") return "0"; // (it does not wait: the server answers every connection from one lock)
+    if (func_name == "__SIGNAL") { // SIGNAL SQLSTATE 'ccsss' SET MESSAGE_TEXT = .., MYSQL_ERRNO = .. of a stored program: the error of the statement that runs it (R90)
+        const std::string state = arg_at(0), message = arg_at(1), number_text = arg_at(2);
+        const bool valid_state = state.size() == 5 && state.compare(0, 2, "00") != 0 &&
+                                 std::all_of(state.begin(), state.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'); });
+        if (!valid_state) throw StatementError("ERROR 1407 (42000): Bad SQLSTATE: '" + state + "'");
+        if (message == EXECUTOR_NULL_VALUE) throw StatementError("ERROR 1048 (23000): Column 'MESSAGE_TEXT' cannot be null");
+        const auto number = parse_i64(number_text);
+        if (number && *number != 0 && (*number < 0 || *number > 65535)) throw StatementError("ERROR 1231 (42000): Variable 'MYSQL_ERRNO' can't be set to the value of '" + number_text + "'");
+        if (state.compare(0, 2, "01") == 0) return "0"; // (the class of a warning: the program goes on)
+        const bool not_found = state.compare(0, 2, "02") == 0;
+        const long long code = number && *number != 0 ? *number : (not_found ? 1643 : 1644);
+        const std::string text = message != "\x01" ? message : (not_found ? "Unhandled user-defined not found condition" : "Unhandled user-defined exception condition");
+        throw StatementError("ERROR " + std::to_string(code) + " (" + state + "): " + text);
+    }
     if (func_name == "UTC_DATE" || func_name == "UTC_TIME" || func_name == "UTC_TIMESTAMP") {
         if (func_name == "UTC_TIME") return time_now_text(fraction_arg(), true, false);
         if (func_name == "UTC_TIMESTAMP") return time_now_text(fraction_arg(), true, true);

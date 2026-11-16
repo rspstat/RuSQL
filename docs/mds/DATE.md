@@ -3504,6 +3504,36 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **정직한 한계 · 남은 것** (`RECOMMAND.md` 8번 표에 반영):
 ① **뷰 정의의 정규화**(`SHOW CREATE VIEW` · `information_schema.views.VIEW_DEFINITION`이 MySQL의 `select … from` 정규형이 아님; 이번 출력기를 SELECT 전체로 넓혀야 함). ② 표의 `UPDATE_TIME`은 NULL. ③ `CHECK`의 파서가 안 남기는 모양 일곱(위 ②)은 쓴 대로 보임; `NOT REGEXP`의 반대 표기는 재 본 적 없어 안 씀. ④ **같은 모양의 일반 쿼리 `SELECT * FROM (SELECT 'a' AS d UNION ALL SELECT 'b') s WHERE nosuch = 1`이 `Unknown column`(1054) 없이 0행**을 돌려준다(표를 거치지 않는 `UNION` 파생 표의 `WHERE`가 열을 안 묶음) — 이번에 `SHOW DATABASES`를 거기서 빼냈고 일반 모양은 안 고쳤다. ⑤ R84 전에 만든 루틴, R85 전에 만든 뷰 · 표는 글자 · 계정 · 시각이 없다. ⑥ `mysql` 스키마는 비어 있어 `--all-databases` 덤프에 계정이 없다. ⑦ `--tab`, `--hex-blob`의 UTF-8이 아닌 바이트. ⑧ **DBeaver · Workbench · ORM의 실제 접속은 여전히 직접 해 보셔야 한다.**
 
+### 11월 16일 — R90: R89의 남은 것부터 연속 개발 (`UNION` 위 파생 표의 열 · 열 개수 1222 · `UPDATE_TIME` · `SIGNAL` · 루프 끝 라벨 · 빈 `INSERT` · 인덱스 힌트)
+
+**왜 이 항목인가**: 사용자가 "**일단 이제 슬슬 개발쪽 마무리 해야해서 연속으로 당신이 마무리 해도 될거같은 지점까지 개발합니다. R89 남은것부터 진행합니다. 전체 테스트 안해도 됨. 그냥 개발에만 집중. 전부 완료되면 문서 갱신 및 커밋푸시**"라고 했다. 그래서 이번에는 라운드마다 전체 시험 · 문서 · 커밋을 하지 않고, R89의 남은 것(표의 `UPDATE_TIME`, `NOT REGEXP`의 CHECK 표기, R89 때 찾은 "`UNION` 파생 표 위의 없는 열이 0행")에서 시작해 하나씩 진짜 MySQL 8.4.9와 코퍼스로 재 보며 고쳤고(코퍼스와 해당 C++ 시험만 돌림), 마무리로 **전체 시험을 한 번**(세 모드) 돌린 뒤 문서 · 커밋 · 푸시를 한 번에 했다. 하지 않은 것을 처음에 밝혔다: 뷰 정의의 정규화(SELECT 전체를 MySQL 정규형으로 쓰는 출력기 — 비용 대비 효과가 낮음).
+
+**결과 한눈에** (진짜 MySQL 8.4.9와 비교하는 코퍼스 **넷을 새로 만듦**, 점수판 70 → 74개)
+- 새 코퍼스: `union_derived_r90` **108문장 차이 0**(처음 73문장 가운데 38개가 달랐다), `check_text_r90` **52문장 차이 0**(38문장 가운데 3개가 달랐다), `signal_r90` **44문장 차이 0**(처음 31문장 가운데 27개가 달랐다; 라벨 · 빈 `INSERT` 포함), `hints_r90` **21문장 차이 0**(34문장 가운데 33개가 달랐다; 인덱스 힌트만; `NATURAL LEFT | RIGHT JOIN`은 안 함). 점수판 ****74개 코퍼스 5,957문장 차이 0****.
+- C++ 시험 **1,030 → 1,042 케이스**(`test_r90_set_ops_update_time.cpp` 12 케이스; 옛 시험은 하나도 바꾸지 않았다). 전체 시험 세 모드(기본 · `RUSQL_DML_INDEX_MIN_ROWS=0` · `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) **모두 통과**(1,526,115 · 1,526,116 · 1,526,115 assertions).
+
+**① `UNION` · `INTERSECT` · `EXCEPT` · `WITH` 위의 파생 표 · CTE · 뷰가 열 이름을 가짐** — R89 때 찾은 조용한 오답. `Executor::derived_column_names`가 `Select`만 이름을 말했고 나머지는 빈 목록이라, 바인더(`executor_bind.cpp`)가 그 파생 표를 "열을 모르는 열린 표"(어떤 열 이름이든 받음)로 봤다: `SELECT * FROM (SELECT 'a' AS d UNION ALL SELECT 'b') s WHERE nosuch = 1`이 **오류 없이 0행**. 이제 `Union` · `Intersect` · `Except`는 첫 질의의 이름을, `With`는 본 질의의 이름을 말해 `SELECT` · `WHERE` · `ON` · `GROUP BY` · `HAVING` · `ORDER BY`의 없는 열이 1054(둘째 질의의 이름은 안 보임). CTE · 뷰(본문이 `UNION`)도 같다. **열의 형도 합친다**: 바인더가 첫 질의의 형만 쓰면 `INT`와 `VARCHAR`를 이은 열을 숫자로 비교하게 되므로(`n = '7'`이 `'007'`을 잡음), `Binder::set_operation`이 두 질의의 형을 합친다 — 숫자와 글자는 글자(MySQL이 `VARCHAR`로 만드는 것; 비교 · 정렬이 글자로), 그 밖에 다르면 `Unknown`(예전 방식 그대로). 덤으로 `FROM (WITH c AS (…) SELECT …) d`가 파싱됨(`(WITH`를 조인 묶음의 괄호로 벗기던 곳도 고침).
+
+**② 집합 연산의 열 개수 1222** — 코퍼스를 쓰다 찾은 조용한 오답: `SELECT id, i FROM t UNION SELECT k FROM u`가 모자란 칸을 빈 값으로 채워 **행을 돌려줬다**(MySQL은 `ERROR 1222 (21000): The used SELECT statements have a different number of columns`; `INTERSECT` · `EXCEPT` · 파생 표 · CTE · 하위 질의 · `INSERT … SELECT` · `CREATE TABLE … AS SELECT` 안에서도). 바인더가 두 질의의 열 개수를 **확실히 셀 수 있을 때만**(`Binder::outputs_exact`: `*`가 열을 모르는 표나 `USING` · `NATURAL` 조인 위에 없을 때; 파생 표 · 뷰 · CTE는 `BindTable::inexact`로 전함) 먼저 오류를 내고 — 거짓 오류로 멀쩡한 질의를 거절하는 일이 조용한 오답보다 나쁘므로 — 못 센 것(`USING` 조인의 `*`)은 `exec_union` · `exec_intersect` · `exec_except`가 두 결과의 머리글 폭을 비교해 잡는다(한쪽에 행이 없어 머리글이 비면 건너뜀). 바인더가 `CreateTableAs`의 질의도 보게 됨.
+
+**③ `CHECK`의 `NOT REGEXP` · `NOT RLIKE` · `REGEXP_LIKE()`** — R89에서 "재 본 적 없어" 쓴 대로 두었던 것을 재서 맞춤: `(not(regexp_like(`name`,_utf8mb4'^a')))`(`NOT LIKE`의 `(not((x like y)))`와 괄호 수가 다름), `regexp_like(`name`,_utf8mb4'a',_utf8mb4'i')`(값을 조건으로 쓴 `REGEXP_LIKE(...)`는 파서가 `<> 0`으로 읽으므로 그 함수에 한해 함수 자체로 씀 — 타이핑한 `REGEXP_LIKE(...) <> 0`은 구별 못 함).
+
+**④ 표의 `UPDATE_TIME`** — MySQL에서 재서 맞춤(`information_schema.tables` · `SHOW TABLE STATUS`): 만들면 NULL, **행을 쓴 트랜잭션이 커밋될 때** 그 시각(초 단위; 트랜잭션 안에서는 다른 세션도 자기 세션도 아직 못 봄, 롤백 · 읽기 · 행을 안 바꾼 `UPDATE`/`DELETE`는 그대로), 외래키 연쇄로 바뀐 자식 표도, `CREATE TABLE … AS SELECT`는 행이 있을 때만(`CREATE TABLE … LIKE`와 `INSERT … SELECT`의 0행은 NULL), `RENAME`은 유지, `ALTER` · `CREATE INDEX` · `TRUNCATE` · `DROP`+`CREATE`는 NULL로 되돌림. `SharedDatabase::table_updated`(`Mutex<unordered_map<표, 시각 글자>>`, 메모리에만 — MySQL도 재시작하면 NULL)에 자동 커밋은 `write_redo_batch`(연산 목록의 표)가, 명시적 커밋은 `exec_commit` · `exec_commit_phase1`(`dirty_tables`)이 찍는다. **성능**: 쓰는 커밋마다 시각 글자 하나와 표 이름 몇 개를 맵에 쓰는 것뿐이라 성능 동결의 기준(흔한 모양에 이차 시간 절벽이 없음)에 걸리지 않았다(R89까지는 "쓸 때마다 시각을 남겨야 해 부딪힘"이라 미뤘던 것). 헤더(`executor.hpp`)를 건드려 전체 다시 짓기 한 번.
+
+**⑤ `SIGNAL`** — 전에는 "Unknown statement". `SIGNAL SQLSTATE [VALUE] '45000' [SET MESSAGE_TEXT = …, MYSQL_ERRNO = …]`을 프로시저와 BEFORE · AFTER 트리거 본문에서 읽는다. 구현은 파서가 `SET @__signal = __SIGNAL(상태, 메시지, 번호)`로 바꾸고(`SELECT`로 하면 프로시저가 결과 행을 클라이언트에 보내므로) 함수 `__SIGNAL`이 `ERROR 1644 (45000): 메시지`를 던진다: 기본 1644, `02` 부류는 1643, `01` 부류는 경고라 계속, `MYSQL_ERRNO`가 있으면 그 번호, 메시지가 없으면 "Unhandled user-defined exception condition", 잘못된 SQLSTATE는 1407. **던진 트리거는 문장을 통째로 취소**한다(여러 행 `INSERT`의 둘째 행에서 던져도 첫 행이 안 남음 — 코퍼스로 MySQL과 같음을 확인). MySQL은 `MESSAGE_TEXT`에 글자 · 변수만 받아 `CONCAT(…)` 같은 식은 구문 오류인데 여기는 식도 받는다(받는 쪽이 넓음).
+
+**⑥ 루프 끝 라벨** — `lbl: LOOP … END LOOP lbl`, `END WHILE lbl`, `END REPEAT lbl`: 라벨 앞쪽(`lbl:`)은 렉서가 `:`를 버려 이미 읽혔지만 끝 라벨이 걸려 프로시저가 만들어지지 않았다. **⑦ 빈 `INSERT`** — `INSERT INTO t () VALUES ()`와 `INSERT INTO t VALUES ()`(`VALUES (), ()`도): 모든 열이 기본값 · AUTO_INCREMENT. **⑧ 인덱스 힌트** — `parse_table_alias`가 별칭 뒤의 `USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름, …)`을 읽고 버린다(`FROM` · 조인한 표 · `UPDATE`; `force`라는 이름의 표는 그대로 표).
+
+**검증**:
+- 코퍼스(진짜 MySQL 8.4.9와, 고치기 전 → 후): `union_derived_r90` 38/73(마지막 108문장으로 늘리며 모두) → **0**, `check_text_r90` 3/38 → **0**, `signal_r90` 27/31 → **0**, `hints_r90` 33/34 → **0**. 코퍼스를 만들며 알게 된 MySQL의 모양: `SIGNAL`의 `MESSAGE_TEXT`는 글자 · 변수만, 단일 표 `DELETE`의 인덱스 힌트는 구문 오류(해당 줄은 코퍼스에서 뺌).
+- C++ 시험: 전체 **1,042 케이스** 세 모드 **모두 통과**(1,526,115 · 1,526,116 · 1,526,115 assertions). 개발 중에는 `[r90]`만 돌렸다(12 케이스 · 448 단언).
+- 검증 도구 · 퍼저(최종 빌드): 두 세션 도구 `two_sessions.py` 596단계 차이 0, 검산 도구 12개(`verify_*.py`) 위반 0, 빌드 비교 `diff_builds.py`(R89 빌드와, 무작위 SELECT 6,000개) 차이 0 — 바인더가 `UNION` 열의 형을 합치는 것이 흔한 모양의 답을 바꾸지 않음을 보임, 충돌 후 복구 퍼저 다섯(시드 7700, 6회) · `fuzz_crash_fk` 시드 7701 · 동시성 퍼저 10회 불일치 0.
+- `test_full.sql`: R90 구역(`UNION` 파생 표의 없는 열 · 열 개수 · `FROM (WITH …)` · `UPDATE_TIME` 전후 · 빈 `INSERT` · 인덱스 힌트 · `SIGNAL`을 던지는 트리거 · 루프 라벨)을 더해 CLI로 돌려 **의도한 오류 17개만**(R89까지 14개 + 없는 열 1054 · 열 개수 1222 · `SIGNAL` 1644).
+- **심은 버그 시험(mutants)은 이번에 하지 않았다**(사용자가 "개발만"이라고 했고, 전체 시험 대신 코퍼스로 재 보았음).
+
+**정직한 한계 · 남은 것** (`RECOMMAND.md`에 반영):
+① **뷰 정의의 정규화**(`SHOW CREATE VIEW` · `information_schema.views.VIEW_DEFINITION`이 MySQL의 `select … from` 정규형이 아님). ② **`NATURAL LEFT | RIGHT JOIN`**: 파서만의 일이 아니다 — `NATURAL`을 아는 곳이 여섯 곳(열 합치기 · 바인더의 `merged` · 결과 형 · 다중 표 · 뷰 쓰기 · JSON)이라 `Join`에 표시를 달고 그곳을 모두 고쳐야 해서(헤더 변경) 접었다. ③ 없는 인덱스 이름을 쓴 힌트의 1176은 안 냄(받는 쪽이 넓음), 힌트가 플래너를 이끌지는 않음. ④ `RESIGNAL` · `GET DIAGNOSTICS` · `DECLARE … HANDLER` · `SIGNAL 조건이름`은 없음; 경고를 `SHOW WARNINGS`에 남기지 않음. ⑤ `UPDATE_TIME`: 값이 안 바뀌는 `UPDATE`도 새 행 버전을 쓰므로 찍힘(MySQL은 안 찍음), 파티션 표의 논리 표는 NULL(자식 표만 찍힘). ⑥ `CHECK`에서 파서가 안 남기는 모양(`-열` · `1e3` · `TRUE` · 큰따옴표 글자 · `IN (열)` · `BETWEEN 열 AND 5`)과 비교의 피연산자로 든 `REGEXP`는 쓴 대로 보임.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

@@ -149,6 +149,7 @@ StringResult Executor::exec_commit(SharedDatabase& s) {
 
     std::uint64_t txn_id = txn.current_txn_id();
     if (auto res = txn.commit(); res.is_err()) return StringResult::Err(res.error());
+    note_updated(s, dirty_tables); // (UPDATE_TIME: the tables this commit wrote)
     s.lock_mgr.release(txn_id);
     s.active_txn_ids->lock()->erase(txn_id);
     s.snapshot_floors->lock()->erase(txn_id);
@@ -169,7 +170,8 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s, bool use_redo) {
         return StringResult::Err("Serialization failure: a row was inserted into a range this transaction scanned (auto-rolled back)");
     }
 
-    for (auto& table : txn.dirty_tables()) {
+    const auto written_tables = txn.dirty_tables();
+    for (auto& table : written_tables) {
         if (auto it = s.tables.find(table); it != s.tables.end()) {
             // Redo mode: the table file is NOT rewritten here -- the commit's redo batch
             // (written by execute_commit_grouped) is what makes it durable.
@@ -180,6 +182,7 @@ StringResult Executor::exec_commit_phase1(SharedDatabase& s, bool use_redo) {
             s.query_cache.invalidate_table(table);
         }
     }
+    note_updated(s, written_tables); // (UPDATE_TIME: the tables this commit wrote)
 
     std::uint64_t txn_id = txn.current_txn_id();
     if (!use_redo) {

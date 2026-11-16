@@ -172,7 +172,7 @@ private:
             {"UPPER", "upper"}, {"LOWER", "lower"}, {"LCASE", "lower"}, {"UCASE", "upper"}, {"LENGTH", "length"}, {"CHAR_LENGTH", "char_length"}, {"CHARACTER_LENGTH", "char_length"},
             {"ABS", "abs"}, {"COALESCE", "coalesce"}, {"IFNULL", "ifnull"}, {"CONCAT", "concat"}, {"CEIL", "ceiling"}, {"CEILING", "ceiling"}, {"FLOOR", "floor"},
             {"SUBSTR", "substr"}, {"SUBSTRING", "substr"}, {"LEFT", "left"}, {"TRIM", "trim"}, {"YEAR", "year"}, {"MONTH", "month"}, {"NULLIF", "nullif"},
-            {"GREATEST", "greatest"}, {"LEAST", "least"}, {"ROUND", "round"}};
+            {"GREATEST", "greatest"}, {"LEAST", "least"}, {"ROUND", "round"}, {"REGEXP_LIKE", "regexp_like"}};
         for (const auto& [from, to] : kNames) {
             if (name == from) written = to;
         }
@@ -270,6 +270,11 @@ private:
             case Operator::Lt:
             case Operator::Gte:
             case Operator::Lte: {
+                // `CHECK (REGEXP_LIKE(a, 'x'))`: a value used as a condition is `value <> 0` to the parser; a function that answers true / false is written
+                // by MySQL as itself (`<> 0` typed after it is not told apart, and is rarer)
+                if (auto* call = std::get_if<ArithExpr::Func>(&c.left.data); call && c.op == Operator::Ne && upper_text(call->name) == "REGEXP_LIKE") {
+                    if (auto* zero = std::get_if<ConditionValue::Literal>(&c.value.data); zero && !zero->quoted && zero->value == "0") return negate ? "(not(" + left + "))" : left;
+                }
                 const Operator op = negate ? opposite(c.op) : c.op;
                 const std::string right = right_value();
                 return "(" + left + " " + operator_text(op) + " " + right + ")";
@@ -314,18 +319,16 @@ private:
                 const std::string like = "(" + left + " like " + pattern + ")";
                 return (c.op == Operator::Like) != negate ? like : "(not(" + like + "))";
             }
-            case Operator::Regexp: {
-                if (negate) { // (the opposite of REGEXP is not measured)
-                    fail();
-                    return std::string();
-                }
+            case Operator::Regexp:
+            case Operator::NotRegexp: {
                 std::string pattern;
                 if (auto* lit = std::get_if<ConditionValue::Literal>(&c.value.data)) pattern = literal(lit->value, true);
                 else pattern = right_value();
-                return "regexp_like(" + left + "," + pattern + ")";
+                const std::string regexp = "regexp_like(" + left + "," + pattern + ")";
+                return (c.op == Operator::Regexp) != negate ? regexp : "(not(" + regexp + "))"; // (MySQL: `(not(regexp_like(`a`,_utf8mb4'x')))`)
             }
             default:
-                fail(); // (NOT REGEXP, EXISTS, a subquery)
+                fail(); // (EXISTS, a subquery)
                 return std::string();
         }
     }

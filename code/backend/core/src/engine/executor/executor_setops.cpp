@@ -69,6 +69,13 @@ std::optional<std::string> resolve_set_order(std::vector<OrderBy>& order_by, con
     return std::nullopt;
 }
 
+// MySQL 1222: the two queries of a set operation give a different number of columns. The headers tell it (a side with no rows has none: the
+// binder has counted the columns it could before the query ran).
+std::optional<StringResult> widths_differ(const std::vector<std::string>& left, const std::vector<std::string>& right) {
+    if (left.empty() || right.empty() || left.size() == right.size()) return std::nullopt;
+    return StringResult::Err("ERROR 1222 (21000): The used SELECT statements have a different number of columns");
+}
+
 std::vector<std::string> row_key(const Row& row, const std::vector<std::string>& cols) {
     std::vector<std::string> key;
     key.reserve(cols.size());
@@ -147,6 +154,7 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
 
     auto [left_cols, left_rows] = parse_table_output(left_out.value());
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
+    if (auto mismatch = widths_differ(left_cols, right_cols)) return *mismatch;
 
     if (left_cols.empty() && right_cols.empty()) return StringResult::Ok("0 rows returned.");
     // the rows of the right side go under the names of the left side, by position; with no rows on the left they go under what its select list says (else under their own names)
@@ -219,6 +227,7 @@ StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Stateme
 
     auto [left_cols, left_rows] = parse_table_output(left_out.value());
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
+    if (auto mismatch = widths_differ(left_cols, right_cols)) return *mismatch;
     const std::vector<std::string> cols = left_cols.empty() ? right_cols : left_cols;
 
     std::vector<std::vector<std::string>> right_keys;
@@ -276,6 +285,7 @@ StringResult Executor::exec_except(SharedDatabase& s, Statement left, Statement 
 
     auto [left_cols, left_rows] = parse_table_output(left_out.value());
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
+    if (auto mismatch = widths_differ(left_cols, right_cols)) return *mismatch;
     const std::vector<std::string> cols = left_cols.empty() ? right_cols : left_cols;
 
     std::vector<std::vector<std::string>> right_keys;

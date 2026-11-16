@@ -40,6 +40,12 @@ std::vector<std::vector<std::string>> Parser::parse_insert_values() {
         if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
         advance();
         std::vector<std::string> row_vals;
+        if (peek_is(TokenKind::RParen)) { // `VALUES ()`: a row of no value -- every column takes its default
+            advance();
+            all_values.push_back(std::move(row_vals));
+            if (peek_is(TokenKind::Comma)) { advance(); continue; }
+            break;
+        }
         for (;;) {
             std::string val;
             if (peek_is(TokenKind::Comma) || peek_is(TokenKind::RParen)) {
@@ -136,7 +142,11 @@ Statement Parser::parse_insert() {
     std::string table = expect_table_name();
 
     std::optional<std::vector<std::string>> columns;
-    if (peek_is(TokenKind::LParen)) {
+    if (peek_is(TokenKind::LParen) && peek_at_is(1, TokenKind::RParen) && peek_at_is(2, TokenKind::Values)) {
+        advance(); // `INSERT INTO t () VALUES ()`: no column is named, every column takes its default
+        advance();
+        columns = std::vector<std::string>{};
+    } else if (peek_is(TokenKind::LParen)) {
         advance();
         std::vector<std::string> cols;
         cols.push_back(expect_ident());

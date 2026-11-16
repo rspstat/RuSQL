@@ -732,7 +732,7 @@ Statement Parser::parse_select() {
     {
         std::size_t lead = 0;
         while (peek_at_is(lead, TokenKind::LParen)) lead++;
-        if (lead > 0 && !peek_at_is(lead, TokenKind::Select)) {
+        if (lead > 0 && !peek_at_is(lead, TokenKind::Select) && !peek_at_is(lead, TokenKind::With)) {
             std::vector<std::size_t> closers;
             std::vector<std::size_t> open;
             for (std::size_t i = pos_; i < tokens_.size() && closers.size() < lead; i++) {
@@ -765,9 +765,10 @@ Statement Parser::parse_select() {
     std::optional<std::pair<StatementPtr, std::string>> subquery;
     if (peek_is(TokenKind::LParen)) {
         advance();
-        if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT in subquery");
+        if (!peek_is(TokenKind::Select) && !peek_is(TokenKind::With)) throw ParseError("Expected SELECT in subquery");
+        const bool with_body = peek_is(TokenKind::With); // `FROM (WITH c AS (...) SELECT ...) d`
         advance();
-        Statement inner = parse_select();
+        Statement inner = with_body ? parse_with() : parse_select();
         if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after subquery");
         advance();
         if (peek_is(TokenKind::As)) advance();
@@ -851,9 +852,10 @@ Statement Parser::parse_select() {
             const char* what = lateral ? " LATERAL" : "";
             if (!peek_is(TokenKind::LParen)) throw ParseError(std::string("Expected '(' after") + what);
             advance();
-            if (!peek_is(TokenKind::Select)) throw ParseError(lateral ? "Expected SELECT in LATERAL subquery" : "Expected SELECT in subquery");
+            if (!peek_is(TokenKind::Select) && !peek_is(TokenKind::With)) throw ParseError(lateral ? "Expected SELECT in LATERAL subquery" : "Expected SELECT in subquery");
+            const bool with_body = peek_is(TokenKind::With);
             advance();
-            Statement inner = parse_select();
+            Statement inner = with_body ? parse_with() : parse_select();
             if (!peek_is(TokenKind::RParen)) throw ParseError(lateral ? "Expected ')' after LATERAL subquery" : "Expected ')' after subquery");
             advance();
             if (peek_is(TokenKind::As)) advance();

@@ -1252,6 +1252,12 @@ std::optional<std::string> Executor::column_header(const SelectColumn& c) {
 
 std::vector<std::string> Executor::derived_column_names(SharedDatabase& s, const Statement& stmt) {
     std::vector<std::string> names;
+    // a UNION / INTERSECT / EXCEPT is named by its first query, a WITH by its query (a derived table of one used to be a table of no known
+    // columns: `WHERE nosuch = 1` over it answered no rows where MySQL says 1054)
+    if (auto* u = std::get_if<Statement::Union>(&stmt.data)) return u->left ? derived_column_names(s, *u->left) : names;
+    if (auto* i = std::get_if<Statement::Intersect>(&stmt.data)) return i->left ? derived_column_names(s, *i->left) : names;
+    if (auto* x = std::get_if<Statement::Except>(&stmt.data)) return x->left ? derived_column_names(s, *x->left) : names;
+    if (auto* w = std::get_if<Statement::With>(&stmt.data)) return w->query ? derived_column_names(s, *w->query) : names;
     auto* sel = std::get_if<Statement::Select>(&stmt.data);
     if (!sel) return names;
     auto table_columns = [&](const std::string& table) {

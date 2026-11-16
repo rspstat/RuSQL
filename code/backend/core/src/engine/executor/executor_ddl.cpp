@@ -488,6 +488,7 @@ StringResult Executor::exec_drop(SharedDatabase& s, const std::string& name, boo
     s.dml_since_vacuum.erase(name);
     s.dml_since_analyze.erase(name);
     s.row_pk_pos.erase(name);
+    forget_updated(s, name);
     s.buffer_pool.invalidate(name);
     s.disk.delete_table(name);
     // The indexes of the table go with it. They stayed, and a table made later under the same name was read through them: a query found rows of the dropped table,
@@ -565,6 +566,7 @@ StringResult Executor::exec_truncate(SharedDatabase& s, const std::string& name)
     if (auto* schema = s.catalog.get_table_mut(name)) schema->auto_increment_counters.clear();
     s.buffer_pool.invalidate(name);
     s.disk.save_table(name, {});
+    forget_updated(s, name); // (MySQL: a truncated table has no update time until it is written to)
     return StringResult::Ok("Table '" + name + "' truncated.");
 }
 
@@ -1327,6 +1329,7 @@ StringResult Executor::exec_alter(SharedDatabase& s, const std::string& table, A
             s.row_pk_pos.erase(it);
             s.row_pk_pos.insert({v->to, std::move(pm)});
         }
+        move_updated(s, table, v->to); // (MySQL keeps the update time through a rename)
         // index_meta/hash_index_meta/composite_indexes keys are qualified as "<table>_<name>"
         // (so the same index name can be reused across tables/databases) -- rebuild both the
         // key and the .first/.table value together so they stay in sync with the renamed
@@ -1591,7 +1594,28 @@ static bool has_database_folder(const SharedDatabase& s, const std::string& key)
     return false;
 }
 
+void Executor::note_updated(SharedDatabase& s, const std::vector<std::string>& tables) {
+    if (tables.empty()) return;
+    const std::string now = time_now_text(0, false, true);
+    auto updated = s.table_updated->lock();
+    for (const std::string& table : tables) (*updated)[table] = now;
+}
+
+void Executor::forget_updated(SharedDatabase& s, const std::string& table) {
+    s.table_updated->lock()->erase(table);
+}
+
+void Executor::move_updated(SharedDatabase& s, const std::string& from, const std::string& to) {
+    auto updated = s.table_updated->lock();
+    if (auto it = updated->find(from); it != updated->end()) {
+        std::string when = std::move(it->second);
+        updated->erase(it);
+        (*updated)[to] = std::move(when);
+    }
+}
+
 void Executor::stamp_created(SharedDatabase& s, const std::string& table) {
+    forget_updated(s, table); // (MySQL makes the table again: it has not been written to since)
     TableSchema* schema = s.catalog.get_table_mut(table);
     if (!schema) return;
     schema->created = time_now_text(0, false, true);
@@ -1638,6 +1662,7 @@ StringResult Executor::exec_drop_database(SharedDatabase& s, const std::string& 
         s.dml_since_vacuum.erase(t);
         s.dml_since_analyze.erase(t);
         s.row_pk_pos.erase(t);
+        forget_updated(s, t);
         s.buffer_pool.invalidate(t);
         s.disk.delete_table(t);
     }

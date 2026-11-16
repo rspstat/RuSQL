@@ -181,6 +181,9 @@ struct SharedDatabase {
     // its cutoff. A transaction that began before the reader but was still running at the snapshot is no longer in active_txn_ids once it has committed, and the rows it
     // superseded are still the ones the reader sees: the GC horizon (oldest_active_txn_id) has to stay below them, or VACUUM erases a row an open snapshot still reads.
     std::shared_ptr<Mutex<std::unordered_map<std::uint64_t, std::uint64_t>>> snapshot_floors = std::make_shared<Mutex<std::unordered_map<std::uint64_t, std::uint64_t>>>();
+    // When each table was last changed: the time (text, to the second) of the last COMMIT that wrote rows of it -- UPDATE_TIME of information_schema.tables and SHOW TABLE STATUS (R90).
+    // Kept in memory only, as MySQL keeps it: a table nothing has written to since the server started, or that ALTER TABLE / TRUNCATE / CREATE INDEX made again, has none.
+    std::shared_ptr<Mutex<std::unordered_map<std::string, std::string>>> table_updated = std::make_shared<Mutex<std::unordered_map<std::string, std::string>>>();
     // Stage 4 (table-level concurrency): one shared_mutex per real, catalog-registered
     // table, keyed the same way as s.tables. Populated on CREATE TABLE (and at startup
     // for every table loaded from disk) and erased on DROP TABLE -- entries are only ever
@@ -903,6 +906,10 @@ private:
     static std::string view_create_text(const SharedDatabase& s, const std::string& view, const std::string& body);
     // The table was made again, as far as MySQL's CREATE_TIME says (ALTER TABLE, CREATE | DROP INDEX, OPTIMIZE; RENAME and TRUNCATE keep it): the time is now (R86)
     static void stamp_created(SharedDatabase& s, const std::string& table);
+    // UPDATE_TIME (R90): these tables were just written by a commit; this table has no update time now (ALTER, TRUNCATE, DROP made it new); it was renamed
+    static void note_updated(SharedDatabase& s, const std::vector<std::string>& tables);
+    static void forget_updated(SharedDatabase& s, const std::string& table);
+    static void move_updated(SharedDatabase& s, const std::string& from, const std::string& to);
     // The system schema `mysql`: always there (a dump with --all-databases starts with it), never a schema a session starts in
     static bool is_system_schema(const SharedDatabase& s, const std::string& db);
     StringResult exec_drop_view(SharedDatabase& s, const std::string& name);

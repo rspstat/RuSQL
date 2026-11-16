@@ -515,6 +515,38 @@
       "bothFail": 0
     },
     {
+      "name": "union_derived_r90",
+      "en": "A derived table, CTE or view over a UNION / INTERSECT / EXCEPT / WITH has the columns of its first query (an unknown column over it is 1054, the second query's own names are not visible), a UNION column of a number and a string is a string, the two queries of a set operation must give the same number of columns (1222, also in a derived table, CTE, subquery, INSERT ... SELECT and CREATE TABLE ... AS SELECT), FROM (WITH ...) is a derived table",
+      "ko": "UNION / INTERSECT / EXCEPT / WITH 위의 파생 표·CTE·뷰는 첫 질의의 열을 가짐(그 위의 없는 열은 1054, 둘째 질의의 이름은 안 보임), 숫자와 글자의 UNION 열은 글자 열, 집합 연산의 두 질의는 열 개수가 같아야 함(1222; 파생 표·CTE·하위 질의·INSERT ... SELECT·CREATE TABLE ... AS SELECT에서도), FROM (WITH ...)은 파생 표",
+      "statements": 108,
+      "different": 0,
+      "bothFail": 52
+    },
+    {
+      "name": "check_text_r90",
+      "en": "NOT REGEXP, NOT RLIKE and REGEXP_LIKE() in a CHECK condition written the way MySQL writes it: (not(regexp_like(`name`,_utf8mb4'x'))), regexp_like(..) with a flags argument, in AND / OR and under NOT",
+      "ko": "CHECK 조건의 NOT REGEXP · NOT RLIKE · REGEXP_LIKE()를 MySQL이 쓰는 꼴로: (not(regexp_like(`name`,_utf8mb4'x'))), 플래그 인수가 있는 regexp_like(..), AND / OR 안과 NOT 아래",
+      "statements": 52,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
+      "name": "signal_r90",
+      "en": "SIGNAL SQLSTATE '..' [SET MESSAGE_TEXT, MYSQL_ERRNO] in a procedure and in BEFORE / AFTER triggers (1644, 1643, a number of its own, class 01 is a warning, the statement of several rows is undone), loop labels that close with END LOOP | WHILE | REPEAT label, INSERT INTO t () VALUES () and INSERT INTO t VALUES () (every column takes its default)",
+      "ko": "프로시저와 BEFORE / AFTER 트리거의 SIGNAL SQLSTATE '..' [SET MESSAGE_TEXT, MYSQL_ERRNO](1644 · 1643 · 자기 번호 · 01 부류는 경고 · 여러 행 문장은 통째로 취소), END LOOP | WHILE | REPEAT 라벨로 닫는 루프 라벨, INSERT INTO t () VALUES ()와 INSERT INTO t VALUES ()(모든 열이 기본값)",
+      "statements": 44,
+      "different": 0,
+      "bothFail": 17
+    },
+    {
+      "name": "hints_r90",
+      "en": "Index hints after a table in FROM or UPDATE (USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (names)) are read and change nothing",
+      "ko": "FROM · UPDATE의 표 뒤 인덱스 힌트(USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름))는 읽고 답을 바꾸지 않음",
+      "statements": 21,
+      "different": 0,
+      "bothFail": 0
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -565,8 +597,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1030,
-    "assertions": 1525668
+    "cases": 1042,
+    "assertions": 1526115
   },
   "bugsFound": 206
 }

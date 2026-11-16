@@ -736,6 +736,27 @@ SELECT ROW_COUNT() AS call_rows;
 DROP PROCEDURE r89_p;
 DROP TABLE r89_ck;
 
+-- Derived Tables Over UNION Know Their Columns, Set Operations Must Match Widths, UPDATE_TIME, SIGNAL, Loop Labels, INSERT Of No Value, Index Hints (R90)
+SELECT * FROM (SELECT id FROM department UNION ALL SELECT id FROM project) s WHERE nosuch = 1;
+SELECT COUNT(*) AS n FROM (SELECT id FROM department UNION ALL SELECT id FROM project) s WHERE id > 0;
+SELECT id FROM department UNION SELECT id, name FROM department;
+SELECT * FROM (WITH c AS (SELECT 1 AS a UNION ALL SELECT 2) SELECT a FROM c) s WHERE a = 2;
+CREATE TABLE r90_t (id INT PRIMARY KEY AUTO_INCREMENT, v INT DEFAULT 7, s VARCHAR(10) DEFAULT 'x');
+SELECT update_time IS NULL AS never_written FROM information_schema.tables WHERE table_schema = 'company' AND table_name = 'r90_t';
+INSERT INTO r90_t () VALUES ();
+INSERT INTO r90_t VALUES (), ();
+SELECT update_time IS NOT NULL AS written FROM information_schema.tables WHERE table_schema = 'company' AND table_name = 'r90_t';
+SELECT id, v, s FROM r90_t FORCE INDEX (PRIMARY) ORDER BY id;
+CREATE TRIGGER r90_bi BEFORE INSERT ON r90_t FOR EACH ROW BEGIN IF NEW.v < 0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'v must not be negative'; END IF; END;
+INSERT INTO r90_t (v) VALUES (5);
+INSERT INTO r90_t (v) VALUES (-5);
+SELECT COUNT(*) AS rows_after FROM r90_t;
+CREATE PROCEDURE r90_p() BEGIN DECLARE i INT DEFAULT 0; lp: LOOP SET i = i + 1; IF i >= 3 THEN LEAVE lp; END IF; END LOOP lp; SELECT i AS looped; END;
+CALL r90_p();
+DROP PROCEDURE r90_p;
+DROP TRIGGER r90_bi;
+DROP TABLE r90_t;
+
 -- sql_mode Without ONLY_FULL_GROUP_BY (what mysqldump sets)
 SET sql_mode = '';
 SELECT department_id, COUNT(*) AS n, MIN(salary) AS lowest FROM employee WHERE department_id IS NOT NULL GROUP BY department_id ORDER BY department_id;

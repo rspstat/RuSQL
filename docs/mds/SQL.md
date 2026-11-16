@@ -104,7 +104,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 ### INSERT / REPLACE
 
-- INSERT INTO t [(cols)] VALUES (...)[, (...)...] : 행 입력(여러 행 한 번에, 값 자리에 식 · DEFAULT · 변수 가능)
+- INSERT INTO t [(cols)] VALUES (...)[, (...)...] : 행 입력(여러 행 한 번에, 값 자리에 식 · DEFAULT · 변수 가능; R90: `INSERT INTO t () VALUES ()`와 `INSERT INTO t VALUES ()`는 **빈 행** — 모든 열이 기본값 · AUTO_INCREMENT, `VALUES (), ()`로 여러 행도; 열 이름을 달고 값을 안 주는 `INSERT INTO t (v) VALUES ()`는 MySQL처럼 열 개수 오류)
 - INSERT INTO t SET col = 값, ... : SET 형식으로 입력
 - INSERT INTO t [(cols)] SELECT ... : 쿼리 결과 입력(UNION 포함). 원본은 REPEATABLE READ에서도 스냅샷이 아니라 지금 커밋된 최신 값으로 읽고(R73, MySQL과 같음), 한 표를 평범하게 읽는 원본이면 읽은 행과 기본키 조건의 틈을 공유 잠금한다 — 다른 세션의 쓰기가 기다린다(R74; REPEATABLE READ · SERIALIZABLE의 트랜잭션 안에서만)
 - INSERT IGNORE INTO ... : 제약에 걸린 행은 조용히 건너뜀
@@ -145,9 +145,9 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - SELECT 식 [AS] 별칭 / SELECT 식 [AS] '문자열' : 결과 컬럼에 이름 붙이기(문자열도 이름이 됨: `AS 'Total'`, `id 'a2'`; 표 별칭에는 문자열을 못 씀 — MySQL과 같음; 별칭이 키워드이면 쓴 그대로의 대소문자로 이름이 됨, `AS Count`; R83)
 - SELECT DISTINCT ... : 중복 행 제거
 - SELECT [ALL | DISTINCT | DISTINCTROW] [HIGH_PRIORITY] [STRAIGHT_JOIN] [SQL_SMALL_RESULT] [SQL_BIG_RESULT] [SQL_BUFFER_RESULT] [SQL_NO_CACHE] ... : `SELECT` 바로 뒤의 수식어 — 읽기만 하고 아무것도 바꾸지 않음(최적화 힌트; `DISTINCT` · `DISTINCTROW`만 뜻이 있음; `mysqldump`가 `SELECT /*!40001 SQL_NO_CACHE */ * FROM t`를 보낸다; 같은 이름이라도 백틱 안이면 열 이름; R83)
-- SELECT ... FROM t [[AS] 별칭] : 테이블(별칭 포함)에서 조회
+- SELECT ... FROM t [[AS] 별칭] : 테이블(별칭 포함)에서 조회(R90: 표 뒤의 인덱스 힌트 `USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름, ...)`은 읽고 **답을 바꾸지 않음** — `FROM`의 모든 표 · 조인한 표 · `UPDATE`의 표 뒤에서; `FORCE`가 표 이름이어도 별칭이어도 그대로 됨; 없는 인덱스 이름을 쓴 힌트에 MySQL이 내는 1176은 아직 안 냄)(R90: 표 뒤의 인덱스 힌트 `USE | FORCE | IGNORE INDEX | KEY [FOR JOIN | ORDER BY | GROUP BY] (이름, ...)`은 읽고 **답을 바꾸지 않음** — `FROM`의 모든 표 · 조인한 표 · `UPDATE`의 표 뒤에서; `FORCE`가 표 이름이어도 별칭이어도 그대로 됨; 없는 인덱스 이름을 쓴 힌트에 MySQL이 내는 1176은 아직 안 냄)
 - SELECT ... FROM db.t : 데이터베이스를 붙여 조회
-- SELECT ... FROM (SELECT ...) 별칭 : 파생 테이블(FROM 절 서브쿼리)
+- SELECT ... FROM (SELECT ...) 별칭 : 파생 테이블(FROM 절 서브쿼리; R90: `FROM (WITH c AS (...) SELECT ...) d`도 됨; `UNION` · `INTERSECT` · `EXCEPT` · `WITH` 위의 파생 표 · CTE · 뷰는 **첫 질의의 이름**을 열로 가져 거기 없는 열은 1054 — 전에는 그런 열을 쓰면 오류 없이 0행이었음)
 - SELECT ... FROM DUAL [WHERE ...] : 표를 읽지 않는 SELECT(`FROM`을 쓰지 않은 것과 같음; `db.dual`은 그 이름의 표; R80)
 - SELECT ... INTO @변수[, @변수] FROM ... : 결과를 변수에 담기
 - SELECT SQL_CALC_FOUND_ROWS ... : LIMIT 앞의 전체 행 수를 FOUND_ROWS()로 읽기 위해 계산
@@ -189,7 +189,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 ### 서브쿼리 · 집합 · CTE
 
 - (SELECT ...) : 스칼라 서브쿼리(select 목록 · WHERE · HAVING · 식 안, 바깥 쿼리 컬럼 참조 가능)
-- SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지). 셋 이상 이으면 왼쪽부터 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶인다(R79; 전에는 오른쪽부터 읽어 `UNION ALL`과 `UNION`을 섞으면 다른 답이 나왔다)
+- SELECT ... UNION [ALL] SELECT ... : 결과 합치기(ALL은 중복 유지). 셋 이상 이으면 왼쪽부터 읽고 `INTERSECT`가 `UNION` · `EXCEPT`보다 먼저 묶인다(R79; 전에는 오른쪽부터 읽어 `UNION ALL`과 `UNION`을 섞으면 다른 답이 나왔다). R90: 두 질의의 **열 개수가 다르면 1222**(`UNION` · `INTERSECT` · `EXCEPT` 모두, 파생 표 · CTE · 하위 질의 · `INSERT ... SELECT` · `CREATE TABLE ... AS SELECT` 안에서도 — 전에는 모자란 칸을 빈 값으로 채워 행을 돌려줌); 숫자 열과 글자 열을 이은 열은 MySQL처럼 글자 열(글자로 비교 · 정렬: `n = '7'`이 `'007'`을 잡지 않고 `ORDER BY`가 `'10' < '9'`). R90: 두 질의의 **열 개수가 다르면 1222**(`UNION` · `INTERSECT` · `EXCEPT` 모두, 파생 표 · CTE · 하위 질의 · `INSERT ... SELECT` · `CREATE TABLE ... AS SELECT` 안에서도 — 전에는 모자란 칸을 빈 값으로 채워 행을 돌려줌); 숫자 열과 글자 열을 이은 열은 MySQL처럼 글자 열(글자로 비교 · 정렬: `n = '7'`이 `'007'`을 잡지 않고 `ORDER BY`가 `'10' < '9'`)
 - SELECT ... INTERSECT [ALL] SELECT ... : 두 결과의 교집합
 - SELECT ... EXCEPT [ALL] SELECT ... : 첫 결과에서 두 번째 결과를 뺀 차집합
 - (SELECT ... ORDER BY ... LIMIT n) UNION (SELECT ...) : 괄호 안 피연산자가 자기 ORDER BY · LIMIT를 가지면 그 피연산자에만 걸린다(파생 표로 읽음), 뒤의 ORDER BY · LIMIT는 전체 결과에(R80)
@@ -525,7 +525,9 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 - REPEAT ... UNTIL 조건 END REPEAT : 한 번 실행하고 조건이 참이 될 때까지 반복
 - LEAVE 라벨 : 반복문 빠져나가기
 - ITERATE 라벨 : 반복문의 다음 회차로
-- 라벨: LOOP / WHILE / REPEAT : 반복문에 이름 붙이기
+- 라벨: LOOP / WHILE / REPEAT : 반복문에 이름 붙이기(R90: `lbl: LOOP … END LOOP lbl`, `END WHILE lbl`, `END REPEAT lbl`처럼 **끝 라벨**도 읽음 — 전에는 끝 라벨이 든 프로시저가 만들어지지 않았음)
+- SIGNAL SQLSTATE [VALUE] '45000' [SET MESSAGE_TEXT = 값, MYSQL_ERRNO = 번호] : 프로시저 · 트리거에서 오류를 던짐(R90; 기본 번호 1644, `02` 부류는 1643, `01` 부류는 경고라 계속 진행, `MYSQL_ERRNO`가 있으면 그 번호; 메시지가 없으면 "Unhandled user-defined exception condition"; 잘못된 SQLSTATE는 1407; BEFORE · AFTER 트리거에서 던지면 그 문장이 통째로 취소됨 — 여러 행 `INSERT`의 둘째 행에서 던져도 첫 행이 안 남음; MySQL은 `MESSAGE_TEXT`에 글자 · 변수만 받지만 여기는 `CONCAT(...)` 같은 식도 받음)(R90: `lbl: LOOP … END LOOP lbl`, `END WHILE lbl`, `END REPEAT lbl`처럼 **끝 라벨**도 읽음 — 전에는 끝 라벨이 든 프로시저가 만들어지지 않았음)
+- SIGNAL SQLSTATE [VALUE] '45000' [SET MESSAGE_TEXT = 값, MYSQL_ERRNO = 번호] : 프로시저 · 트리거에서 오류를 던짐(R90; 기본 번호 1644, `02` 부류는 1643, `01` 부류는 경고라 계속 진행, `MYSQL_ERRNO`가 있으면 그 번호; 메시지가 없으면 "Unhandled user-defined exception condition"; 잘못된 SQLSTATE는 1407; BEFORE · AFTER 트리거에서 던지면 그 문장이 통째로 취소됨 — 여러 행 `INSERT`의 둘째 행에서 던져도 첫 행이 안 남음; MySQL은 `MESSAGE_TEXT`에 글자 · 변수만 받지만 여기는 `CONCAT(...)` 같은 식도 받음)
 - RETURN 식 : 함수의 반환값(함수 본문은 `RETURN 식` 한 문장)
 
 ## 14. MySQL 프로토콜에서만 되는 문법
@@ -540,7 +542,7 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - SHOW CREATE DATABASE [IF NOT EXISTS] db : `CREATE DATABASE `db` /*!40100 DEFAULT CHARACTER SET utf8mb4 … */`(R83)
 - SHOW CREATE PROCEDURE p / FUNCTION f / TRIGGER t : 만들 때 쓴 글자를 MySQL의 모양으로(`CREATE DEFINER=`계정` PROCEDURE `p`(매개변수)`, 특성이 한 줄씩, 본문; 형은 `RETURNS int` · `varchar(30) CHARSET utf8mb4` 식; 함수 이름은 쓴 그대로) — **MySQL 프로토콜(R83)과 네이티브 프로토콜(앱 · CLI · MCP, R84) 모두**(MySQL은 행 하나 — `Procedure | sql_mode | Create Procedure | …`, 네이티브는 CREATE 글자만, `SHOW CREATE TABLE`처럼). 루틴은 실행 · 변경 · 생성 권한이나 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정이어야 보이고(없는 계정에는 1305 "does not exist"), 글자는 `SHOW_ROUTINE` · 모든 곳의 `SELECT` · 만든 계정에만 — 나머지는 NULL; 트리거는 표의 `TRIGGER`(없으면 1227); 없는 이름은 1305(트리거는 1360); R83 전에 만든 루틴은 글자가 없어 "다시 만들라"는 오류(R83 · R84)
 - SHOW TRIGGERS [FROM db] [LIKE '표' | WHERE ...] / SHOW PROCEDURE STATUS | FUNCTION STATUS [LIKE | WHERE ...] : 트리거 · 루틴 목록(`information_schema.triggers` · `routines`에서 읽음 — 계정이 볼 수 있는 것만; 만든 시각 · 만든 계정은 R84부터 채움; MySQL 프로토콜(R83)과 네이티브 프로토콜(R84) 모두)
-- SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태(`Create_time`은 표 · 뷰를 만든 시각(R85; 그 전에 만든 것은 NULL), `Update_time`·`Check_time`은 NULL; 뷰도 한 행 — `Comment`가 `VIEW`, R83)
+- SHOW TABLE STATUS [FROM db] [LIKE '...'] : 테이블 상태(`Create_time`은 표 · 뷰를 만든 시각(R85; 그 전에 만든 것은 NULL), `Update_time`은 그 표에 행을 쓴 마지막 커밋의 시각(R90; 서버를 켠 뒤 쓴 적이 없거나 `ALTER` · `CREATE INDEX` · `TRUNCATE`가 표를 새로 만든 뒤에는 NULL, `RENAME`은 유지), `Check_time`은 NULL; 뷰도 한 행 — `Comment`가 `VIEW`, R83)
 - SHOW VARIABLES [LIKE '...'] / SHOW SESSION | GLOBAL VARIABLES : 서버 변수 목록(R85: `gtid_mode` · `enforce_gtid_consistency`는 `OFF` — `mysqldump`가 먼저 물음)
 - SHOW CHARACTER SET / SHOW CHARSET / SHOW COLLATION : 문자 집합 · 정렬 규칙 목록
 - SHOW ENGINES / SHOW PLUGINS : 엔진 · 플러그인 목록(R60: `SHOW ENGINES`·`information_schema.engines`는 MySQL 8.4의 11행을 그대로 보임 — **RuSQL의 엔진은 InnoDB 방식 하나뿐**이라 `ENGINE = MyISAM` 같은 옵션은 받아서 무시하고 트랜잭션·행 잠금이 있는 같은 방식으로 만들며, InnoDB의 `XA = YES`도 표시일 뿐 XA 문장은 없음)
@@ -568,11 +570,11 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 
 - **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
-- **데이터 쓰기** : `INSERT ... VALUES ()`(빈 값), `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
-- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `USE | FORCE | IGNORE INDEX` 힌트, `PARTITION (p)` 선택, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
+- **데이터 쓰기** : `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
+- **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `PARTITION (p)` 선택, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
 - **식 · 리터럴** : `IS [NOT] DISTINCT FROM`, `BETWEEN SYMMETRIC`, `DATE '2024-01-01'`, `COLLATE` 연산자, `BINARY` 연산자, `MATCH ... AGAINST`, `SOUNDS LIKE`, `SELECT @a := 식`, `CONVERT(식 USING 문자집합)`, `DEFAULT(col)`, `GROUPING()`
 - **함수** : `PERCENTILE_CONT ... WITHIN GROUP`, `BIT_XOR`, `CONNECTION_ID`, `GET_LOCK`, `INET_ATON`, `BENCHMARK`, `JSON_STORAGE_SIZE` 등 위 9장에 없는 함수
-- **프로시저** : `SIGNAL`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, 반복문 끝의 라벨(`END WHILE lp`), `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
+- **프로시저** : `RESIGNAL` · `GET DIAGNOSTICS`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : 프로시저 · 함수 수준의 `GRANT EXECUTE`는 받지만 `SHOW GRANTS`의 모양만 같고 MySQL의 모든 경우를 다 따라가지는 않음, `FLUSH PRIVILEGES`(필요 없음: 권한은 문장마다 바로 반영됨), 비밀번호 정책 · 계정 잠금 · 만료
 - **조회 · 관리** : `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW OPEN TABLES`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
 - **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)

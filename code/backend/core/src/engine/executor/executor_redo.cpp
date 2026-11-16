@@ -41,6 +41,12 @@ void Executor::write_redo_batch(SharedDatabase& s, std::vector<RedoOp> ops) {
         auto dirty = s.redo_dirty->lock();
         for (auto& op : ops) dirty->insert(op.table);
     }
+    // (UPDATE_TIME: the tables whose rows this commit wrote -- the autocommit statements, cascades included, come through here)
+    std::vector<std::string> written;
+    for (const RedoOp& op : ops) {
+        if (op.kind != RedoOp::Kind::TableFlushed && (written.empty() || written.back() != op.table)) written.push_back(op.table);
+    }
+    note_updated(s, written);
     std::uint64_t seq = s.redo_log->append_batch(ops);
     s.redo_log->sync(seq); // group commit: one fsync shared by concurrent committers
 }

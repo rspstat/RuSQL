@@ -1005,7 +1005,9 @@ StringResult Executor::exec_insert_inner(SharedDatabase& s, const std::string& t
 
     for (auto& values : all_values) {
         std::vector<std::string> positional;
-        if (!col_list) {
+        if (!col_list && values.empty()) {
+            positional.assign(schema.columns.size(), INSERT_DEFAULT); // (`INSERT INTO t VALUES ()`)
+        } else if (!col_list) {
             if (values.size() != schema.columns.size()) {
                 return StringResult::Err("Column count mismatch: expected " + std::to_string(schema.columns.size()) + ", got " +
                                           std::to_string(values.size()));

@@ -207,18 +207,38 @@ std::string Parser::expect_table_name() {
 }
 
 std::optional<std::string> Parser::parse_table_alias() {
+    // `t USE INDEX (a)`, `t FORCE KEY FOR ORDER BY (a, b)`, `t IGNORE INDEX ()`: the index hints of MySQL are read and change nothing here (the plan is the engine's own).
+    // `FORCE` is no keyword of this parser: before INDEX | KEY it is the hint, not an alias.
+    auto at_hint = [&]() {
+        const Token* t = peek();
+        if (!t || !(peek_at_is(1, TokenKind::Index) || peek_at_is(1, TokenKind::Key))) return false;
+        return t->kind == TokenKind::Use || t->kind == TokenKind::Ignore || (t->kind == TokenKind::Ident && to_upper(t->text) == "FORCE");
+    };
+    auto skip_hints = [&]() {
+        while (at_hint()) {
+            advance(); // USE | FORCE | IGNORE
+            advance(); // INDEX | KEY
+            for (std::size_t n = 0; n < 4 && peek() && !peek_is(TokenKind::LParen); n++) advance(); // FOR JOIN | FOR ORDER BY | FOR GROUP BY
+            if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '(' after the index hint");
+            advance();
+            while (peek() && !peek_is(TokenKind::RParen)) advance(); // (the names of the indexes, or none)
+            if (!peek_is(TokenKind::RParen)) throw ParseError("Expected ')' after the index hint");
+            advance();
+        }
+    };
+    std::optional<std::string> alias;
     if (peek_is(TokenKind::As)) {
         advance();
-        return expect_alias_ident();
-    }
-    if (peek_is(TokenKind::Ident)) {
+        alias = expect_alias_ident();
+    } else if (peek_is(TokenKind::Ident) && !at_hint()) {
         // (`t LOCK IN SHARE MODE` is no alias called LOCK)
         if (to_upper(peek()->text) == "LOCK" && peek_at_is(1, TokenKind::In)) return std::nullopt;
         // (`a STRAIGHT_JOIN b` is a join, not a table alias; written in backticks it would be an alias)
         if (to_upper(peek()->text) == "STRAIGHT_JOIN" && peek()->end - peek()->begin == peek()->text.size()) return std::nullopt;
-        return expect_ident();
+        alias = expect_ident();
     }
-    return std::nullopt;
+    skip_hints();
+    return alias;
 }
 
 std::optional<std::string> Parser::parse_column_alias() {

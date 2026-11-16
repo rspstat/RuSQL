@@ -2187,7 +2187,14 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         return last;
     }
     if (auto* v = std::get_if<Statement::CreateTableLike>(&stmt.data)) return exec_create_like(s, v->name, v->source, v->if_not_exists);
-    if (auto* v = std::get_if<Statement::CreateTableAs>(&stmt.data)) return exec_create_as(s, v->name, v->if_not_exists, v->columns, std::move(*v->query));
+    if (auto* v = std::get_if<Statement::CreateTableAs>(&stmt.data)) {
+        const bool existed = s.tables.count(v->name) > 0; // (IF NOT EXISTS leaves a table that is there alone)
+        auto made = exec_create_as(s, v->name, v->if_not_exists, v->columns, std::move(*v->query));
+        if (made.is_ok() && !existed) { // (UPDATE_TIME: the rows the query gave were written to it; a table with none has no update time)
+            if (auto it = s.tables.find(v->name); it != s.tables.end() && !it->second.empty()) note_updated(s, {v->name});
+        }
+        return made;
+    }
     if (auto* v = std::get_if<Statement::RenameTable>(&stmt.data)) {
         StringResult last = StringResult::Ok("");
         for (auto& [from, to] : v->pairs) {
