@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-16",
+  "generated": "2026-11-17",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -605,8 +605,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1045,
-    "assertions": 1526252
+    "cases": 1051,
+    "assertions": 1526448
   },
   "bugsFound": 206
 }

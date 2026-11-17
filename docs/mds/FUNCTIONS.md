@@ -172,7 +172,7 @@
 - [x] PREPARE / EXECUTE / DEALLOCATE — `PREPARE name FROM 'sql'`, `SET @v = expr`, `EXECUTE name USING @v`, `DEALLOCATE PREPARE name`
 - [x] 사용자 변수 (@var) — `SET @v = expr`, `SELECT @v`, EXECUTE USING 바인딩
 - [x] SHOW TABLES / DESCRIBE
-- [x] INFORMATION_SCHEMA 가상 테이블 — `SELECT * FROM information_schema.tables` 등 19개 가상 뷰 (schemata / tables / columns / key_column_usage / table_constraints / statistics / views / character_sets / collations / engines에 R45의 processlist / innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks, R46의 referential_constraints, R49의 row_versions, R51의 recovery, R53의 global_status를 더함)
+- [x] INFORMATION_SCHEMA 가상 테이블 — `SELECT * FROM information_schema.tables` 등 26개 가상 뷰 (schemata / tables / columns / key_column_usage / table_constraints / statistics / views / character_sets / collations / engines에 R45의 processlist / innodb_trx / innodb_locks / innodb_lock_waits / innodb_deadlocks, R46의 referential_constraints, R49의 row_versions, R51의 recovery, R53의 global_status, R59의 slow_log, R83의 routines / parameters / triggers / check_constraints / files / column_statistics를 더함)
 
 ### 데이터 타입
 - [x] INT — `INTEGER` / `INT4` 키워드 별칭 허용

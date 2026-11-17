@@ -1,6 +1,6 @@
 # RuSQL vs MySQL vs PostgreSQL vs Oracle — 기능 비교
 
-> 기준: RuSQL v2.3.0 / MySQL 8.0 / PostgreSQL 16 / Oracle 21c  
+> 기준: RuSQL v2.3.0(2026-11-17 현재, R95) / MySQL 8.4 / PostgreSQL 16 / Oracle 21c  
 > ✓ 지원 · △ 부분 지원 · ✗ 미지원
 
 ---
@@ -246,7 +246,7 @@
 | 병렬 쿼리 | △ (일부) | ✓ | ✓ (Parallel Query) | △ (SeqScan WHERE 필터 + GROUP BY par_chunks 청크 부분 집계→병합 + Hash Join probe — rayon, `RUSTDB_PARALLEL` 환경변수 / `SET @rusql_parallel = 1/0` 세션 변수, 적응형 임계값 `10_000 / thread_count` 자동 적용) |
 | JIT 컴파일 | ✗ | ✓ (LLVM) | ✗ (Native Compilation은 별도 옵션) | ✗ |
 | EXPLAIN 출력 | ✓ | ✓ (VERBOSE, BUFFERS, FORMAT JSON) | ✓ (EXPLAIN PLAN + DBMS_XPLAN.DISPLAY) | ✓ (접근 경로·비용·실제 행 수, 74자 포맷) |
-| 쿼리 힌트 | ✓ (USE INDEX, STRAIGHT_JOIN) | ✓ (pg_hint_plan 확장) | ✓ (/*+ INDEX(t idx) */ 등 풍부한 힌트) | ✗ |
+| 쿼리 힌트 | ✓ (USE INDEX, STRAIGHT_JOIN) | ✓ (pg_hint_plan 확장) | ✓ (/*+ INDEX(t idx) */ 등 풍부한 힌트) | △ (MySQL처럼 `USE | FORCE | IGNORE INDEX`와 `STRAIGHT_JOIN`을 받아들이되 답과 계획은 바꾸지 않음 — 순서와 인덱스는 옵티마이저가 정함, R83 · R90) |
 
 ---
 
@@ -257,7 +257,7 @@
 | 사용자 모델 | user@host | 역할 (Role) | 유저 = 스키마 | user@host |
 | GRANT / REVOKE | ✓ | ✓ | ✓ | ✓ |
 | 역할 (ROLE) | ✓ (8.0+) | ✓ | ✓ | ✓ (CREATE/DROP/GRANT/REVOKE/SHOW ROLES, WITH ADMIN OPTION) |
-| 열 레벨 권한 | ✓ | ✓ | ✓ | ✗ |
+| 열 레벨 권한 | ✓ | ✓ | ✓ | ✓ (`GRANT SELECT (col) ON db.t`, SELECT · INSERT · UPDATE · REFERENCES; 실제로 강제됨, R78) |
 | 행 레벨 보안 (RLS) | ✗ | ✓ | ✓ (VPD: Virtual Private Database) | ✗ |
 | 인증 방식 | Password, PAM, LDAP, Kerberos | Password, scram-sha-256, LDAP, GSSAPI | Password, Kerberos, LDAP, OS 인증 | Native TCP: SHA-256 해시 비교 · MySQL 프로토콜: mysql_native_password (SHA1 챌린지-응답, SHA1(SHA1(pw)) 저장) |
 | TLS / SSL | ✓ | ✓ | ✓ | ✗ |
@@ -283,7 +283,7 @@
 | 항목 | MySQL | PostgreSQL | Oracle | RuSQL |
 |------|-------|------------|--------|--------|
 | SHOW TABLES / DESCRIBE | ✓ | 유사 (\\d, information_schema) | 유사 (ALL_TABLES, DESC) | ✓ |
-| INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (19개 가상 뷰 — 세션·트랜잭션·락·참조 제약 표 포함, `row_versions`(모든 행 버전과 세션별 가시성)와 `recovery`(마지막 시작의 복구 내용)는 RuSQL 전용, `global_status`는 SHOW GLOBAL STATUS와 같은 값) |
+| INFORMATION_SCHEMA | ✓ (전체) | ✓ (전체) | ✓ (ALL_*/DBA_*/USER_* 딕셔너리 뷰) | ✓ (26개 가상 뷰 — 세션·트랜잭션·락·참조 제약·루틴·트리거·CHECK·느린 쿼리 로그 표 포함, 이 표들만 읽는 조회는 다른 세션을 막지 않는 비공개 임시 표 위에서 돌아 긴 문장이 도는 동안에도 세션 목록을 읽을 수 있음(R95), `row_versions`(모든 행 버전과 세션별 가시성)와 `recovery`(마지막 시작의 복구 내용)는 RuSQL 전용, `global_status`는 SHOW GLOBAL STATUS와 같은 값) |
 | SHOW DATABASES | ✓ | ✓ (\\l) | △ (SELECT FROM V$DATABASE) | ✓ |
 | SHOW CREATE TABLE | ✓ | ✓ (pg_dump) | ✓ (DBMS_METADATA) | ✓ |
 | SHOW PROCESSLIST | ✓ | pg_stat_activity | V$SESSION | ✓ (현재 세션 정보) |
@@ -324,7 +324,8 @@
 | 결과 테이블 | ✓ (셀 편집 가능) | ✓ | ✓ (셀 편집 가능) | ✓ (Canvas measureText 기반 컬럼 자동 너비, 헤더 정렬 아이콘 포함 너비 계산, 컬럼 너비 조절, 100행 페이징, 헤더 정렬, 행 번호(좌측 정렬 40px), 실시간 검색, 셀 편집, 실행 진행 바) |
 | 히스토리 | ✓ | ✓ | ✓ | ✓ (200개 보존, 연결별 분리) |
 | 다중 탭 | ✓ | ✓ | ✓ | ✓ (탭별 결과·에디터 상태 유지, 우클릭 컨텍스트 메뉴 — 닫기/분할/고정/이름 변경, 탭 고정 📌, 분할 시 왼쪽 탭바에서 제거·닫으면 복원) |
-| 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리) |
+| 연결 관리 | ✓ | ✓ | ✓ | ✓ (연결별 독립 데이터 디렉토리; 홈 화면의 View Topology 버튼이 모든 연결 · 데이터베이스 · 표를 원통 그림 하나로 보여 줌, R93) |
+| 설치 파일 | ✓ | ✓ | ✓ | ✓ (NSIS 설치 파일 하나에 엔진 · VC++ 런타임 DLL · MCP 서버 · 관리 도구, 데이터는 `%APPDATA%\RuSQL\data`; 깨끗한 PC에서의 설치 시험은 아직 안 함, R92) |
 | 서버 모니터링 | ✓ | ✓ | ✓ (Performance Hub) | ✓ (TCP 서버 on/off·클라이언트 수·로그, 접속 세션 실시간 모니터링 패널 — addr·user·경과 시간·쿼리 건수, 벤치마크 결과 UI 패널) |
 | 데이터 임포트/익스포트 | ✓ (CSV, SQL) | ✓ | ✓ (CSV, Excel, XML) | ✓ (CSV 익스포트 — 결과 패널 다운로드 버튼; CSV 임포트 — 테이블 우클릭 메뉴 "Import CSV...") |
-| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (자연어→SQL은 Claude가 MCP로 수행 — 자체 NL→SQL 모델은 두지 않음, 2026-10-01 확정; AI MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, **25개 도구** — execute_sql · confirm_dangerous_sql(execute_sql/execute_in_editor가 DROP·TRUNCATE·WHERE 없는 UPDATE/DELETE를 자동 거부하고, 사용자 확인 후에만 이 도구로 재호출해야 실제 실행됨) · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data · list_connections · add_connection · update_connection · delete_connection(이 4개는 `code/data/connections.json` 파일을 UI와 공유) · write_to_editor · new_editor_tab · close_editor_tab · switch_editor_tab · list_editor_tabs · get_editor_tab_content · execute_in_editor(이 7개는 `code/data/ui_commands.json` 큐 + Tauri `ui-command` 이벤트로 실제 쿼리 에디터를 조작 — 탭 생성/전환/닫기, 에디터에 SQL 입력, 화면에서 실제로 쿼리 실행까지 가능; execute_in_editor는 느린 쿼리를 위한 timeout_seconds 파라미터 지원) · list_app_instances · launch_app · login · start_server · stop_server · get_server_status(RuSQL 창을 여러 개 띄워도 `code/data/app_instances.json` 하트비트 레지스트리로 서로 구분해 `instance` 파라미터로 특정 창을 지정 가능; launch_app은 앱이 안 켜져 있으면 대신 실행, login은 홈 화면에서 저장된 연결로 로그인, start_server/stop_server/get_server_status는 Server Manager의 공개 리스너를 제어), SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정(파괴적 도구는 제외, Claude Desktop 자체 팝업이 마지막 방어선), API 키 불필요, UI 자동 연결 버튼) |
+| AI 연동 | △ (HeatWave AutoML) | ✗ | △ (Oracle AI) | ✓ (자연어→SQL은 Claude가 MCP로 수행 — 자체 NL→SQL 모델은 두지 않음, 2026-10-01 확정; AI MCP — mcp_server.py: Claude Desktop 연동, stdio JSON-RPC, **37개 도구**(아래 목록은 처음의 25개; 그 뒤 run_script · import_csv · export_csv · trace_query · suggest_indexes · get_table_stats · get_fk_graph · list_locks · health_report · slow_queries · kill_session · diff_schema를 더함) — execute_sql · confirm_dangerous_sql(execute_sql/execute_in_editor가 DROP·TRUNCATE·WHERE 없는 UPDATE/DELETE를 자동 거부하고, 사용자 확인 후에만 이 도구로 재호출해야 실제 실행됨) · list_databases · list_tables · get_table_schema · explain_query · get_indexes · sample_data · list_connections · add_connection · update_connection · delete_connection(이 4개는 `code/data/connections.json` 파일을 UI와 공유) · write_to_editor · new_editor_tab · close_editor_tab · switch_editor_tab · list_editor_tabs · get_editor_tab_content · execute_in_editor(이 7개는 `code/data/ui_commands.json` 큐 + Tauri `ui-command` 이벤트로 실제 쿼리 에디터를 조작 — 탭 생성/전환/닫기, 에디터에 SQL 입력, 화면에서 실제로 쿼리 실행까지 가능; execute_in_editor는 느린 쿼리를 위한 timeout_seconds 파라미터 지원) · list_app_instances · launch_app · login · start_server · stop_server · get_server_status(RuSQL 창을 여러 개 띄워도 `code/data/app_instances.json` 하트비트 레지스트리로 서로 구분해 `instance` 파라미터로 특정 창을 지정 가능; launch_app은 앱이 안 켜져 있으면 대신 실행, login은 홈 화면에서 저장된 연결로 로그인, start_server/stop_server/get_server_status는 Server Manager의 공개 리스너를 제어), SELECT 결과 JSON 배열 구조화, alwaysAllow 자동 설정(파괴적 도구는 제외, Claude Desktop 자체 팝업이 마지막 방어선), API 키 불필요, UI 자동 연결 버튼) |
