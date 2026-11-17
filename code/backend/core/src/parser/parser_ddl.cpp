@@ -147,14 +147,18 @@ DataType Parser::parse_data_type() {
         }
     };
     last_type_unsigned_ = false;
-    auto skip_signedness = [this]() { // UNSIGNED (which the column keeps) or SIGNED (which is what it is anyway)
-        if (const Token* p = peek(); p && p->kind == TokenKind::Ident) {
+    auto skip_signedness = [this]() { // UNSIGNED (which the column keeps) or SIGNED (which is what it is anyway); ZEROFILL is UNSIGNED (its zero padding is not kept)
+        for (;;) {
+            const Token* p = peek();
+            if (!p || p->kind != TokenKind::Ident) return;
             const std::string word = to_upper(p->text);
-            if (word == "UNSIGNED") {
+            if (word == "UNSIGNED" || word == "ZEROFILL") {
                 advance();
                 last_type_unsigned_ = true;
             } else if (word == "SIGNED") {
                 advance();
+            } else {
+                return;
             }
         }
     };
@@ -268,6 +272,25 @@ DataType Parser::parse_data_type() {
         case TokenKind::Ident: {
             const std::string word = to_upper(t->text);
             if (word == "DEC" || word == "FIXED") return decimal_type();
+            // BINARY(n) and VARBINARY(n): a CHAR(n) and a VARCHAR(n) that hold bytes (no binary collation of their own: a comparison ignores the case, and BINARY(n) is not padded with 0x00);
+            // BIT(n): an unsigned integer (b'101' as a value is not read yet)
+            if (word == "BINARY" || word == "VARBINARY") {
+                const bool fixed = word == "BINARY";
+                std::uint32_t n = fixed ? 1 : 255;
+                if (peek_is(TokenKind::LParen)) {
+                    advance();
+                    const Token* sz = advance();
+                    if (sz && sz->kind == TokenKind::NumberLit) { try { n = static_cast<std::uint32_t>(std::stoul(sz->text)); } catch (...) { n = 255; } }
+                    while (!peek_is(TokenKind::RParen) && peek() != nullptr) advance();
+                    if (peek_is(TokenKind::RParen)) advance();
+                }
+                return DataType(DataType::Varchar{n, fixed});
+            }
+            if (word == "BIT") {
+                skip_parenthesized();
+                last_type_unsigned_ = true;
+                return DataType(DataType::BigInt{});
+            }
             throw ParseError("Expected data type");
         }
         default: throw ParseError("Expected data type");
@@ -463,6 +486,8 @@ ColConstraints Parser::parse_col_constraints(const std::string& col_name) {
         } else if (p->kind == TokenKind::Unique) {
             advance();
             c.unique = true;
+        } else if (p->kind == TokenKind::Ident && (to_upper(p->text) == "BINARY" || to_upper(p->text) == "ZEROFILL")) { // CHAR(3) BINARY, INT(5) ZEROFILL: read, not kept
+            advance();
         } else if (p->kind == TokenKind::Ident && to_upper(p->text) == "AUTO_INCREMENT") {
             advance();
             c.auto_increment = true;

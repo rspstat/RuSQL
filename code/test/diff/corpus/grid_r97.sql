@@ -1182,3 +1182,22 @@ SELECT NULL + 0
 SELECT STR_TO_DATE('Jan 31 2024', '%Y-%m-%d')
 SELECT STR_TO_DATE('2024-13-01', '%Y-%m-%d %H:%i:%s')
 SELECT STR_TO_DATE(NULL, '%m')
+# ---- BINARY(n) / VARBINARY(n) / BIT(n) / ZEROFILL / CHAR(n) BINARY columns (bytes of ASCII range: a byte that is no UTF-8 cannot be stored by any column yet; no binary collation, no 0x00 padding, no BIT width)
+--DROP TABLE IF EXISTS bt
+--CREATE TABLE bt (id BINARY(16) PRIMARY KEY, name VARCHAR(20), h VARBINARY(8), flag BIT(1), n INT(5) ZEROFILL, c CHAR(3) BINARY, w BIT(8))
+INSERT INTO bt VALUES (UNHEX('00112233445566770102030405060708'), 'a', UNHEX('0A0B'), 1, 7, 'abc', 5)
+INSERT INTO bt VALUES (UNHEX('7F7E7D7C7B7A79780102030405060708'), 'b', UNHEX('0A0C'), 0, 8, 'xyz', 255)
+INSERT INTO bt VALUES (UNHEX('00112233445566770102030405060708'), 'dup', NULL, 1, 9, 'q', 1)
+SELECT HEX(id), name, HEX(h), flag + 0, n, w + 0 FROM bt ORDER BY name
+SELECT name FROM bt WHERE id = UNHEX('7F7E7D7C7B7A79780102030405060708')
+SELECT name FROM bt WHERE h = UNHEX('0A0B')
+SELECT COUNT(*) FROM bt WHERE flag = 1
+SELECT COUNT(*) FROM bt WHERE flag
+SELECT LENGTH(id), LENGTH(h) FROM bt ORDER BY name
+SELECT HEX(MAX(id)), HEX(MIN(id)) FROM bt
+UPDATE bt SET h = UNHEX('7F') WHERE name = 'a'
+SELECT HEX(h) FROM bt WHERE name = 'a'
+INSERT INTO bt (id, name, h) VALUES (UNHEX('02'), 'long', UNHEX('0102030405060708090A'))
+SELECT name FROM bt WHERE c = 'abc'
+SELECT name FROM bt WHERE name = 'A'
+INSERT INTO bt (id, name, c) VALUES (UNHEX('05'), 'toolong', 'abcd')

@@ -423,3 +423,22 @@ TEST_CASE("R97: typed literals, <=>, BETWEEN of constants, LOG / RADIANS / POW, 
     // DIV and MOD of NULL
     CHECK(rows_of(ex, "SELECT 5 DIV NULL, NULL DIV 5, 5 MOD NULL, 7 DIV 2, 7 DIV -2")[0] == std::vector<std::string>{"NULL", "NULL", "NULL", "3", "-3"});
 }
+
+// R97 -- BINARY(n), VARBINARY(n), BIT(n), ZEROFILL and CHAR(n) BINARY were no column types (CREATE TABLE said 1064). They are read now as the CHAR(n) / VARCHAR(n) that holds bytes and the unsigned
+// integer (no binary collation, no 0x00 padding, no BIT width; a byte that is no UTF-8 cannot be stored by any column yet).
+TEST_CASE("R97: BINARY, VARBINARY, BIT, ZEROFILL and CHAR BINARY columns are accepted", "[r97]") {
+    TempDataDir dir("r97_binary_types");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE bt (id BINARY(16) PRIMARY KEY, name VARCHAR(20), h VARBINARY(8), flag BIT(1), n INT(5) ZEROFILL, c CHAR(3) BINARY, w BIT(8))");
+    ok(ex, "INSERT INTO bt VALUES (UNHEX('00112233445566770102030405060708'), 'a', UNHEX('0A0B'), 1, 7, 'abc', 5)");
+    ok(ex, "INSERT INTO bt VALUES (UNHEX('7F7E7D7C7B7A79780102030405060708'), 'b', UNHEX('0A0C'), 0, 8, 'xyz', 255)");
+    CHECK(error_of(ex, "INSERT INTO bt VALUES (UNHEX('00112233445566770102030405060708'), 'dup', NULL, 1, 9, 'q', 1)").find("Duplicate") == 0);
+    CHECK(rows_of(ex, "SELECT HEX(id), name, HEX(h), flag + 0, n, w + 0 FROM bt ORDER BY name")[1] == std::vector<std::string>{"7F7E7D7C7B7A79780102030405060708", "b", "0A0C", "0", "8", "255"});
+    CHECK(text_of(ex, "SELECT name FROM bt WHERE id = UNHEX('7F7E7D7C7B7A79780102030405060708')") == "b");
+    CHECK(text_of(ex, "SELECT name FROM bt WHERE h = UNHEX('0A0B')") == "a");
+    CHECK(text_of(ex, "SELECT COUNT(*) FROM bt WHERE flag") == "1");
+    CHECK(text_of(ex, "SELECT HEX(MAX(id)) FROM bt") == "7F7E7D7C7B7A79780102030405060708");
+    ok(ex, "CREATE TABLE ty (a TINYINT ZEROFILL, b INT UNSIGNED ZEROFILL, c VARCHAR(5) BINARY, d BIT)");
+}

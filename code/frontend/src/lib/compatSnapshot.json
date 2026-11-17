@@ -574,9 +574,9 @@
       "name": "grid_r97",
       "en": "Grids of functions x edge values: typed literals DATE '..' / TIME '..' / TIMESTAMP '..', <=> and BETWEEN of texts and numbers, GREATEST / LEAST ties, LOG with a base below 1, RADIANS / DEGREES, POW / EXP / COT out of range, CAST of a text with an exponent, REGEXP with an empty pattern, FIND_IN_SET, bit operators of texts, DIV / MOD of NULL",
       "ko": "함수 x 극단값 격자: 형 있는 리터럴 DATE '..' · TIME '..' · TIMESTAMP '..', 글자와 수의 <=> · BETWEEN, GREATEST · LEAST 동점, 밑이 1 미만인 LOG, RADIANS · DEGREES, 범위를 넘는 POW · EXP · COT, 지수가 든 글자의 CAST, 빈 패턴의 REGEXP, FIND_IN_SET, 글자의 비트 연산, NULL의 DIV · MOD",
-      "statements": 1172,
+      "statements": 1188,
       "different": 0,
-      "bothFail": 26
+      "bothFail": 29
     },
     {
       "name": "system_schema_r86",
@@ -629,8 +629,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1061,
-    "assertions": 1527087
+    "cases": 1062,
+    "assertions": 1527111
   },
   "bugsFound": 206
 }
