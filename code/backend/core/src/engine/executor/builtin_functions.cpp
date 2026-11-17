@@ -426,7 +426,7 @@ std::string fn_find_in_set(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
     const std::string needle = c.value(0), list = c.value(1);
-    if (needle.find(',') != std::string::npos) return "0";
+    if (needle.find(',') != std::string::npos || list.empty()) return "0"; // (an empty list has no member, not even '')
     long long index = 1;
     std::size_t pos = 0;
     for (;;) {
@@ -657,8 +657,9 @@ std::string fn_cos(const BuiltinCall& c) { return math1(c, [](double x) { return
 std::string fn_tan(const BuiltinCall& c) { return math1(c, [](double x) { return std::tan(x); }); }
 std::string fn_asin(const BuiltinCall& c) { return math1(c, [](double x) { return std::asin(x); }, [](double x) { return x >= -1 && x <= 1; }); }
 std::string fn_acos(const BuiltinCall& c) { return math1(c, [](double x) { return std::acos(x); }, [](double x) { return x >= -1 && x <= 1; }); }
-std::string fn_degrees(const BuiltinCall& c) { return math1(c, [](double x) { return x * 180.0 / 3.14159265358979323846; }); }
-std::string fn_radians(const BuiltinCall& c) { return math1(c, [](double x) { return x * 3.14159265358979323846 / 180.0; }); }
+// (MySQL multiplies by the factor worked out first: RADIANS(1.5) is 0.026179938779914945, not the 0.02617993877991494 of x * pi / 180)
+std::string fn_degrees(const BuiltinCall& c) { return math1(c, [](double x) { return x * (180.0 / 3.14159265358979323846); }); }
+std::string fn_radians(const BuiltinCall& c) { return math1(c, [](double x) { return x * (3.14159265358979323846 / 180.0); }); }
 std::string fn_cot(const BuiltinCall& c) {
     if (argc(c) == 1 && !is_null(c.value(0)) && double_of(c.value(0)) == 0) throw StatementError("DOUBLE value is out of range in 'cot(0)'");
     return math1(c, [](double x) { return 1.0 / std::tan(x); });
@@ -681,7 +682,7 @@ std::string fn_log(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
     const double b = double_of(c.value(0)), x = double_of(c.value(1));
-    if (b <= 1 || x <= 0) return kNull;
+    if (b <= 0 || b == 1 || x <= 0) return kNull; // (a base between 0 and 1 is fine: LOG(0.1, 100) is -2)
     return format_double(std::log(x) / std::log(b));
 }
 
@@ -689,8 +690,7 @@ std::string fn_pow(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
     const double r = std::pow(double_of(c.value(0)), double_of(c.value(1)));
-    if (std::isnan(r)) return kNull;
-    if (std::isinf(r)) throw StatementError("DOUBLE value is out of range in 'pow(" + c.value(0) + "," + c.value(1) + ")'");
+    if (std::isnan(r) || std::isinf(r)) throw StatementError("DOUBLE value is out of range in 'pow(" + c.value(0) + "," + c.value(1) + ")'");
     return format_double(r);
 }
 
@@ -795,7 +795,8 @@ std::string extreme(const BuiltinCall& c, bool greatest) {
     std::size_t best = 0;
     for (std::size_t i = 1; i < argc(c); i++) {
         const std::string a = c.value(i), b = c.value(best);
-        const bool better = all_numbers ? (greatest ? double_of(a) > double_of(b) : double_of(a) < double_of(b)) : (greatest ? collation::compare(a, b) > 0 : collation::compare(a, b) < 0);
+        // (of values that are equal -- 'a' and 'A' -- GREATEST gives the last, LEAST the first)
+        const bool better = all_numbers ? (greatest ? double_of(a) >= double_of(b) : double_of(a) < double_of(b)) : (greatest ? collation::compare(a, b) >= 0 : collation::compare(a, b) < 0);
         if (better) best = i;
     }
     return c.value(best);
@@ -1705,7 +1706,7 @@ std::string fn_convert_tz(const BuiltinCall& c) {
 // ---- CAST / CONVERT ---------------------------------------------------------------------------------------------------------------------------
 
 // The number a string starts with, as MySQL converts a string to a number for CAST: sign, digits and a fraction (no exponent).
-Decimal string_prefix_decimal(const std::string& s) {
+Decimal string_prefix_decimal(const std::string& s, bool with_exponent = false) {
     std::size_t i = 0;
     while (i < s.size() && (s[i] == ' ' || s[i] == '	')) i++;
     std::size_t start = i;
@@ -1717,17 +1718,40 @@ Decimal string_prefix_decimal(const std::string& s) {
         while (i < s.size() && s[i] >= '0' && s[i] <= '9') i++, digits++;
     }
     if (digits == 0) return Decimal{};
-    if (auto d = Decimal::parse(s.substr(start, i - start))) return *d;
+    std::string mantissa = s.substr(start, i - start);
+    // an exponent after the digits ('4e2' is 400): the point of the mantissa moves
+    if (with_exponent && i + 1 < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        std::size_t j = i + 1;
+        bool negative_exponent = false;
+        if (s[j] == '+' || s[j] == '-') negative_exponent = s[j++] == '-';
+        const std::size_t exponent_digits = j;
+        long long exponent = 0;
+        while (j < s.size() && s[j] >= '0' && s[j] <= '9' && exponent < 1000) exponent = exponent * 10 + (s[j++] - '0');
+        if (j > exponent_digits && exponent <= 100) {
+            const bool minus = !mantissa.empty() && mantissa[0] == '-';
+            if (!mantissa.empty() && (mantissa[0] == '-' || mantissa[0] == '+')) mantissa.erase(0, 1);
+            const std::size_t dot = mantissa.find('.');
+            const std::string whole = dot == std::string::npos ? mantissa : mantissa.substr(0, dot);
+            const std::string all_digits = whole + (dot == std::string::npos ? std::string() : mantissa.substr(dot + 1));
+            const long long point = static_cast<long long>(whole.size()) + (negative_exponent ? -exponent : exponent);
+            std::string moved;
+            if (point <= 0) moved = "0." + std::string(static_cast<std::size_t>(-point), '0') + all_digits;
+            else if (point >= static_cast<long long>(all_digits.size())) moved = all_digits + std::string(static_cast<std::size_t>(point) - all_digits.size(), '0');
+            else moved = all_digits.substr(0, static_cast<std::size_t>(point)) + "." + all_digits.substr(static_cast<std::size_t>(point));
+            mantissa = (minus ? "-" : "") + moved;
+        }
+    }
+    if (auto d = Decimal::parse(mantissa)) return *d;
     return Decimal{};
 }
 
-Decimal cast_number(const BuiltinCall& c, const std::string& value) {
+Decimal cast_number(const BuiltinCall& c, const std::string& value, bool with_exponent = false) {
     if (value == "true") return *Decimal::parse("1");
     if (value == "false") return Decimal{};
     if (!string_literal(c, 0)) {
         if (auto d = Decimal::parse(value)) return *d;
     }
-    return string_prefix_decimal(value);
+    return string_prefix_decimal(value, with_exponent);
 }
 
 // A negative number as an unsigned one: MySQL makes it a BIGINT first, so what is below the smallest BIGINT is the smallest (2^63), the rest wraps round
@@ -1780,7 +1804,7 @@ std::string fn_cast(const BuiltinCall& c) {
         if (precision < 1) precision = 10;
         if (scale < 0) scale = 0;
         if (scale > precision) scale = precision;
-        Decimal d = cast_number(c, val).rounded(scale, false);
+        Decimal d = cast_number(c, val, true).rounded(scale, false); // (a DECIMAL reads the exponent of a text: '4e2' is 400, as a SIGNED reads 4)
         if (static_cast<long long>(d.integer == "0" ? 0 : d.integer.size()) > precision - scale) { // too many digits: the largest value that fits
             d.integer = std::string(static_cast<std::size_t>(precision - scale), '9');
             if (precision == scale) d.integer = "0";
@@ -1834,8 +1858,8 @@ std::string fn_cast(const BuiltinCall& c) {
 
 // ---- operators written as functions (the parser makes them) ---------------------------------------------------------------------------------
 
-unsigned long long unsigned_of(const std::string& text) {
-    const Decimal d = decimal_of(text).rounded(0, false);
+unsigned long long unsigned_of(const std::string& text, bool is_text = false) {
+    const Decimal d = decimal_of(text).rounded(0, is_text); // (a string is read as an integer up to its point: '5.5abc' | 0 is 5; a number is rounded: 5.5 | 0 is 6)
     if (d.integer.size() > 20) return d.negative ? 1ULL << 63 : std::numeric_limits<unsigned long long>::max();
     unsigned long long v = 0;
     for (char ch : d.integer) {
@@ -1846,21 +1870,21 @@ unsigned long long unsigned_of(const std::string& text) {
     return d.negative ? negative_as_unsigned(v) : v;
 }
 
-std::string fn_bit_and(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0)) & unsigned_of(c.value(1))); }
-std::string fn_bit_or(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0)) | unsigned_of(c.value(1))); }
-std::string fn_bit_xor(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0)) ^ unsigned_of(c.value(1))); }
-std::string fn_bit_not(const BuiltinCall& c) { if (argc(c) != 1) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(~unsigned_of(c.value(0))); }
+std::string fn_bit_and(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0), string_literal(c, 0)) & unsigned_of(c.value(1), string_literal(c, 1))); }
+std::string fn_bit_or(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0), string_literal(c, 0)) | unsigned_of(c.value(1), string_literal(c, 1))); }
+std::string fn_bit_xor(const BuiltinCall& c) { if (argc(c) != 2) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(unsigned_of(c.value(0), string_literal(c, 0)) ^ unsigned_of(c.value(1), string_literal(c, 1))); }
+std::string fn_bit_not(const BuiltinCall& c) { if (argc(c) != 1) wrong_count(c); if (any_null(c)) return kNull; return std::to_string(~unsigned_of(c.value(0), string_literal(c, 0))); }
 std::string fn_shl(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    const unsigned long long n = unsigned_of(c.value(1));
-    return n >= 64 ? "0" : std::to_string(unsigned_of(c.value(0)) << n);
+    const unsigned long long n = unsigned_of(c.value(1), string_literal(c, 1));
+    return n >= 64 ? "0" : std::to_string(unsigned_of(c.value(0), string_literal(c, 0)) << n);
 }
 std::string fn_shr(const BuiltinCall& c) {
     if (argc(c) != 2) wrong_count(c);
     if (any_null(c)) return kNull;
-    const unsigned long long n = unsigned_of(c.value(1));
-    return n >= 64 ? "0" : std::to_string(unsigned_of(c.value(0)) >> n);
+    const unsigned long long n = unsigned_of(c.value(1), string_literal(c, 1));
+    return n >= 64 ? "0" : std::to_string(unsigned_of(c.value(0), string_literal(c, 0)) >> n);
 }
 
 std::string fn_null_safe_eq(const BuiltinCall& c) {

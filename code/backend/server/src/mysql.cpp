@@ -260,12 +260,16 @@ WireError wire_error(const std::string& msg) {
     if (starts("Not unique table/alias")) return set(1066, "42000");
     if (starts("You can't specify target table")) return set(1093, "HY000");
     if (starts("Out of range value for column")) return set(1264, "22003");
-    if (starts("BIGINT value is out of range") || starts("BIGINT UNSIGNED value is out of range")) return set(1690, "22003");
+    if (starts("BIGINT value is out of range") || starts("BIGINT UNSIGNED value is out of range") || starts("DOUBLE value is out of range") || starts("DECIMAL value is out of range")) return set(1690, "22003");
+    if (starts("Illegal argument to a regular expression")) return set(3685, "HY000");
+    if (starts("Incorrect DATE value: ") || starts("Incorrect TIME value: ") || starts("Incorrect DATETIME value: ")) return set(1525, "HY000"); // (a DATE '..' literal that is none)
     if (starts("Data too long for column")) return set(1406, "22001");
     if (starts("Data truncated for column")) return set(1265, "01000");
     if (starts("Invalid use of NULL value")) return set(1138, "22004");
     if (starts("Invalid ENUM value") || starts("Invalid SET value")) return set(1265, "01000");
-    if (starts("Incorrect integer value: ") || starts("Incorrect decimal value: ") || starts("Incorrect double value: ")) return starts_as_number() ? set(1265, "01000") : set(1366, "HY000");
+    if (starts("Incorrect integer value: ")) return starts_as_number() ? set(1265, "01000") : set(1366, "HY000");
+    if (starts("Incorrect decimal value: ")) return set(1366, "HY000");  // (a DECIMAL column says "incorrect value" for '12abc' too)
+    if (starts("Incorrect double value: ")) return set(1265, "01000");   // (a FLOAT / DOUBLE column says "data truncated", 'abc' included)
     if (starts("Truncated incorrect ") || starts("Incorrect date value") || starts("Incorrect time value") || starts("Incorrect datetime value")) return set(1292, "22007");
     if (starts("Division by 0")) return set(1365, "22012");
     if (starts("Operand should contain")) return set(1241, "21000");
@@ -440,9 +444,10 @@ WireType wire_type_for(const ResultColumnType& type, const std::vector<std::vect
                 else if constexpr (std::is_same_v<T, DataType::Double>) return make(5, 22, 31, Check::Number);
                 else if constexpr (std::is_same_v<T, DataType::Decimal>) return make(246, static_cast<std::uint32_t>(alt.precision) + (alt.scale ? 2 : 1), alt.scale, Check::Number);
                 else if constexpr (std::is_same_v<T, DataType::Date>) return make(10, 10, 0, Check::Date);
-                else if constexpr (std::is_same_v<T, DataType::DateTime>) return make(12, 19, 0, Check::DateTime);
-                else if constexpr (std::is_same_v<T, DataType::Timestamp>) return make(7, 19, 0, Check::DateTime);
-                else if constexpr (std::is_same_v<T, DataType::Time>) return make(11, 10, 0, Check::Time);
+                // (DATETIME(3), TIMESTAMP(3), TIME(3): the digits of the fraction of a second go out as the decimals of the column, and a client writes them all)
+                else if constexpr (std::is_same_v<T, DataType::DateTime>) return make(12, 19 + (alt.fsp ? alt.fsp + 1u : 0u), alt.fsp, Check::DateTime);
+                else if constexpr (std::is_same_v<T, DataType::Timestamp>) return make(7, 19 + (alt.fsp ? alt.fsp + 1u : 0u), alt.fsp, Check::DateTime);
+                else if constexpr (std::is_same_v<T, DataType::Time>) return make(11, 10 + (alt.fsp ? alt.fsp + 1u : 0u), alt.fsp, Check::Time);
                 else return WireType();
             },
             c.data_type.data);

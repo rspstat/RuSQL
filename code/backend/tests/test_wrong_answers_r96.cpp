@@ -370,3 +370,56 @@ TEST_CASE("R96c: HAVING reads the names of the select list and the columns group
     CHECK(rows_of(ex, "SELECT * FROM (SELECT x AS k FROM ua) d WHERE k > 1 ORDER BY k") == column({"2", "3"})); // (a derived table's column is a column)
     CHECK(rows_of(ex, "SELECT a AS x FROM ua WHERE x > 1 ORDER BY a") == column({"20", "30"})); // (WHERE reads the column x, not the alias)
 }
+
+// R97 -- a sweep of statement grids (functions x edge values, compared with a real MySQL 8.4.9) found these; the answers below are the ones MySQL writes (corpus/grid_r97.sql compares more).
+TEST_CASE("R97: typed literals, <=>, BETWEEN of constants, LOG / RADIANS / POW, CAST of an exponent, REGEXP '', bit operators of texts", "[r97]") {
+    TempDataDir dir("r97_grid_fixes");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    // DATE '..', TIME '..' and TIMESTAMP '..' are literals of that type
+    CHECK(text_of(ex, "SELECT DATE '2024-01-31'") == "2024-01-31");
+    CHECK(text_of(ex, "SELECT TIME '10:20:30'") == "10:20:30");
+    CHECK(text_of(ex, "SELECT TIMESTAMP '2024-01-31 10:20:30'") == "2024-01-31 10:20:30");
+    CHECK(text_of(ex, "SELECT TIMESTAMP '2024-01-31 10:20:30.5'") == "2024-01-31 10:20:30.5");
+    CHECK(text_of(ex, "SELECT DATE '2024-01-31' + INTERVAL 1 DAY") == "2024-02-01");
+    CHECK(text_of(ex, "SELECT DATEDIFF(DATE '2024-02-01', DATE '2024-01-01')") == "31");
+    CHECK(text_of(ex, "SELECT DATE '2024-01-31' IN (DATE '2024-01-31')") == "1");
+    CHECK(text_of(ex, "SELECT GREATEST(DATE '2024-01-01', DATE '2024-02-01')") == "2024-02-01");
+    CHECK(text_of(ex, "SELECT COALESCE(NULL, DATE '2024-01-01')") == "2024-01-01");
+    CHECK(text_of(ex, "SELECT IF(1, DATE '2024-01-01', DATE '2024-02-01')") == "2024-01-01");
+    CHECK(text_of(ex, "SELECT CASE DATE '2024-01-31' WHEN DATE '2024-01-31' THEN 'm' ELSE 'n' END") == "m");
+    CHECK(text_of(ex, "SELECT DATE '2024-01-01' + 0") == "20240101");
+    CHECK(text_of(ex, "SELECT TIME '10:20:30' + 0") == "102030");
+    CHECK(text_of(ex, "SELECT TIMESTAMP '2024-01-01 10:20:30' + 0") == "20240101102030");
+    CHECK(text_of(ex, "SELECT 1 < DATE '2024-01-01'") == "1");
+    CHECK(text_of(ex, "SELECT 0 = DATE '2024-01-01'") == "0");
+    CHECK(text_of(ex, "SELECT 20240101 = DATE '2024-01-01'") == "1");
+    CHECK(text_of(ex, "SELECT DATE '2024-01-31' <=> '2024-01-31'") == "1");
+    CHECK(error_of(ex, "SELECT DATE '2024-13-01'").find("Incorrect DATE value: '2024-13-01'") == 0);
+    CHECK(error_of(ex, "SELECT DATE 'x'").find("Incorrect DATE value: 'x'") == 0);
+    CHECK(error_of(ex, "SELECT TIME 'x'").find("Incorrect TIME value: 'x'") == 0);
+    // <=> reads a text and a number as numbers, as = does
+    CHECK(rows_of(ex, "SELECT 0 <=> 'a', 1 <=> '1abc', '1' <=> 1, '1.0' <=> '1', NULL <=> NULL, 1 <=> NULL, NULL <=> 'a'")[0] == std::vector<std::string>{"1", "1", "1", "0", "1", "0", "0"});
+    CHECK(rows_of(ex, "SELECT 0 = 'a', 0 <=> '', 1.5 <=> '1.5', '1.5' <=> 1.5")[0] == std::vector<std::string>{"1", "1", "1", "1"});
+    // three constants of different types are compared as numbers
+    CHECK(rows_of(ex, "SELECT '1' BETWEEN '1.0' AND 5, '1' BETWEEN 'a' AND 5, 10 BETWEEN '9' AND '11', '10' BETWEEN '9' AND '11', '10' BETWEEN '9' AND 11")[0] == std::vector<std::string>{"1", "1", "1", "0", "1"});
+    // GREATEST / LEAST of values that are equal
+    CHECK(rows_of(ex, "SELECT GREATEST('a', 'A'), GREATEST('A', 'a'), LEAST('a', 'A'), LEAST('A', 'a')")[0] == std::vector<std::string>{"A", "a", "a", "A"});
+    // LOG with a base below 1, RADIANS and DEGREES as MySQL multiplies, POW out of range
+    CHECK(rows_of(ex, "SELECT LOG(0.1, 100), LOG(0.5, 8), LOG(2, 8), LOG(1, 8), LOG(0, 8), LOG(-2, 8)")[0] == std::vector<std::string>{"-2.0000000000000004", "-3", "3", "NULL", "NULL", "NULL"});
+    CHECK(rows_of(ex, "SELECT RADIANS(1.5), RADIANS(1e10), DEGREES(0.1), DEGREES(5.5)")[0] == std::vector<std::string>{"0.026179938779914945", "174532925.19943297", "5.729577951308233", "315.12678732195275"});
+    CHECK(error_of(ex, "SELECT POW(-1, 1.5)").find("DOUBLE value is out of range in '") == 0);
+    CHECK(error_of(ex, "SELECT POW(0, -1)").find("DOUBLE value is out of range in '") == 0);
+    CHECK(error_of(ex, "SELECT EXP(1e10)").find("DOUBLE value is out of range in '") == 0);
+    CHECK(error_of(ex, "SELECT COT(0)").find("DOUBLE value is out of range in '") == 0);
+    // an exponent in a text read as a DECIMAL, not as an integer
+    CHECK(rows_of(ex, "SELECT CAST('4e2' AS DECIMAL), CAST('4e2' AS DECIMAL(10,2)), CAST('4e2' AS SIGNED), CAST('1.5e1' AS DECIMAL(10,1)), CAST('1e-2' AS DECIMAL(10,3))")[0] == std::vector<std::string>{"400", "400.00", "4", "15.0", "0.010"});
+    // REGEXP with an empty pattern, FIND_IN_SET of an empty list
+    CHECK(error_of(ex, "SELECT 'a' REGEXP ''").find("Illegal argument to a regular expression") == 0);
+    CHECK(rows_of(ex, "SELECT FIND_IN_SET('', ''), FIND_IN_SET('a', ''), FIND_IN_SET('', 'a,,b'), FIND_IN_SET('b', 'a,b')")[0] == std::vector<std::string>{"0", "0", "2", "2"});
+    // a text is read as an integer up to its point by the bit operators
+    CHECK(rows_of(ex, "SELECT '5.5abc' | 0, 0 ^ '5.5abc', 1 << '5.5abc', 5.5 | 0, -1 >> '5.5abc', ~'5.5abc'")[0] == std::vector<std::string>{"5", "5", "32", "6", "576460752303423487", "18446744073709551610"});
+    // DIV and MOD of NULL
+    CHECK(rows_of(ex, "SELECT 5 DIV NULL, NULL DIV 5, 5 MOD NULL, 7 DIV 2, 7 DIV -2")[0] == std::vector<std::string>{"NULL", "NULL", "NULL", "3", "-3"});
+}

@@ -641,6 +641,19 @@ std::string Executor::eval_arith_value(const Row& row, const ArithExpr& expr) {
         });
     }
     if (auto* v = std::get_if<ArithExpr::Func>(&expr.data)) {
+        if (v->name == "OP_NULL_SAFE_EQ" && v->args.size() == 2) {
+            // a <=> b is a = b that is 1 for two NULLs and 0 for one: a text and a number are compared as numbers (0 <=> 'a' is 1), as `=` does
+            const std::string lv = eval_arith_exact(row, v->args[0]), rv = eval_arith_exact(row, v->args[1]);
+            const bool lnull = lv == EXECUTOR_NULL_VALUE, rnull = rv == EXECUTOR_NULL_VALUE;
+            if (lnull || rnull) return lnull && rnull ? "1" : "0";
+            int order = compare_classed(class_of_expr(v->args[0]), class_of_expr(v->args[1]), lv, rv);
+            if (number_shape::fixed_places(v->args[0]) >= 0 || number_shape::fixed_places(v->args[1]) >= 0) { // (PI() <=> 3.141593: see eval_single3)
+                const int lp = number_shape::places_of(v->args[0]), rp = number_shape::places_of(v->args[1]);
+                const auto a = parse_number(lv), b = parse_number(rv);
+                if (lp >= 0 && rp >= 0 && a && b) order = std::fabs(*a - *b) < 5.0 / std::pow(10.0, std::max(lp, rp) + 1) ? 0 : (*a < *b ? -1 : 1);
+            }
+            return order == 0 ? "1" : "0";
+        }
         if (v->name == "CASE") {
             // CASE(when1, then1, when2, then2, .. [, else]): the first branch whose condition is true (not false, not unknown) gives the value
             const std::size_t branches = v->args.size() / 2;
@@ -913,9 +926,23 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         // still say FALSE (so BETWEEN never selects and NOT BETWEEN selects what the other bound rules out)
         std::string between_val = left_viewed && (!bv->lo_quoted || !bv->hi_quoted) ? view_number(left_view, val) : val;
         if (left_single) between_val = widen_single(between_val);
+        // Three constants get one type in MySQL: a number among texts makes them all numbers ('1' BETWEEN '1.0' AND 5 is 1: 1 >= 1.0), only three texts are compared as texts. A column on the
+        // left is compared with each bound as it is with `=` (s BETWEEN '7.0' AND 10 reads the text of s against '7.0' as text and against 10 as a number).
+        const ValueClass lo_class = written_class(bv->lo, bv->lo_quoted), hi_class = written_class(bv->hi, bv->hi_quoted);
+        const bool left_constant = std::holds_alternative<ArithExpr::Str>(cond.left.data) || std::holds_alternative<ArithExpr::Num>(cond.left.data);
+        const bool as_numbers = left_constant && !left_viewed && left_class != ValueClass::Unknown && lo_class != ValueClass::Unknown && hi_class != ValueClass::Unknown &&
+                                (left_class == ValueClass::Number || lo_class == ValueClass::Number || hi_class == ValueClass::Number) &&
+                                left_class != ValueClass::Json && lo_class != ValueClass::Json && hi_class != ValueClass::Json;
         auto side = [&](const std::string& bound, bool quoted, bool lower) {
             if (bound == EXECUTOR_NULL_VALUE) return Tri::Unknown;
-            const int order = compare_written(between_val, bound, quoted);
+            int order;
+            if (as_numbers && fixed_left_places < 0) {
+                const ValueClass lc = left_class == ValueClass::Text ? ValueClass::Number : left_class;
+                const ValueClass rc = written_class(bound, quoted) == ValueClass::Text ? ValueClass::Number : written_class(bound, quoted);
+                order = compare(lc, rc, between_val, bound, quoted);
+            } else {
+                order = compare_written(between_val, bound, quoted);
+            }
             return tri(lower ? order >= 0 : order <= 0);
         };
         const Tri low = side(bv->lo, bv->lo_quoted, true), high = side(bv->hi, bv->hi_quoted, false);
@@ -1061,12 +1088,14 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         case Operator::NotLike:
             return tri(!like_match(val, *effective_lit));
         case Operator::Regexp:
+            if (effective_lit->empty()) throw StatementError("Illegal argument to a regular expression."); // (an empty pattern: MySQL 3685)
             try {
                 return tri(std::regex_search(val, std::regex(*effective_lit, kRegexFlags)));
             } catch (...) {
                 return Tri::False;
             }
         case Operator::NotRegexp:
+            if (effective_lit->empty()) throw StatementError("Illegal argument to a regular expression.");
             try {
                 return tri(!std::regex_search(val, std::regex(*effective_lit, kRegexFlags)));
             } catch (...) {

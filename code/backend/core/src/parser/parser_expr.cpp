@@ -7,6 +7,7 @@
 
 #include "engine/like_escape.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/sql_value_util.hpp"
 
 namespace engine {
 
@@ -878,6 +879,48 @@ std::string Parser::aggregate_argument_text(const ArithExpr& arg) {
 }
 
 /// Arithmetic factor: number | string | column | agg_func | '(' expr ')'
+// DATE '2024-01-31', TIME '10:20:30.5', TIMESTAMP '2024-01-31 10:20:30': CAST(<the string> AS DATE / TIME(1) / DATETIME(0)), the fraction of a second as many places as it is written with.
+// A string that is no date or time is an error where it stands (MySQL 1525), not NULL as CAST gives.
+static ArithExpr typed_literal(TokenKind kind, const std::string& text) {
+    auto places = [&] {
+        const std::size_t dot = text.rfind('.');
+        std::size_t n = 0;
+        if (dot != std::string::npos) {
+            while (dot + 1 + n < text.size() && std::isdigit(static_cast<unsigned char>(text[dot + 1 + n]))) n++;
+        }
+        return std::min<std::size_t>(n, 6);
+    };
+    std::string type;
+    if (kind == TokenKind::Date) {
+        const auto t = sqlval::parse_datetime(text);
+        if (!t || !t->has_date || !t->valid_date()) throw ParseError("Incorrect DATE value: '" + text + "'");
+        type = "DATE";
+    } else if (kind == TokenKind::Time) {
+        // [-]h[h..]:mm[:ss[.ffffff]] or a number of hhmmss: the digits and colons of a time
+        std::size_t i = !text.empty() && text[0] == '-' ? 1 : 0;
+        const std::size_t first_digit = i;
+        bool ok = false;
+        while (i < text.size() && (std::isdigit(static_cast<unsigned char>(text[i])) || text[i] == ':')) i++;
+        ok = i > first_digit && std::isdigit(static_cast<unsigned char>(text[first_digit]));
+        if (ok && i < text.size() && text[i] == '.') {
+            i++;
+            const std::size_t fraction = i;
+            while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) i++;
+            ok = i > fraction;
+        }
+        if (!ok || i != text.size()) throw ParseError("Incorrect TIME value: '" + text + "'");
+        type = "TIME(" + std::to_string(places()) + ")";
+    } else {
+        const auto t = sqlval::parse_datetime(text);
+        if (!t || !t->has_date || !t->valid_date()) throw ParseError("Incorrect DATETIME value: '" + text + "'");
+        type = "DATETIME(" + std::to_string(places()) + ")";
+    }
+    std::vector<ArithExpr> args;
+    args.push_back(ArithExpr(ArithExpr::Str{text}));
+    args.push_back(ArithExpr(ArithExpr::Str{type}));
+    return ArithExpr(ArithExpr::Func{"CAST", std::move(args)});
+}
+
 ArithExpr Parser::parse_arith_factor() {
     const Token* p = peek();
     if (!p) throw ParseError("Expected expression term");
@@ -891,6 +934,14 @@ ArithExpr Parser::parse_arith_factor() {
         std::vector<ArithExpr> args;
         args.push_back(parse_arith_factor());
         return ArithExpr(ArithExpr::Func{"OP_BIT_NOT", std::move(args)});
+    }
+
+    // DATE '2024-01-31', TIME '10:20:30', TIMESTAMP '2024-01-31 10:20:30': a literal of that type -- the CAST of the string; one that is no date or time is an error at once (1525)
+    if ((p->kind == TokenKind::Date || p->kind == TokenKind::Time || p->kind == TokenKind::Timestamp || p->kind == TokenKind::Datetime) && peek_at_is(1, TokenKind::StringLit) && peek_at(1)->word != "hex") {
+        const TokenKind kind = p->kind;
+        advance();
+        const std::string text = advance()->text;
+        return typed_literal(kind, text);
     }
 
     // Aggregate functions → stored as Col("COUNT(*)")
@@ -1346,7 +1397,8 @@ ArithExpr Parser::parse_arith_term() {
             left = ArithExpr(ArithExpr::Func{"MOD", std::move(args)});
         } else if (((peek_is(TokenKind::Ident) && to_upper(peek()->text) == "DIV") || peek_is(TokenKind::Mod)) && peek_at(1) &&
                    (peek_at(1)->kind == TokenKind::NumberLit || peek_at(1)->kind == TokenKind::StringLit || peek_at(1)->kind == TokenKind::Ident ||
-                    peek_at(1)->kind == TokenKind::LParen || peek_at(1)->kind == TokenKind::Minus || peek_at(1)->kind == TokenKind::At)) {
+                    peek_at(1)->kind == TokenKind::LParen || peek_at(1)->kind == TokenKind::Minus || peek_at(1)->kind == TokenKind::At || peek_at(1)->kind == TokenKind::Null ||
+                    peek_at(1)->kind == TokenKind::Plus || peek_at(1)->kind == TokenKind::Tilde)) {
             // a DIV b: the integer part of a / b (towards zero), NULL for a zero divisor; a MOD b (the keyword MOD, which also names the function MOD(a, b)) is a % b
             const bool modulo = peek_is(TokenKind::Mod);
             advance();

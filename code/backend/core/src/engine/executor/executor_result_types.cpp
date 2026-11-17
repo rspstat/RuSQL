@@ -64,7 +64,7 @@ bool integer_type(const DataType& t) {
 // a function that gives a number (the list of the comparisons, and the ones that tell about the session or count something)
 bool numeric_function(const std::string& name) {
     static const std::unordered_set<std::string> more = {"LAST_INSERT_ID", "ROW_COUNT", "FOUND_ROWS", "BIT_COUNT", "PERIOD_ADD", "PERIOD_DIFF", "YEARWEEK",
-                                                         "TO_SECONDS", "REGEXP_INSTR", "SLEEP", "TIMESTAMPADD", "CONNECTION_ID", "DEGREES", "RADIANS", "ATAN",
+                                                         "TO_SECONDS", "REGEXP_INSTR", "SLEEP", "TIMESTAMPADD", "CONNECTION_ID", "DEGREES", "RADIANS", "ATAN", "ATAN2",
                                                          "ASIN", "ACOS", "COT", "CRC32", "QUARTER", "TO_DAYS", "MICROSECOND", "LAST_INSERT_ROWID"};
     return function_result_class(name) == ValueClass::Number || more.count(upper(name)) > 0;
 }
@@ -331,9 +331,17 @@ private:
         if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return double_expression(*v->lhs, sel, sources) || double_expression(*v->rhs, sel, sources);
         if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
             if (floating_function(f->name)) return true;
-            // (the functions that give what they are given; LENGTH of a text is an integer)
-            static const std::unordered_set<std::string> passes = {"ROUND", "TRUNCATE", "ABS", "MOD", "GREATEST", "LEAST", "COALESCE", "IFNULL", "NULLIF", "IF", "CEIL", "CEILING", "FLOOR", "SIGN"};
+            // CAST(x AS DOUBLE / FLOAT / REAL)
+            if ((upper(f->name) == "CAST" || upper(f->name) == "CONVERT") && f->args.size() == 2) {
+                if (auto* type = std::get_if<ArithExpr::Str>(&f->args[1].data)) {
+                    const std::string t = upper(type->value);
+                    return t.rfind("DOUBLE", 0) == 0 || t.rfind("FLOAT", 0) == 0 || t.rfind("REAL", 0) == 0;
+                }
+            }
+            // (the functions that give what they are given; LENGTH of a text is an integer, and so is SIGN of anything)
+            static const std::unordered_set<std::string> passes = {"ROUND", "TRUNCATE", "ABS", "MOD", "GREATEST", "LEAST", "COALESCE", "IFNULL", "NULLIF", "IF", "CEIL", "CEILING", "FLOOR"};
             if (!passes.count(upper(f->name))) return false;
+            if (upper(f->name) == "NULLIF") return !f->args.empty() && double_expression(f->args[0], sel, sources); // (the type of its first argument)
             for (const ArithExpr& a : f->args) {
                 if (double_expression(a, sel, sources)) return true;
             }
@@ -441,7 +449,7 @@ private:
                 out.push_back({aa->alias, aggregate(aa->func, aa->source.empty() ? aa->col : aa->source, sel, sources)});
             } else if (auto* fn = std::get_if<SelectColumn::Func>(&item.data)) {
                 bool floating = floating_function(fn->name);
-                static const std::unordered_set<std::string> passes = {"ROUND", "TRUNCATE", "ABS", "MOD", "GREATEST", "LEAST", "CEIL", "CEILING", "FLOOR", "SIGN"};
+                static const std::unordered_set<std::string> passes = {"ROUND", "TRUNCATE", "ABS", "MOD", "GREATEST", "LEAST", "CEIL", "CEILING", "FLOOR"};
                 for (const std::string& a : fn->args) {
                     if (floating || !passes.count(upper(fn->name))) break;
                     try {
