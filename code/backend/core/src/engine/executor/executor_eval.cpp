@@ -18,6 +18,7 @@
 
 #include "engine/collation.hpp"
 #include "engine/executor/builtin_functions.hpp"
+#include "engine/number_shape.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/result_text.hpp"
@@ -99,8 +100,7 @@ std::string widen_single(const std::string& text) {
     if (!number) return text;
     const double widened = static_cast<double>(static_cast<float>(*number));
     if (widened == *number) return text; // (a number a single-precision float holds exactly -- 0.5, 100 -- reads the same)
-    char digits[40];
-    return std::string(digits, std::to_chars(digits, digits + sizeof digits, widened).ptr);
+    return sqlval::format_double(widened); // (written as MySQL writes a DOUBLE: 9.999999747378752e-6, not the 9.999999747378752e-06 of to_chars)
 }
 
 // What a value is when a number is asked of it: nothing special (Plain), or a date, a time, an ENUM or a SET -- the column itself, or (a date function) only its kind
@@ -329,6 +329,7 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
     }
     if (column && (column->approx || column->cls == ValueClass::Text)) v.approx = true; // (a FLOAT / DOUBLE column or a text column: floating point, as in MySQL)
     if (column && column->single) v.dbl = static_cast<double>(static_cast<float>(v.dbl)); // (a FLOAT is the single-precision number: 0.1 is 0.10000000149011612)
+    if (auto* pi = std::get_if<ArithExpr::Func>(&e.data); pi && pi->args.empty() && number_shape::upper_of(pi->name) == "PI") v.approx = true; // (PI() is a DOUBLE: 3.141592653589793, not an exact decimal)
     if (std::holds_alternative<ArithExpr::Func>(e.data) && Executor::single_result(e)) { // (so is the value of COALESCE(f, 0): and arithmetic on a FLOAT is floating point)
         v.approx = true;
         v.dbl = static_cast<double>(static_cast<float>(v.dbl));
@@ -338,10 +339,12 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
 }
 
 // `exact`: every digit the operations kept, not only the digits the result shows
+// `shown`: the places the result shows (-1 for a DOUBLE): what ROUND / TRUNCATE cap their places at, as MySQL does
 template <class Leaf>
-std::string arithmetic_text(const ArithExpr& e, Leaf leaf, bool exact = false, bool* approx = nullptr) {
+std::string arithmetic_text(const ArithExpr& e, Leaf leaf, bool exact = false, bool* approx = nullptr, int* shown = nullptr) {
     NumVal v = number_tree(e, leaf);
     if (approx) *approx = v.approx;
+    if (shown) *shown = v.approx || v.null ? -1 : (v.is_int && !v.has_num ? 0 : v.scale);
     if (v.null) return EXECUTOR_NULL_VALUE;
     if (v.approx) return sqlval::format_double(v.dbl);
     if (v.is_int && !v.has_num) return std::to_string(v.i);
@@ -351,6 +354,34 @@ std::string arithmetic_text(const ArithExpr& e, Leaf leaf, bool exact = false, b
 
 // The functions that do arithmetic on a number they are given: FLOOR(10 / 3 * 3) is 9 in MySQL (the product holds 9.999999999), ROUND(8 / 59.27, 2) is 0.13
 // (not the 0.14 of the 0.1350 the quotient shows). The others (ABS, GREATEST, IFNULL, CAST ... AS CHAR) hand on the number as it shows.
+// The functions that read their arguments as TEXT: a FLOAT is then the six digits MySQL writes it with (CONCAT(f, '') is 3.14159, LENGTH(f) is 7), not the shortest text that
+// reads back as the single-precision number (3.1415927) that the column stores (R96)
+bool reads_text(const std::string& upper) {
+    static const std::unordered_set<std::string> names = {"CONCAT", "CONCAT_WS", "UPPER", "UCASE", "LOWER", "LCASE", "LENGTH", "OCTET_LENGTH", "CHAR_LENGTH", "CHARACTER_LENGTH",
+                                                          "SUBSTR", "SUBSTRING", "MID", "LEFT", "RIGHT", "REPLACE", "LPAD", "RPAD", "TRIM", "LTRIM", "RTRIM", "REVERSE", "REPEAT",
+                                                          "INSERT", "SUBSTRING_INDEX", "INSTR", "LOCATE", "POSITION", "STRCMP", "CAST", "CONVERT", "ASCII", "ORD"};
+    return names.count(upper) > 0;
+}
+
+// A CASE whose results are FLOAT columns (and NULLs) gives a FLOAT as a column does
+bool case_of_float_columns(const ArithExpr& e) {
+    auto* f = std::get_if<ArithExpr::Func>(&e.data);
+    if (!f || f->name != "CASE") return false;
+    bool any = false;
+    auto result = [&](const ArithExpr& r) {
+        if (auto* str = std::get_if<ArithExpr::Str>(&r.data); str && str->value == EXECUTOR_NULL_VALUE) return true;
+        if (auto* num = std::get_if<ArithExpr::Num>(&r.data); num && !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos) return true; // (a whole number keeps a FLOAT a FLOAT)
+        auto* col = std::get_if<ArithExpr::Col>(&r.data);
+        any = any || (col && col->single);
+        return col && col->single && col->kind == ColKind::Plain && col->outer == 0;
+    };
+    for (std::size_t i = 1; i < f->args.size(); i += 2) {
+        if (!result(f->args[i])) return false;
+    }
+    if (f->args.size() % 2 == 1 && !result(f->args.back())) return false;
+    return any;
+}
+
 bool takes_exact_numbers(const std::string& upper) {
     static const std::unordered_set<std::string> names = {"ROUND", "TRUNCATE", "FLOOR", "CEIL", "CEILING", "SQRT", "POW", "POWER", "EXP", "LN", "LOG",
                                                           "LOG2", "LOG10", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "COT", "DEGREES",
@@ -525,20 +556,32 @@ std::string Executor::format_arith_result(double f) {
 
 // apply_scalar_func is implemented in executor_scalar_func.cpp.
 
-std::string Executor::eval_arith_exact(const Row& row, const ArithExpr& expr, bool* approx) {
+std::string Executor::eval_arith_exact(const Row& row, const ArithExpr& expr, bool* approx, int* places) {
     if (approx) *approx = false;
+    if (places) *places = -1;
     if (std::holds_alternative<ArithExpr::Add>(expr.data) || std::holds_alternative<ArithExpr::Sub>(expr.data) ||
         std::holds_alternative<ArithExpr::Mul>(expr.data) || std::holds_alternative<ArithExpr::Div>(expr.data)) {
         return arithmetic_text(expr, [&](const ArithExpr& leaf) {
             const std::string* held = held_average_through(row, leaf, [&](const ArithExpr& x) { return eval_arith(row, x); });
             return held ? *held : eval_arith(row, leaf);
-        }, true, approx);
+        }, true, approx, places);
     }
-    if (const std::string* held = held_average_through(row, expr, [&](const ArithExpr& x) { return eval_arith(row, x); })) return held->substr(0, held->find('\x02')); // (AVG(v) = 1.6667: the quotient has 1.666666666)
+    if (const std::string* held = held_average_through(row, expr, [&](const ArithExpr& x) { return eval_arith(row, x); })) {
+        if (places) *places = held->find('\x02') == std::string::npos ? -1 : std::atoi(held->c_str() + held->find('\x02') + 1);
+        return held->substr(0, held->find('\x02')); // (AVG(v) = 1.6667: the quotient has 1.666666666)
+    }
     return eval_arith(row, expr);
 }
 
 std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
+    std::string value = eval_arith_value(row, expr);
+    if (auto* f = std::get_if<ArithExpr::Func>(&expr.data); f && value != EXECUTOR_NULL_VALUE && number_shape::picks_an_argument(f->name)) {
+        value = number_shape::written_with_places(value, number_shape::exact_scale(expr)); // (COALESCE(n, 0) with n DECIMAL(10,2) is 0.00 where n is NULL, as MySQL types it)
+    }
+    return value;
+}
+
+std::string Executor::eval_arith_value(const Row& row, const ArithExpr& expr) {
     if (auto* v = std::get_if<ArithExpr::Col>(&expr.data)) {
         std::string lower = v->name;
         std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -599,7 +642,9 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                 raw.reserve(v->args.size());
                 values.reserve(v->args.size());
                 kinds.reserve(v->args.size());
+                int first_places = -1; // the places the first argument shows when it is arithmetic on exact numbers (see below)
                 const bool numbers = wants_numbers(upper, v->args);
+                const bool text_args = !numbers && reads_text(upper); // (a FLOAT in them is written as MySQL writes it, with six digits)
                 for (auto& a : v->args) {
                     if (auto* c = std::get_if<ArithExpr::Col>(&a.data)) {
                         raw.push_back(c->name);
@@ -608,8 +653,10 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                         if (numbers && c->kind != ColKind::Plain && values.back() != EXECUTOR_NULL_VALUE) { // (a date is 20240102, an ENUM its place: a DOUBLE)
                             values.back() = column_number(*c, values.back());
                             kind = c->kind == ColKind::Enum || c->kind == ColKind::Set ? 'D' : 'C';
-                        } else if ((numbers || mixes_float) && c->single && values.back() != EXECUTOR_NULL_VALUE) {
+                        } else if ((numbers || mixes_float || upper == "FORMAT" || upper == "FIELD") && c->single && values.back() != EXECUTOR_NULL_VALUE) {
                             values.back() = widen_single(values.back()); // (SQRT of a FLOAT column reads the single-precision number; GREATEST(f, d) of a FLOAT and a DOUBLE column is a DOUBLE)
+                        } else if (text_args && c->single && c->kind == ColKind::Plain && values.back() != EXECUTOR_NULL_VALUE) {
+                            values.back() = sqlval::format_float_display(values.back()); // (CONCAT(f, '') is 3.14159)
                         }
                         kinds.push_back(kind);
                     } else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) {
@@ -622,14 +669,34 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
                         kinds.push_back('N');
                     } else {
                         bool approx = false;
-                        std::string value = exact_args ? eval_arith_exact(row, a, &approx) : eval_arith(row, a);
+                        int places = -1;
+                        std::string value = exact_args ? eval_arith_exact(row, a, &approx, &places) : eval_arith(row, a);
+                        if (&a == &v->args[0]) first_places = places;
                         if (numbers && value != EXECUTOR_NULL_VALUE && !std::holds_alternative<ArithExpr::Col>(a.data)) {
                             if (const View view = view_of(a); view.kind != ColKind::Plain) value = view_number(view, value); // (DATE(x) is 20240102)
                         }
                         if (mixes_float && value != EXECUTOR_NULL_VALUE && single_result(a)) value = widen_single(value); // (a FLOAT that is the value of a function of its own)
+                        if (text_args && value != EXECUTOR_NULL_VALUE) {
+                            if (const int fixed = number_shape::fixed_places(a); fixed >= 0) {
+                                if (const auto number = parse_number(value)) value = number_shape::with_places(*number, fixed); // (CONCAT(PI() * 2, '') is 6.283185)
+                            } else if (single_result(a)) {
+                                const auto* call = std::get_if<ArithExpr::Func>(&a.data);
+                                // (NULLIF has the type of its first argument -- a FLOAT, six digits; the others that pick an argument give a DOUBLE)
+                                value = call && number_shape::upper_of(call->name) == "NULLIF" ? sqlval::format_float_display(value) : widen_single(value);
+                            } // (the FLOAT a COALESCE(f, 0) gives is written as the double it widens to: 3.1415927410125732)
+                            else if (case_of_float_columns(a)) value = sqlval::format_float_display(value); // (a CASE over FLOAT columns gives them as a column does)
+                        }
                         raw.push_back("'" + value + "'");
                         values.push_back(std::move(value));
                         kinds.push_back(approx ? 'D' : 'E');
+                    }
+                }
+                // ROUND(x, D) / TRUNCATE(x, D) of an exact number stop at the places the number SHOWS (R96): ROUND(10 / 3, 6) is 3.3333 (a quotient shows 4 places, though it holds 9),
+                // ROUND(10 / 3 * 3, 6) is 10.0000, ROUND(AVG(v) * 3, 6) has the places the average shows. A DOUBLE and a column have no more places to cut off.
+                if ((upper == "ROUND" || upper == "TRUNCATE") && values.size() == 2 && first_places >= 0 && values[1] != EXECUTOR_NULL_VALUE) {
+                    if (const auto places = parse_number(values[1]); places && *places > first_places && *places == std::floor(*places)) {
+                        values[1] = std::to_string(first_places);
+                        raw[1] = values[1];
                     }
                 }
                 return call_builtin_with_values(upper, raw, values, kinds);
@@ -679,7 +746,12 @@ std::string Executor::eval_arith(const Row& row, const ArithExpr& expr) {
     if (auto* v = std::get_if<ArithExpr::Cmp>(&expr.data)) {
         std::string lv = eval_arith_exact(row, *v->lhs), rv = eval_arith_exact(row, *v->rhs);
         if (lv == EXECUTOR_NULL_VALUE || rv == EXECUTOR_NULL_VALUE) return EXECUTOR_NULL_VALUE; // a comparison with NULL is NULL
-        const int order = compare_classed(class_of_expr(*v->lhs), class_of_expr(*v->rhs), lv, rv);
+        int order = compare_classed(class_of_expr(*v->lhs), class_of_expr(*v->rhs), lv, rv);
+        if (number_shape::fixed_places(*v->lhs) >= 0 || number_shape::fixed_places(*v->rhs) >= 0) { // (PI() = 3.141593: see eval_single3)
+            const int lp = number_shape::places_of(*v->lhs), rp = number_shape::places_of(*v->rhs);
+            const auto a = parse_number(lv), b = parse_number(rv);
+            if (lp >= 0 && rp >= 0 && a && b) order = std::fabs(*a - *b) < 5.0 / std::pow(10.0, std::max(lp, rp) + 1) ? 0 : (*a < *b ? -1 : 1);
+        }
         bool result;
         if (v->op == ">") result = order > 0;
         else if (v->op == "<") result = order < 0;
@@ -738,6 +810,9 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     // (a comparison reads all the digits of an arithmetic expression: 8 / 59.27 >= 0.135 is false; LIKE and REGEXP read it as it shows)
     const bool compares_numbers = cond.op != Operator::Like && cond.op != Operator::NotLike && cond.op != Operator::Regexp && cond.op != Operator::NotRegexp;
     std::string val = compares_numbers ? eval_arith_exact(row, cond.left) : eval_arith(row, cond.left);
+    if (!compares_numbers && val != EXECUTOR_NULL_VALUE) { // (LIKE / REGEXP read a FLOAT column as the text MySQL writes it: f LIKE '%27' is false for 3.1415927, which is 3.14159)
+        if (auto* fc = std::get_if<ArithExpr::Col>(&cond.left.data); fc && fc->single && fc->kind == ColKind::Plain && fc->outer == 0) val = sqlval::format_float_display(val);
+    }
     // how the two sides compare: what each is (set by the binder; an expression that was not bound tells itself)
     ValueClass left_class = cond.left_class != ValueClass::Unknown ? cond.left_class : class_of_expr(cond.left);
     // A text compared with a number is read as a number; UPDATE and DELETE (StrictComparison) refuse one that is not wholly a number. Only a string counts: what the
@@ -795,6 +870,8 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     bool right_is_column = false; // (the value on the right is a column of the row, named without a qualifier or quotes)
     View right_view;
     bool right_viewed = false, right_single = false;
+    const ArithExpr* right_expr = nullptr; // (the right side, when it is an expression)
+    int right_literal_places = -1;         // ... or the places of a number written out there
 
     // Fix: the RHS of a comparison is now a full arithmetic expression
     // (ConditionValue::Arith) rather than always a single-token Literal, so
@@ -805,6 +882,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     if (auto* av = std::get_if<ConditionValue::Arith>(&cond.value.data)) {
         resolved = compares_numbers ? eval_arith_exact(row, av->expr) : eval_arith(row, av->expr);
         effective_lit = &resolved;
+        right_expr = &av->expr;
         right_view = view_of(av->expr);
         right_viewed = right_view.kind != ColKind::Plain;
         right_single = (std::holds_alternative<ArithExpr::Col>(av->expr.data) && std::get<ArithExpr::Col>(av->expr.data).single) ||
@@ -822,6 +900,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         bool is_ident_like = !lit_v->quoted && !lit.empty() && (std::isalpha(static_cast<unsigned char>(lit[0])) || lit[0] == '_') && !parse_f64(lit).has_value();
         effective_lit = &lit;
         right_sure = lit_v->quoted;
+        if (!lit_v->quoted && number_shape::plain_decimal(lit)) right_literal_places = lit.find('.') == std::string::npos ? 0 : static_cast<int>(lit.size() - lit.find('.') - 1);
         if (is_ident_like) {
             if (const std::string* v = get_col(row, lit)) {
                 resolved = *v;
@@ -873,12 +952,29 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
             }
         }
     }
-    if (left_single && !left_viewed) val = widen_single(val);
-    if (right_single && !right_viewed) resolved = widen_single(resolved);
+    if (left_single && !left_viewed && compares_numbers) val = widen_single(val); // (LIKE / REGEXP read the six digits a FLOAT is written with: see above)
+    if (right_single && !right_viewed && compares_numbers) resolved = widen_single(resolved);
+
+    // A DOUBLE with a fixed number of places (PI()) against an exact number or another such DOUBLE: MySQL takes the two as equal when they differ by less than 5 in the place after
+    // the places they both have -- PI() = 3.141593 and PI() <= 3.14159265 are true, PI() > 3.14159265 false (R96)
+    int tolerance_places = -1;
+    if (compares_numbers && left_class == ValueClass::Number && right_class == ValueClass::Number && (right_expr || !right_sure)) {
+        const int lp = number_shape::places_of(cond.left);
+        const int rp = right_expr ? number_shape::places_of(*right_expr) : right_literal_places;
+        const bool fixed = number_shape::fixed_places(cond.left) >= 0 || (right_expr && number_shape::fixed_places(*right_expr) >= 0);
+        if (fixed && lp >= 0 && rp >= 0) tolerance_places = std::max(lp, rp);
+    }
+    auto order_of = [&]() {
+        if (tolerance_places >= 0) {
+            const auto a = parse_number(val), b = parse_number(*effective_lit);
+            if (a && b) return std::fabs(*a - *b) < 5.0 / std::pow(10.0, tolerance_places + 1) ? 0 : (*a < *b ? -1 : 1);
+        }
+        return compare(left_class, right_class, val, *effective_lit, right_sure);
+    };
 
     switch (cond.op) {
-        case Operator::Eq: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) == 0);
-        case Operator::Ne: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) != 0);
+        case Operator::Eq: return tri(order_of() == 0);
+        case Operator::Ne: return tri(order_of() != 0);
         case Operator::In:
         case Operator::NotIn:
         case Operator::Exists:
@@ -903,10 +999,10 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         case Operator::Between:
         case Operator::NotBetween:
             return Tri::False;
-        case Operator::Gt: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) > 0);
-        case Operator::Lt: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) < 0);
-        case Operator::Gte: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) >= 0);
-        case Operator::Lte: return tri(compare(left_class, right_class, val, *effective_lit, right_sure) <= 0);
+        case Operator::Gt: return tri(order_of() > 0);
+        case Operator::Lt: return tri(order_of() < 0);
+        case Operator::Gte: return tri(order_of() >= 0);
+        case Operator::Lte: return tri(order_of() <= 0);
         default:
             return Tri::False;
     }

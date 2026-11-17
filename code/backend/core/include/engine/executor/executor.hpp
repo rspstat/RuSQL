@@ -1013,10 +1013,12 @@ private:
     // "table.col" or "col" lookup with dotted-suffix/bare-column fallback.
     static const std::string* get_col(const Row& row, const std::string& col);
     static std::string eval_arith(const Row& row, const ArithExpr& expr);
+    // eval_arith without the last step: COALESCE / IFNULL / GREATEST / LEAST write the value with the places of their widest argument (R96, engine/number_shape.hpp)
+    static std::string eval_arith_value(const Row& row, const ArithExpr& expr);
     // ... with all the digits an arithmetic expression worked with (a quotient keeps 9 fractional digits, eval_arith shows the dividend's scale plus 4):
     // what MySQL's numeric functions, comparisons and the DECIMAL / INT column a value is stored into read
-    // (`approx`: told whether the expression is worked out in floating point)
-    static std::string eval_arith_exact(const Row& row, const ArithExpr& expr, bool* approx = nullptr);
+    // (`approx`: told whether the expression is worked out in floating point; `places`: the places the value shows, -1 for a DOUBLE or when they cannot be told)
+    static std::string eval_arith_exact(const Row& row, const ArithExpr& expr, bool* approx = nullptr, int* places = nullptr);
     // What an expression gives, which says how it compares: a number for arithmetic, text for a string, what the column holds for a (bound)
     // column, a function's result class for a call (value_class.hpp).
     static ValueClass class_of_expr(const ArithExpr& expr);
@@ -1317,6 +1319,10 @@ private:
     static void apply_set_postprocess(std::vector<Row>& result, const std::vector<std::string>& cols, const std::vector<OrderBy>& order_by,
                                        std::optional<std::size_t> limit, std::optional<std::size_t> offset);
     static std::string format_set_result(const std::vector<std::string>& cols, const std::vector<Row>& result);
+    // The two sides of a UNION / INTERSECT / EXCEPT give a column of exact numbers the places of the widest side (1.5 UNION 2.25: 1.50 and 2.25; DECIMAL(10,2) with DECIMAL(10,4): 4
+    // places), as MySQL types it -- before the rows are compared, so that 1.50 and 1.5000 are one row (R96)
+    void unify_set_scales(const SharedDatabase& s, const Statement& left, const Statement& right, const std::vector<std::string>& left_cols, std::vector<Row>& left_rows,
+                          const std::vector<std::string>& right_cols, std::vector<Row>& right_rows) const;
 
     // ── Phase 8b: SELECT ─────────────────────────────────────────────────
     // NOTE ON SCOPE: the Rust original's exec_select additionally has (a) ~10

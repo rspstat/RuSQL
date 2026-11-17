@@ -48,6 +48,10 @@ struct BindScope {
     // qualifier that names no table may still be one of them
     bool lenient_qualifier = false;
     std::unordered_set<std::string> merged;   // the columns a USING / NATURAL join makes one: a name two tables have, and not ambiguous
+    // ... and which tables (their places in `tables`) each of those columns joins: a table that has the name but is not among them -- a later table of the chain that has `y` and is joined
+    // USING (x) -- is a second column of that name, and the name is ambiguous again (MySQL 1052)
+    std::unordered_map<std::string, std::unordered_set<std::size_t>> merged_tables;
+    std::vector<std::string> stars; // the tables `t.*` of the select list names ("" for a bare `*`)
     std::unordered_set<std::string> selected; // the names the select list gives its plain columns: ORDER BY / HAVING read them before the tables'
 };
 
@@ -103,6 +107,14 @@ void describe_column(ArithExpr::Col& col, const ColumnDef* def) {
     col.members.reset();
     col.fsp = 0;
     col.single = def && std::holds_alternative<DataType::Float>(def->data_type.data);
+    col.scale = -1;
+    if (def) {
+        const auto& type = def->data_type.data;
+        if (auto* dec = std::get_if<DataType::Decimal>(&type)) col.scale = static_cast<std::int8_t>(std::min<unsigned>(dec->scale, 30u));
+        else if (std::holds_alternative<DataType::Int>(type) || std::holds_alternative<DataType::BigInt>(type) || std::holds_alternative<DataType::SmallInt>(type) ||
+                 std::holds_alternative<DataType::TinyInt>(type))
+            col.scale = 0;
+    }
     if (!def) return;
     if (auto* e = std::get_if<DataType::Enum>(&def->data_type.data)) col.members = std::make_shared<const std::vector<std::string>>(e->values);
     else if (auto* s = std::get_if<DataType::Set>(&def->data_type.data)) col.members = std::make_shared<const std::vector<std::string>>(s->values);
@@ -392,12 +404,35 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             const bool reads_select_list = where == "order clause" || where == "having clause";
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
                 const BindScope& scope = **it;
-                std::size_t count = 0;
-                for (const BindTable& t : scope.tables) {
-                    if (!t.open && has_column(t, n)) count++;
+                std::size_t count = 0, outside = 0; // (the tables that have the name, and those of them no USING / NATURAL join made one with)
+                const auto group = scope.merged_tables.find(n);
+                for (std::size_t ti = 0; ti < scope.tables.size(); ti++) {
+                    const BindTable& t = scope.tables[ti];
+                    if (t.open || !has_column(t, n)) continue;
+                    count++;
+                    if (group == scope.merged_tables.end() || !group->second.count(ti)) outside++;
                 }
                 if (count == 0) continue;
-                if (count < 2 || scope.merged.count(n)) return false;
+                if (count < 2) return false;
+                if (scope.merged.count(n) && !(group != scope.merged_tables.end() && outside > 0)) return false;
+                if (reads_select_list && !scope.stars.empty() && scope.merged.count(n) && !scope.selected.count(n) && !scope.aliases.count(n)) {
+                    // `*` and `t.*` in the select list are columns of it as well: ORDER BY / HAVING read the one of that name, and a second one makes the name ambiguous again
+                    std::size_t hits = 0;
+                    for (const std::string& qualifier : scope.stars) {
+                        if (qualifier.empty()) { // (every table: a column a USING / NATURAL join made one counts once)
+                            hits += outside + (group != scope.merged_tables.end() && count > outside ? 1 : 0);
+                            continue;
+                        }
+                        std::string table = qualifier;
+                        for (auto& [alias, name] : scope.table_aliases) {
+                            if (ieq(alias, qualifier)) table = name;
+                        }
+                        for (const BindTable& t : scope.tables) {
+                            if (!t.open && (ieq(t.full, table) || ieq(t.bare, table)) && has_column(t, n)) hits++;
+                        }
+                    }
+                    if (hits == 1) return false;
+                }
                 if (reads_select_list && (scope.selected.count(n) || scope.aliases.count(n) ||
                                           std::any_of(scope.selected.begin(), scope.selected.end(), [&](const std::string& x) { return ieq(x, n); }))) return false;
                 return true;
@@ -722,7 +757,10 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             if (filter) cond(*filter, "field list");
             if (approx) *approx = !branches && argument_is_approx(column);
-            if (single) *single = !branches && (std::holds_alternative<AggFunc::Min>(func.data) || std::holds_alternative<AggFunc::Max>(func.data)) && argument_is_single(column);
+            if (single) {
+                *single = !branches && (std::holds_alternative<AggFunc::Min>(func.data) || std::holds_alternative<AggFunc::Max>(func.data) ||
+                                        std::holds_alternative<AggFunc::GroupConcat>(func.data)) && argument_is_single(column); // (GROUP_CONCAT joins the six digits a FLOAT is shown with, R96)
+            }
             const bool adds = std::holds_alternative<AggFunc::Sum>(func.data) || std::holds_alternative<AggFunc::Avg>(func.data) ||
                               std::holds_alternative<AggFunc::SumDistinct>(func.data) || std::holds_alternative<AggFunc::AvgDistinct>(func.data);
             if (!branches && adds) {
@@ -950,7 +988,16 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             const std::size_t base = scope.tables.size() - sel.joins.size(); // (a SELECT without FROM has no first table)
             for (std::size_t ji = 0; ji < sel.joins.size(); ji++) {
                 const Join& j = sel.joins[ji];
-                for (auto& c : j.using_cols) scope.merged.insert(c);
+                // the column `c` this join makes one: the tables before it that have it, and the table it joins
+                auto merge = [&](const std::string& c) {
+                    scope.merged.insert(c);
+                    auto& group = scope.merged_tables[c];
+                    for (std::size_t ti = 0; ti < base + ji; ti++) {
+                        if (!scope.tables[ti].open && has_column(scope.tables[ti], c)) group.insert(ti);
+                    }
+                    group.insert(base + ji);
+                };
+                for (auto& c : j.using_cols) merge(c);
                 if (j.join_type != JoinType::Natural) continue;
                 const BindTable& joined = scope.tables[base + ji];
                 std::vector<std::string> names;
@@ -961,12 +1008,16 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 }
                 for (auto& n : names) {
                     for (std::size_t ti = 0; ti < base + ji; ti++) {
-                        if (!scope.tables[ti].open && has_column(scope.tables[ti], n)) scope.merged.insert(n);
+                        if (!scope.tables[ti].open && has_column(scope.tables[ti], n)) {
+                            merge(n);
+                            break;
+                        }
                     }
                 }
             }
             // the names the select list gives
             for (auto& c : sel.columns) {
+                if (auto* all = std::get_if<SelectColumn::All>(&c.data)) scope.stars.push_back(all->table);
                 if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) scope.selected.insert(last_part(col->name));
                 if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) scope.aliases.insert(ca->alias);
                 else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) scope.aliases.insert(aa->alias);

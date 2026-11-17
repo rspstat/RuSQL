@@ -400,8 +400,15 @@ std::string fn_field(const BuiltinCall& c) {
     if (argc(c) < 2) wrong_count(c);
     const std::string v = c.value(0);
     if (is_null(v)) return "0";
+    // arguments that are numbers (none is a string written in quotes) are compared as numbers, as MySQL does: FIELD(2.0, 1, 2, 3) is 2, not 0 (R96)
+    bool numeric = !c.kinds.empty() && std::none_of(c.kinds.begin(), c.kinds.end(), [](char k) { return k == 'S'; }) && parse_number(v).has_value();
+    for (std::size_t i = 1; numeric && i < argc(c); i++) {
+        const std::string x = c.value(i);
+        if (!is_null(x) && !parse_number(x)) numeric = false;
+    }
     for (std::size_t i = 1; i < argc(c); i++) {
-        if (collation::equal(c.value(i), v)) return int_text(static_cast<long long>(i));
+        const std::string x = c.value(i);
+        if (numeric ? (!is_null(x) && *parse_number(x) == *parse_number(v)) : collation::equal(x, v)) return int_text(static_cast<long long>(i));
     }
     return "0";
 }

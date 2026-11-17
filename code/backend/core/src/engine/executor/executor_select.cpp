@@ -26,6 +26,7 @@
 #include "engine/join.hpp"
 #include "engine/join_equality.hpp"
 #include "engine/join_star.hpp"
+#include "engine/number_shape.hpp"
 #include "engine/planner.hpp"
 #include "engine/parallel_util.hpp"
 #include "engine/numeric_text.hpp"
@@ -52,6 +53,12 @@ std::string shown_function_value(const std::string& name, std::string value) {
 std::string shown_expr_value(const ArithExpr& expr, std::string value) {
     if (auto* call = std::get_if<ArithExpr::Func>(&expr.data)) {
         if (call->args.empty()) return shown_function_value(call->name, std::move(value));
+    }
+    // arithmetic on PI() and the functions that hand it on (ABS, COALESCE, LEAST ...) show the fixed places too: PI() * 2 is 6.283185, PI() / 2 is 1.5707963268 (R96, number_shape.hpp)
+    if (value != EXECUTOR_NULL_VALUE) {
+        if (const int places = number_shape::fixed_places(expr); places >= 0) {
+            if (const auto number = parse_number(value)) return number_shape::with_places(*number, places);
+        }
     }
     return value;
 }
@@ -1012,7 +1019,7 @@ Row Executor::compute_aggregates(const std::vector<const Row*>& grp, const std::
                 auto it = r.find(col_name);
                 if (it == r.end() || it->second == EXECUTOR_NULL_VALUE) continue;
                 if (gc->distinct && !seen_values.insert(collation::key(it->second)).second) continue;
-                strs.push_back(it->second);
+                strs.push_back(arg_single ? sqlval::format_float_display(it->second) : it->second); // (a FLOAT column joins as the text MySQL gives it: 3.14159, not 3.1415927)
             }
             std::string joined;
             for (std::size_t i = 0; i < strs.size(); i++) {

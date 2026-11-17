@@ -3,6 +3,7 @@
 // apply_set_postprocess/format_set_result helpers.
 
 #include "engine/executor/executor.hpp"
+#include "engine/number_shape.hpp"
 #include "engine/parallel_util.hpp"
 
 #include <algorithm>
@@ -144,9 +145,50 @@ std::string Executor::format_set_result(const std::vector<std::string>& cols, co
     return out;
 }
 
+void Executor::unify_set_scales(const SharedDatabase& s, const Statement& left, const Statement& right, const std::vector<std::string>& left_cols, std::vector<Row>& left_rows,
+                                const std::vector<std::string>& right_cols, std::vector<Row>& right_rows) const {
+    if (left_cols.empty() || right_cols.empty() || left_cols.size() != right_cols.size()) return;
+    const std::vector<ResultColumnType> left_types = result_columns_in(s, left), right_types = result_columns_in(s, right);
+    if (left_types.size() != left_cols.size() || right_types.size() != right_cols.size()) return; // (a side whose columns cannot be told is left as it is)
+    for (std::size_t i = 0; i < left_cols.size(); i++) {
+        int widest = 0;
+        // does this side give a column of exact numbers (a DECIMAL or integer column, an expression whose values are plain numbers)? the places it shows
+        auto exact_side = [&](const ResultColumnType& type, const std::string& col, const std::vector<Row>& rows) {
+            int declared = 0;
+            if (type.column) {
+                const auto& t = type.column->data_type.data;
+                if (auto* dec = std::get_if<DataType::Decimal>(&t)) declared = dec->scale;
+                else if (!(std::holds_alternative<DataType::Int>(t) || std::holds_alternative<DataType::BigInt>(t) || std::holds_alternative<DataType::SmallInt>(t) ||
+                           std::holds_alternative<DataType::TinyInt>(t)))
+                    return false;
+            } else if (!type.by_value) {
+                return false;
+            }
+            int shown = 0;
+            for (const Row& r : rows) {
+                const auto cell = r.find(col);
+                if (cell == r.end() || cell->second == EXECUTOR_NULL_VALUE) continue;
+                if (!number_shape::plain_decimal(cell->second)) return false;
+                const std::size_t dot = cell->second.find('.');
+                if (dot != std::string::npos) shown = std::max(shown, static_cast<int>(cell->second.size() - dot - 1));
+            }
+            widest = std::max({widest, declared, shown});
+            return true;
+        };
+        if (!exact_side(left_types[i], left_cols[i], left_rows) || !exact_side(right_types[i], right_cols[i], right_rows) || widest == 0) continue;
+        for (Row& r : left_rows) {
+            if (auto cell = r.find(left_cols[i]); cell != r.end() && cell->second != EXECUTOR_NULL_VALUE) cell->second = number_shape::written_with_places(cell->second, widest);
+        }
+        for (Row& r : right_rows) {
+            if (auto cell = r.find(right_cols[i]); cell != r.end() && cell->second != EXECUTOR_NULL_VALUE) cell->second = number_shape::written_with_places(cell->second, widest);
+        }
+    }
+}
+
 StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement right, bool all, std::vector<OrderBy> order_by,
                                    std::optional<std::size_t> limit, std::optional<std::size_t> offset) {
     const Statement left_shape = left; // (a left side that finds no rows has no header: its select list names the columns of the answer)
+    const Statement right_shape = right;
     auto left_out = execute_with_s(s, std::move(left));
     if (left_out.is_err()) return left_out;
     auto right_out = execute_with_s(s, std::move(right));
@@ -155,6 +197,7 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
     auto [left_cols, left_rows] = parse_table_output(left_out.value());
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
     if (auto mismatch = widths_differ(left_cols, right_cols)) return *mismatch;
+    unify_set_scales(s, left_shape, right_shape, left_cols, left_rows, right_cols, right_rows);
 
     if (left_cols.empty() && right_cols.empty()) return StringResult::Ok("0 rows returned.");
     // the rows of the right side go under the names of the left side, by position; with no rows on the left they go under what its select list says (else under their own names)
@@ -220,6 +263,7 @@ StringResult Executor::exec_union(SharedDatabase& s, Statement left, Statement r
 
 StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Statement right, bool all, std::vector<OrderBy> order_by,
                                        std::optional<std::size_t> limit, std::optional<std::size_t> offset) {
+    const Statement left_shape = left, right_shape = right;
     auto left_out = execute_with_s(s, std::move(left));
     if (left_out.is_err()) return left_out;
     auto right_out = execute_with_s(s, std::move(right));
@@ -228,6 +272,7 @@ StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Stateme
     auto [left_cols, left_rows] = parse_table_output(left_out.value());
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
     if (auto mismatch = widths_differ(left_cols, right_cols)) return *mismatch;
+    unify_set_scales(s, left_shape, right_shape, left_cols, left_rows, right_cols, right_rows);
     const std::vector<std::string> cols = left_cols.empty() ? right_cols : left_cols;
 
     std::vector<std::vector<std::string>> right_keys;
@@ -278,6 +323,7 @@ StringResult Executor::exec_intersect(SharedDatabase& s, Statement left, Stateme
 
 StringResult Executor::exec_except(SharedDatabase& s, Statement left, Statement right, bool all, std::vector<OrderBy> order_by,
                                     std::optional<std::size_t> limit, std::optional<std::size_t> offset) {
+    const Statement left_shape = left, right_shape = right;
     auto left_out = execute_with_s(s, std::move(left));
     if (left_out.is_err()) return left_out;
     auto right_out = execute_with_s(s, std::move(right));
@@ -286,6 +332,7 @@ StringResult Executor::exec_except(SharedDatabase& s, Statement left, Statement 
     auto [left_cols, left_rows] = parse_table_output(left_out.value());
     auto [right_cols, right_rows] = parse_table_output(right_out.value());
     if (auto mismatch = widths_differ(left_cols, right_cols)) return *mismatch;
+    unify_set_scales(s, left_shape, right_shape, left_cols, left_rows, right_cols, right_rows);
     const std::vector<std::string> cols = left_cols.empty() ? right_cols : left_cols;
 
     std::vector<std::vector<std::string>> right_keys;

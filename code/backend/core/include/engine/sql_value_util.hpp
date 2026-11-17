@@ -211,7 +211,10 @@ inline std::string format_double(double v, bool single = false) {
     digits.erase(std::remove(digits.begin(), digits.end(), '.'), digits.end());
     const int power = std::atoi(s.c_str() + e + 1);
     std::string out;
-    if (power >= -15 && power <= 14) { // (MySQL writes the numbers from 1e-15 up to 999999999999999 out, the others as 1.5e16 / 1e-16)
+    // (MySQL writes the numbers from 1e-15 up to 999999999999999 out, the others as 1.5e16 / 1e-16 -- and a number below 1 with more than 20 digits after the point as an exponent too:
+    // 1.234567890123456e-5 is 0.00001234567890123456, 1.2345678901234567e-5 is 1.2345678901234568e-5; R96, measured, the widened value of a FLOAT has 16 digits)
+    const bool short_enough = power >= 0 || static_cast<std::size_t>(-power - 1) + digits.size() <= 20;
+    if (power >= -15 && power <= 14 && short_enough) {
         if (power < 0) {
             out = "0." + std::string(static_cast<std::size_t>(-power - 1), '0') + digits;
         } else {

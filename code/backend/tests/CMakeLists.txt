@@ -101,6 +101,7 @@ add_executable(engine_tests
     test_result_text.cpp
     test_temporal.cpp
     test_wrong_answers_r42.cpp
+    test_wrong_answers_r96.cpp
 )
 
 target_link_libraries(engine_tests PRIVATE engine_core)

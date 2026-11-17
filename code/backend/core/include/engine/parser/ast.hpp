@@ -53,7 +53,9 @@ struct ArithExpr {
     // written out has -- what a date function gives), `single`: the column is a FLOAT (single precision): its text is the shortest that reads back as the float
     // number, and arithmetic and comparisons use that number widened to a DOUBLE, as MySQL does (0.1 in a FLOAT column is not the 0.1 of a DOUBLE)
     struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain;
-                  std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; bool single = false; };
+                  std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; bool single = false;
+                  // `scale`: the places an exact number column shows (DECIMAL(10,2): 2, an integer column: 0), -1 for any other column (a FLOAT / DOUBLE, a text, a date ...); set by the binder
+                  std::int8_t scale = -1; };
     struct Num  { std::string value; };
     // `hex`: the string is a hexadecimal or bit literal (0x4142, X'41', b'101'): the bytes it spells, which a number is asked of as the unsigned integer they make (0x41 + 0 is 65)
     struct Str  { std::string value; bool hex = false; };

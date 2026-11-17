@@ -555,6 +555,14 @@
       "bothFail": 0
     },
     {
+      "name": "wrong_answers_r96",
+      "en": "A column a USING join made one is ambiguous again when a later table has it too (1052), a FLOAT that goes into a string function (CONCAT(f, '') is 3.14159), PI() with its six fixed places in arithmetic and comparisons, COALESCE / IFNULL / GREATEST / LEAST / UNION with the places of the widest side, ROUND / TRUNCATE that stop at the places the number shows",
+      "ko": "USING 조인이 하나로 만든 열을 뒤의 표가 또 가지면 모호함(1052), 글자 함수에 들어간 FLOAT(CONCAT(f, '')는 3.14159), 산술 · 비교에서 PI()의 고정 소수 여섯 자리, 가장 넓은 쪽의 자릿수로 쓰는 COALESCE · IFNULL · GREATEST · LEAST · UNION, 보이는 자릿수에서 멈추는 ROUND · TRUNCATE",
+      "statements": 193,
+      "different": 0,
+      "bothFail": 9
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -605,8 +613,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1051,
-    "assertions": 1526448
+    "cases": 1056,
+    "assertions": 1526798
   },
   "bugsFound": 206
 }
