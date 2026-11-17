@@ -311,7 +311,11 @@ Token Lexer::read_number() {
     while (auto ch = peek()) {
         if (is_digit(*ch) || *ch == '.') { s.push_back(*ch); advance(); } else break;
     }
-    if (read_exponent(s)) return Token(TokenKind::NumberLit, s);
+    if (read_exponent(s)) {
+        Token number(TokenKind::NumberLit, s);
+        number.word = "double"; // (a number written with an exponent is a DOUBLE: see ArithExpr::Num::approx)
+        return number;
+    }
     // 0x4142 (a hexadecimal literal) and 0b101 (a bit literal): the bytes they spell, as a string (a number asked of it reads them as one unsigned integer)
     if (s == "0" && pos_ + 1 < input_.size()) {
         const char kind = input_[pos_];
@@ -436,10 +440,11 @@ std::vector<Token> Lexer::tokenize() {
                     while (auto c = peek()) {
                         if (is_digit(*c) || *c == '.') { s.push_back(*c); advance(); } else break;
                     }
-                    read_exponent(s); // (-2.5e-7)
+                    const bool exponent = read_exponent(s); // (-2.5e-7)
                     // (-0 is 0: a zero has no sign)
                     if (s.find_first_of("123456789") == std::string::npos) s.erase(0, 1);
                     tok = Token(TokenKind::NumberLit, std::move(s));
+                    if (exponent) tok->word = "double";
                 } else {
                     tok = Token(TokenKind::Minus);
                 }
@@ -505,6 +510,7 @@ std::vector<Token> Lexer::tokenize() {
                 if (pos_ + 1 < input_.size() && is_digit(input_[pos_ + 1]) && !(!tokens.empty() && is_value_or_close_paren(tokens.back()))) {
                     Token number = read_number();
                     tok = Token(TokenKind::NumberLit, "0" + number.text);
+                    tok->word = number.word;
                     break;
                 }
                 advance();

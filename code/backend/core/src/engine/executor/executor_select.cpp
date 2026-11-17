@@ -63,6 +63,21 @@ std::string shown_expr_value(const ArithExpr& expr, std::string value) {
     return value;
 }
 
+// An aggregate of a DOUBLE with fixed places (SUM(PI()) is 25.132741, AVG(PI()) 3.1415926536) is SHOWN with them -- the value a CONCAT or an expression goes on with is the whole
+// double: the value written with `places` digits after the point; `places` -1: as it is
+std::string shown_places(std::string value, int places) {
+    if (places < 0 || value == EXECUTOR_NULL_VALUE) return value;
+    if (const auto number = parse_number(value)) return number_shape::with_places(*number, std::min(places, 30));
+    return value;
+}
+
+// The places an aggregate shows, from the places of its argument (SelectColumn::Agg::arg_places): SUM / MIN / MAX the same, AVG four more
+int shown_aggregate_places(const AggFunc& func, int arg_places) {
+    if (arg_places < 0) return -1;
+    if (std::holds_alternative<AggFunc::Avg>(func.data) || std::holds_alternative<AggFunc::AvgDistinct>(func.data)) return arg_places + 4;
+    return arg_places;
+}
+
 // MIN or MAX of the values: the smallest / largest, comparing numbers as numbers when every value is one (integers exactly) and as text
 // otherwise, and the value itself as it is stored (not a number printed again). NULL for no value.
 std::string extreme_text(const std::vector<const std::string*>& values, bool smallest, ValueClass cls) {
@@ -1236,7 +1251,7 @@ FloatFn float_fn(const std::string& name) {
 FloatKind float_kind(const ArithExpr& e) {
     if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) return col->outer == 0 && col->kind == ColKind::Plain && col->single ? FloatKind::Float : FloatKind::Other;
     if (auto* num = std::get_if<ArithExpr::Num>(&e.data)) {
-        return !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos ? FloatKind::Whole : FloatKind::Other;
+        return !num->approx && !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos ? FloatKind::Whole : FloatKind::Other;
     }
     if (auto* str = std::get_if<ArithExpr::Str>(&e.data)) return str->value == "NULL" ? FloatKind::Whole : FloatKind::Other;
     if (auto* fn = std::get_if<ArithExpr::Func>(&e.data)) {
@@ -3392,6 +3407,9 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
             const bool is_single = (std::holds_alternative<SelectColumn::Agg>(col.data) && std::get<SelectColumn::Agg>(col.data).arg_single) ||
                                    (std::holds_alternative<SelectColumn::AggAlias>(col.data) && std::get<SelectColumn::AggAlias>(col.data).arg_single);
             if (is_single && !float_exact_ && value != EXECUTOR_NULL_VALUE) value = sqlval::format_float_display(value);
+            // SUM / AVG / MIN / MAX of a DOUBLE with fixed places (PI()) are shown with them: SUM(PI()) over 8 rows is 25.132741
+            if (auto* shown_agg = std::get_if<SelectColumn::Agg>(&col.data)) value = shown_places(std::move(value), shown_aggregate_places(shown_agg->func, shown_agg->arg_places));
+            else if (auto* shown_alias = std::get_if<SelectColumn::AggAlias>(&col.data)) value = shown_places(std::move(value), shown_aggregate_places(shown_alias->func, shown_alias->arg_places));
             // Escaped up front (widths below are computed on the escaped form, matching
             // the visual padding actually written) -- see Executor::escape_cell.
             agg_results.emplace_back(escape_cell(label), escape_cell(value));
@@ -3705,6 +3723,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
         std::optional<std::string> else_val;
         ArithExpr expr;
         bool single_value = false; // the value is a FLOAT (MIN / MAX of a FLOAT column, a COALESCE over FLOAT columns ...): shown with six digits
+        int places = -1;           // the value is an aggregate of a DOUBLE with fixed places (SUM(PI())): shown with them
     };
 
     bool has_all = std::any_of(columns.begin(), columns.end(), [](const SelectColumn& c) { return std::holds_alternative<SelectColumn::All>(c.data); });
@@ -3750,12 +3769,14 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                 src.kind = ColSource::Kind::Key;
                 src.key = lbl;
                 src.single_value = agg->arg_single;
+                src.places = shown_aggregate_places(agg->func, agg->arg_places);
                 col_defs.emplace_back(lbl, src);
             } else if (auto* agg_a = std::get_if<SelectColumn::AggAlias>(&c.data)) {
                 ColSource src;
                 src.kind = ColSource::Kind::Key;
                 src.key = agg_a->alias;
                 src.single_value = agg_a->arg_single;
+                src.places = shown_aggregate_places(agg_a->func, agg_a->arg_places);
                 col_defs.emplace_back(agg_a->alias, src);
             } else if (auto* f = std::get_if<SelectColumn::Func>(&c.data)) {
                 std::string header = f->alias.value_or(f->name + "()");
@@ -3840,6 +3861,7 @@ StringResult Executor::format_rows(SharedDatabase& s, const std::vector<const Ro
                     const std::string* v = get_col(row, src.key);
                     raw = v ? *v : std::string();
                     if (single[vals.size()] && !float_exact_ && v && raw != EXECUTOR_NULL_VALUE) raw = sqlval::format_float_display(raw);
+                    if (src.places >= 0 && v) raw = shown_places(std::move(raw), src.places);
                     break;
                 }
                 case ColSource::Kind::Func:

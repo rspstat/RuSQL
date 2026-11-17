@@ -237,3 +237,95 @@ TEST_CASE("R96: ROUND and TRUNCATE stop at the places the number shows", "[r96][
     CHECK(text_of(ex, "SELECT ROUND(1234.5678, -2)") == "1200");
     CHECK(text_of(ex, "SELECT FORMAT(10 / 3, 6)") == "3.333333"); // (FORMAT keeps all the digits: MySQL does)
 }
+
+// R96b -- the three rows RECOMMAND.md still kept after R96 (HEX of a FLOAT, an aggregate of PI() with BETWEEN / IN, a number written with an exponent), widened to their families.
+// The expected values are the ones a real MySQL 8.4.9 gives (corpus/wrong_answers_r96.sql compares the same statements with it).
+namespace {
+void make_fl(Executor& ex) {
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE fl (id INT PRIMARY KEY, f FLOAT, d DOUBLE, n DECIMAL(10,2), i INT)");
+    ok(ex, "INSERT INTO fl VALUES (1, 3.1415927, 3.1415927, 3.14, 3), (2, 0.1, 0.1, 0.10, 0), (3, 16777217, 1, 1.00, 255), (4, NULL, NULL, NULL, NULL),"
+           " (5, 123456.789, 2, 255.70, -1), (6, -2.5, 1.5, -1.50, 16), (7, 1e10, 3, 7.77, 65)");
+}
+} // namespace
+
+TEST_CASE("R96b: HEX of a number is the hex of the integer it rounds to; BIN, OCT and CONV read a text", "[r96][hex]") {
+    TempDataDir dir("r96b_hex");
+    Executor ex(dir.path);
+    make_fl(ex);
+    // an integer column used to be HEX of its digits ('3' gave 33), a FLOAT column too
+    CHECK(rows_of(ex, "SELECT HEX(i) FROM fl ORDER BY id") == column({"3", "0", "FF", "NULL", "FFFFFFFFFFFFFFFF", "10", "41"}));
+    CHECK(rows_of(ex, "SELECT HEX(f) FROM fl ORDER BY id") == column({"3", "0", "1000000", "NULL", "1E241", "FFFFFFFFFFFFFFFE", "2540BE400"})); // (-2.5 rounds half to even: -2)
+    CHECK(rows_of(ex, "SELECT HEX(d) FROM fl ORDER BY id") == column({"3", "0", "1", "NULL", "2", "2", "3"}));
+    CHECK(rows_of(ex, "SELECT HEX(n) FROM fl ORDER BY id") == column({"3", "0", "1", "NULL", "100", "FFFFFFFFFFFFFFFE", "8"})); // (a DECIMAL rounds half away from zero: 255.70 is 256, -1.50 is -2)
+    CHECK(rows_of(ex, "SELECT HEX(f * 2) FROM fl ORDER BY id") == column({"6", "0", "2000000", "NULL", "3C482", "FFFFFFFFFFFFFFFB", "4A817C800"}));
+    CHECK(rows_of(ex, "SELECT HEX(-f) FROM fl ORDER BY id") == column({"FFFFFFFFFFFFFFFD", "0", "FFFFFFFFFF000000", "NULL", "FFFFFFFFFFFE1DBF", "2", "FFFFFFFDABF41C00"}));
+    CHECK(rows_of(ex, "SELECT HEX(COALESCE(f, 0)) FROM fl ORDER BY id") == column({"3", "0", "1000000", "0", "1E241", "FFFFFFFFFFFFFFFE", "2540BE400"}));
+    CHECK(rows_of(ex, "SELECT HEX(i + 1) FROM fl WHERE id < 4 ORDER BY id") == column({"4", "1", "100"}));
+    // a DOUBLE rounds half to even, a DECIMAL half away from zero
+    CHECK(rows_of(ex, "SELECT HEX(2.5e0), HEX(3.5e0), HEX(2.5), HEX(-2.5), HEX(-2.5e0), HEX(255.5e0), HEX(1e3), HEX(PI()), HEX(PI() * 100), HEX(255.7)")[0] ==
+          std::vector<std::string>{"2", "4", "3", "FFFFFFFFFFFFFFFD", "FFFFFFFFFFFFFFFE", "100", "3E8", "3", "13A", "100"});
+    // a text is still the hex of its bytes
+    CHECK(rows_of(ex, "SELECT HEX('255'), HEX(CONCAT('a', 'b')), HEX(UPPER('abc')), HEX(LENGTH('abc'))")[0] == std::vector<std::string>{"323535", "6162", "414243", "3"});
+    // BIN(x), OCT(x) and CONV(x, 10, b) read x as the text it is written with: the digits after a point are cut off, not rounded
+    CHECK(rows_of(ex, "SELECT CONV(255.7, 10, 16), BIN(255.7), OCT(255.7), CONV(-2.5, 10, 16), BIN(PI() * 100), CONV(PI(), 10, 16)")[0] ==
+          std::vector<std::string>{"FF", "11111111", "377", "FFFFFFFFFFFFFFFE", "100111010", "3"});
+    CHECK(text_of(ex, "SELECT BIN(-2.5)") == "1111111111111111111111111111111111111111111111111111111111111110");
+    CHECK(rows_of(ex, "SELECT BIN(n) FROM fl WHERE id IN (1, 3, 5, 7) ORDER BY id") == column({"11", "1", "11111111", "111"}));
+    CHECK(rows_of(ex, "SELECT OCT(n) FROM fl WHERE id IN (1, 3, 5, 7) ORDER BY id") == column({"3", "1", "377", "7"}));
+    CHECK(rows_of(ex, "SELECT CONV(f, 10, 16) FROM fl ORDER BY id") == column({"3", "0", "FFFFF0", "NULL", "1E241", "FFFFFFFFFFFFFFFE", "2540BE400"})); // (a FLOAT is the text of six digits: 16777217 is 16777200)
+    CHECK(rows_of(ex, "SELECT CONV(d, 10, 2) FROM fl ORDER BY id") == column({"11", "0", "1", "NULL", "10", "1", "11"}));
+}
+
+TEST_CASE("R96b: SUM, AVG, MIN and MAX of a DOUBLE with fixed places are shown with them; BETWEEN and IN meet it as = does", "[r96][pi][aggregate]") {
+    TempDataDir dir("r96b_pi_aggregate");
+    Executor ex(dir.path);
+    make_fl(ex); // (seven rows)
+    CHECK(rows_of(ex, "SELECT SUM(PI()), AVG(PI()), MAX(PI()), MIN(PI()) FROM fl")[0] == std::vector<std::string>{"21.991149", "3.1415926536", "3.141593", "3.141593"});
+    CHECK(rows_of(ex, "SELECT SUM(PI() * 2), AVG(PI() * 2), SUM(PI() + i), SUM(PI() + n), MIN(PI() + n) FROM fl")[0] ==
+          std::vector<std::string>{"43.982297", "6.2831853072", "356.849556", "285.059556", "1.641593"});
+    CHECK(rows_of(ex, "SELECT i, SUM(PI() * i) FROM fl WHERE i IS NOT NULL GROUP BY i ORDER BY i")[2] == std::vector<std::string>{"3", "9.424778"});
+    CHECK(text_of(ex, "SELECT SUM(PI()) FROM fl WHERE id > 100") == "NULL");
+    // the value an expression or a string function goes on with is the whole double; only a result column is written with the places
+    CHECK(text_of(ex, "SELECT CONCAT(SUM(PI()), '|', AVG(PI())) FROM fl") == "21.991148575128552|3.141592653589793");
+    CHECK(text_of(ex, "SELECT SUM(PI()) FROM fl HAVING SUM(PI()) > 21.9911485") == "21.991149");
+    // named in an expression, an aggregate hands on the places of its argument (SUM(PI()) + 0 is 21.991149); MIN and MAX do so for a string function too: CONCAT(MAX(PI()), '') is 3.141593
+    CHECK(text_of(ex, "SELECT CONCAT(SUM(PI()) + 0, '|', AVG(PI()) + 0, '|', SUM(PI()) * 2) FROM fl") == "21.991149|3.1415926536|43.982297");
+    CHECK(text_of(ex, "SELECT CONCAT(MIN(PI()), '|', MAX(PI()) + 0, '|', MAX(PI()) * 2, '|', MAX(PI() * 2), '|', MIN(PI() + n), '|', UPPER(MAX(PI())), '|', LENGTH(MAX(PI()))) FROM fl") ==
+          "3.141593|3.141593|6.283185|6.283185|1.641593|3.141593|8");
+    CHECK(rows_of(ex, "SELECT MAX(PI()) > 3.1415926, MAX(PI()) = 3.141593, MAX(PI()) BETWEEN 3.1415926 AND 3.14159265 FROM fl")[0] == std::vector<std::string>{"1", "1", "0"});
+    CHECK(text_of(ex, "SELECT CONCAT(MAX(PI() + d), '|', MIN(PI() + 1e0)) FROM fl") == "6.2831853535897935|4.141592653589793");
+    // a DOUBLE with no fixed places (a DOUBLE column, 1e0) takes them away
+    CHECK(text_of(ex, "SELECT SUM(PI() + d) FROM fl") == "29.591148621538757");
+    CHECK(text_of(ex, "SELECT SUM(PI() + 1e0) FROM fl") == "28.991148575128552");
+    // BETWEEN and IN take PI() and a written number as equal when they differ by less than 5 in the place after the places they both have
+    CHECK(rows_of(ex, "SELECT PI() IN (3.141593), PI() NOT IN (3.141593), PI() IN (3.14159265), PI() IN (3.1415927), PI() IN (3.14159), PI() * 2 IN (6.283185)")[0] ==
+          std::vector<std::string>{"1", "0", "1", "1", "0", "1"});
+    CHECK(rows_of(ex, "SELECT PI() * 2 BETWEEN 6.283185 AND 6.283185, PI() BETWEEN 3.1415926 AND 3.1415927, PI() BETWEEN 3.14 AND 3.141592, PI() NOT BETWEEN 3.141593 AND 4")[0] ==
+          std::vector<std::string>{"1", "1", "0", "1"});
+    // a list of one value is `=`, and so is BETWEEN a AND a; a longer list, bounds that differ and NOT BETWEEN compare plain doubles
+    CHECK(rows_of(ex, "SELECT PI() IN (3.141593, 1), PI() BETWEEN 3.141593 AND 4, PI() BETWEEN 3.141593 AND 3.141593, PI() NOT BETWEEN 3.141593 AND 3.141593, PI() IN (3.141593, 3.141593)")[0] ==
+          std::vector<std::string>{"0", "0", "1", "1", "0"});
+    CHECK(text_of(ex, "SELECT COUNT(*) FROM fl WHERE PI() IN (3.141593)") == "7");
+    CHECK(text_of(ex, "SELECT COUNT(*) FROM fl WHERE PI() * i BETWEEN 9.424778 AND 9.424778") == "1");
+}
+
+TEST_CASE("R96b: a number written with an exponent is a DOUBLE", "[r96][double]") {
+    TempDataDir dir("r96b_double_literal");
+    Executor ex(dir.path);
+    make_fl(ex);
+    // PI() + 1e0 has no fixed places (1e0 takes them away): the whole double
+    CHECK(text_of(ex, "SELECT CONCAT(PI() + 1e0, '|', PI() * 1e0, '|', PI() / 1e0, '|', 1e0 + PI(), '|', PI() - 1e0, '|', PI() + 1.5e0, '|', -1e0 + PI(), '|', PI() + -1e0)") ==
+          "4.141592653589793|3.141592653589793|3.141592653589793|4.141592653589793|2.141592653589793|4.641592653589793|2.141592653589793|2.141592653589793");
+    CHECK(text_of(ex, "SELECT PI() + 1e0") == "4.141592653589793");
+    // arithmetic with it is floating point: 2e0 / 3 holds 16 digits, 0.1e0 + 0.2 is the double sum, 3.14 + 1e0 is not 4.14
+    CHECK(text_of(ex, "SELECT CONCAT(2e0 / 3, '|', 1 / 3e0, '|', 10 / 4e0, '|', 0.1e0 + 0.2, '|', 1e0, '|', 1e3, '|', 1.5e3, '|', -1e0, '|', 1e0 + 0, '|', 1e3 + 1)") ==
+          "0.6666666666666666|0.3333333333333333|2.5|0.30000000000000004|1|1000|1500|-1|1|1001");
+    CHECK(text_of(ex, "SELECT CONCAT(n + 1e0, '|', n * 1e0, '|', i + 1e0, '|', COALESCE(n, 1e0)) FROM fl WHERE id = 1") == "4.140000000000001|3.14|4|3.14");
+    CHECK(text_of(ex, "SELECT CONCAT(COALESCE(n, 1e0), '') FROM fl WHERE id = 4") == "1"); // (a DOUBLE: not 1.00)
+    // ROUND of a DOUBLE rounds half to even, of a DECIMAL half away from zero
+    CHECK(rows_of(ex, "SELECT ROUND(2.5e0), ROUND(3.5e0), ROUND(4.5e0), ROUND(-2.5e0), ROUND(2.5), TRUNCATE(2.55e0, 1), FORMAT(2.5e0, 0), FORMAT(2.5, 0)")[0] ==
+          std::vector<std::string>{"2", "4", "4", "-2", "3", "2.5", "2", "3"});
+    CHECK(rows_of(ex, "SELECT 1e0 = 1, 1e0 IN (1), 1e0 BETWEEN 0 AND 1, -(1e0), MOD(10e0, 3), 10e0 DIV 3")[0] == std::vector<std::string>{"1", "1", "1", "-1", "1", "3"});
+}

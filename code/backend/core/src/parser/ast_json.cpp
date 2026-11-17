@@ -219,7 +219,7 @@ void to_json(nlohmann::json& j, const ArithExpr& expr) {
             using T = std::decay_t<decltype(alt)>;
             nlohmann::json obj;
             if constexpr (std::is_same_v<T, ArithExpr::Col>) obj["Col"] = alt.name;
-            else if constexpr (std::is_same_v<T, ArithExpr::Num>) obj["Num"] = alt.value;
+            else if constexpr (std::is_same_v<T, ArithExpr::Num>) obj[alt.approx ? "Double" : "Num"] = alt.value;
             else if constexpr (std::is_same_v<T, ArithExpr::Str>) obj[alt.hex ? "Hex" : "Str"] = alt.value;
             else if constexpr (std::is_same_v<T, ArithExpr::Add>) obj["Add"] = nlohmann::json::array({*alt.lhs, *alt.rhs});
             else if constexpr (std::is_same_v<T, ArithExpr::Sub>) obj["Sub"] = nlohmann::json::array({*alt.lhs, *alt.rhs});
@@ -241,6 +241,7 @@ void from_json(const nlohmann::json& j, ArithExpr& expr) {
     const auto& payload = it.value();
     if (tag == "Col") expr = ArithExpr(ArithExpr::Col{payload.get<std::string>()});
     else if (tag == "Num") expr = ArithExpr(ArithExpr::Num{payload.get<std::string>()});
+    else if (tag == "Double") expr = ArithExpr(ArithExpr::Num{payload.get<std::string>(), true});
     else if (tag == "Str") expr = ArithExpr(ArithExpr::Str{payload.get<std::string>()});
     else if (tag == "Hex") expr = ArithExpr(ArithExpr::Str{payload.get<std::string>(), true});
     else if (tag == "Add") expr = ArithExpr(ArithExpr::Add{std::make_unique<ArithExpr>(payload.at(0).get<ArithExpr>()), std::make_unique<ArithExpr>(payload.at(1).get<ArithExpr>())});

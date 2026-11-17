@@ -1,9 +1,13 @@
 # R96: the five wrong answers RECOMMAND.md kept (R58 / R60 / R91 findings), with the statements of the family around each; compared with a real MySQL 8.4.9 --exact (the text of every cell).
+# R96b (items 6-8, from the line `# R96b` on): the three rows R96 left open, widened the same way.
 # 1. a column a USING join made one is ambiguous again when a later table has it too (MySQL 1052); `t.*` in the select list makes ORDER BY y read the one y of the list
 # 2. a FLOAT that goes into a string function is the six digits MySQL writes it with (CONCAT(f, '') is 3.14159); a FLOAT a COALESCE / IFNULL / GREATEST gives is the double it widens to
 # 3. PI() has six fixed places and arithmetic on it keeps them (PI() * 2 is 6.283185, PI() / 2 1.5707963268); two numbers with fixed places are equal when they differ by less than 5 in the next place
 # 4. COALESCE / IFNULL / GREATEST / LEAST and UNION / INTERSECT / EXCEPT write exact numbers with the places of the widest side (COALESCE(1.5, 2.25) is 1.50)
 # 5. ROUND / TRUNCATE of an exact number stop at the places the number shows (ROUND(10 / 3, 6) is 3.3333)
+# 6. HEX of a number is the hex of the integer it rounds to (an INT column, a FLOAT, a sum; a DOUBLE half to even, a DECIMAL half away from zero), BIN / OCT / CONV read a text (the digits after a point are cut off)
+# 7. SUM / AVG / MIN / MAX of a DOUBLE with fixed places (PI()) are shown with them (AVG four more); BETWEEN and IN meet PI() as = does
+# 8. a number written with an exponent (1e0) is a DOUBLE: PI() + 1e0 is the whole double, n + 1e0 is floating point, ROUND(2.5e0) is 2
 # ---- 1. USING chains: a column that two later tables both have is ambiguous (MySQL 1052)
 --CREATE TABLE ua (x INT, a INT)
 --CREATE TABLE ub (x INT, y INT, b INT)
@@ -214,3 +218,179 @@ SELECT ROUND(1.23456789, 10)
 SELECT ROUND(1.23456789, 3)
 SELECT ROUND(SQRT(2), 6)
 SELECT ROUND(10 / 3, 6) = 3.3333
+# R96b
+SELECT HEX(f) FROM fl ORDER BY id
+SELECT SUM(PI()) FROM fl
+SELECT PI() + 1e0
+--CREATE TABLE fx (id INT PRIMARY KEY, f FLOAT, d DOUBLE, n DECIMAL(10,2), i INT)
+--INSERT INTO fx VALUES (1, 3.1415927, 3.1415927, 3.14, 3), (2, 0.1, 0.1, 0.10, 0), (3, 16777217, 1, 1.00, 255), (4, NULL, NULL, NULL, NULL), (5, 123456.789, 2, 255.70, -1), (6, -2.5, 1.5, -1.50, 16), (7, 1e10, 3, 7.77, 65)
+# ---- 1. HEX of a number that is a FLOAT column
+SELECT HEX(f) FROM fx ORDER BY id
+SELECT HEX(d) FROM fx ORDER BY id
+SELECT HEX(n) FROM fx ORDER BY id
+SELECT HEX(i) FROM fx ORDER BY id
+SELECT HEX(f + 0) FROM fx ORDER BY id
+SELECT HEX(f * 2) FROM fx ORDER BY id
+SELECT HEX(-f) FROM fx ORDER BY id
+SELECT HEX(COALESCE(f, 0)) FROM fx ORDER BY id
+SELECT HEX(GREATEST(f, 0)) FROM fx ORDER BY id
+SELECT HEX(ABS(f)) FROM fx ORDER BY id
+SELECT HEX(255.7)
+SELECT HEX(-1.5)
+SELECT HEX(PI())
+SELECT HEX(PI() * 100)
+SELECT HEX(1e3)
+SELECT HEX('abc')
+SELECT HEX(CAST(f AS CHAR)) FROM fx WHERE id = 1
+SELECT UNHEX(HEX(f)) FROM fx WHERE id = 5
+SELECT CONV(f, 10, 16) FROM fx WHERE id = 5
+SELECT BIN(f) FROM fx WHERE id = 5
+SELECT OCT(f) FROM fx WHERE id = 5
+SELECT BIN(d) FROM fx WHERE id = 5
+# ---- 2. aggregates over PI() and a fixed-places expression, BETWEEN / IN with it
+SELECT SUM(PI()) FROM fx
+SELECT AVG(PI()) FROM fx
+SELECT MAX(PI()) FROM fx
+SELECT MIN(PI()) FROM fx
+SELECT SUM(PI() * 2) FROM fx
+SELECT SUM(PI() + 1.5) FROM fx
+SELECT AVG(PI() * 2) FROM fx
+SELECT SUM(PI()) FROM fx WHERE id < 3
+SELECT id, SUM(PI()) FROM fx GROUP BY id ORDER BY id
+SELECT COUNT(PI()) FROM fx
+SELECT SUM(PI() + d) FROM fx
+SELECT SUM(PI() + i) FROM fx
+SELECT SUM(DISTINCT PI()) FROM fx
+SELECT CONCAT(SUM(PI()), '') FROM fx
+SELECT SUM(PI()) + 1 FROM fx
+SELECT PI() BETWEEN 3.141592 AND 3.141593
+SELECT PI() BETWEEN 3.141593 AND 3.14
+SELECT PI() NOT BETWEEN 3.141592 AND 3.141593
+SELECT PI() BETWEEN 3.14159265 AND 3.1416
+SELECT PI() IN (3.141593)
+SELECT PI() IN (3.141593, 1)
+SELECT PI() NOT IN (3.141593)
+SELECT PI() IN (3.14159265)
+SELECT PI() IN (3.1415927)
+SELECT PI() * 2 IN (6.283185)
+SELECT PI() * 2 BETWEEN 6.283185 AND 6.283185
+SELECT id FROM fx WHERE PI() BETWEEN 3.141592 AND 3.141593 ORDER BY id
+SELECT id FROM fx WHERE PI() IN (3.141593) ORDER BY id
+SELECT id FROM fx WHERE d BETWEEN PI() AND 4 ORDER BY id
+SELECT id FROM fx WHERE d IN (PI()) ORDER BY id
+SELECT 3.141593 BETWEEN PI() AND 4
+SELECT 3.141593 IN (PI())
+# ---- 3. a number written with an exponent is a DOUBLE
+SELECT PI() * 1e0
+SELECT PI() + 1E0
+SELECT PI() + 0e0
+SELECT PI() + 1.5e0
+SELECT 1e0 + PI()
+SELECT PI() + 1e1
+SELECT PI() - 1e0
+SELECT PI() / 1e0
+SELECT CONCAT(PI() + 1e0, '')
+SELECT CONCAT(1e0, '')
+SELECT CONCAT(1e3, '')
+SELECT CONCAT(1e0 + 0, '')
+SELECT CONCAT(1.5e0, '')
+SELECT CONCAT(1e0 * 1.5, '')
+SELECT CONCAT(2e0 / 3, '')
+SELECT CONCAT(1e-2, '')
+SELECT CONCAT(1.5e3, '')
+SELECT CONCAT(1e0 / 3, '')
+SELECT CONCAT(1 / 3e0, '')
+SELECT CONCAT(10 / 4e0, '')
+SELECT CONCAT(10e0 / 4, '')
+SELECT CONCAT(1e0 + 0.1, '')
+SELECT CONCAT(0.1e0 + 0.2, '')
+SELECT 1e0 = 1
+SELECT 1e0 + 1 = 2
+SELECT ROUND(2.5e0)
+SELECT ROUND(1e0 / 3, 4)
+SELECT CONCAT(i + 1e0, '') FROM fx WHERE id = 1
+SELECT CONCAT(n + 1e0, '') FROM fx WHERE id = 1
+SELECT CONCAT(n * 1e0, '') FROM fx WHERE id = 1
+SELECT CONCAT(COALESCE(n, 1e0), '') FROM fx WHERE id = 4
+SELECT CONCAT(1e0, '') = '1'
+SELECT PI() + 1e0 = 4.141592653589793
+SELECT CONCAT(LEAST(1e0, 2), '')
+# ---- 4. BIN / OCT / CONV read their argument as a text (the digits after a point are cut off), HEX of a number rounds
+SELECT CONV(255.7,10,16)
+SELECT BIN(255.7)
+SELECT OCT(255.7)
+SELECT BIN(-2.5)
+SELECT CONV(-2.5,10,16)
+SELECT BIN(n) FROM fx ORDER BY id
+SELECT OCT(n) FROM fx ORDER BY id
+SELECT CONV(n,10,16) FROM fx ORDER BY id
+SELECT BIN(f) FROM fx ORDER BY id
+SELECT CONV(d,10,2) FROM fx ORDER BY id
+SELECT CONV(f,10,16) FROM fx ORDER BY id
+SELECT BIN(d) FROM fx ORDER BY id
+SELECT BIN(PI() * 100)
+SELECT CONV(PI(), 10, 16)
+SELECT HEX(2.5e0)
+SELECT HEX(3.5e0)
+SELECT HEX(2.5)
+SELECT HEX(-2.5)
+SELECT HEX(-2.5e0)
+SELECT HEX(255.5e0)
+SELECT HEX(1e19)
+SELECT HEX(i + 1) FROM fx ORDER BY id
+SELECT HEX(i * 2) FROM fx ORDER BY id
+SELECT HEX(COALESCE(i, 0)) FROM fx ORDER BY id
+SELECT HEX(n + 1) FROM fx ORDER BY id
+SELECT HEX(LENGTH('abc'))
+SELECT HEX(CONCAT('a', 'b'))
+SELECT HEX(UPPER('abc'))
+SELECT HEX('255')
+SELECT HEX(CAST(255 AS CHAR))
+# ---- 5. more of a literal written with an exponent and of aggregates over fixed places
+SELECT 1e0
+SELECT 1e0 + 0
+SELECT -1e0 + PI()
+SELECT 1e3 + 1
+SELECT 1.5e3
+SELECT CONCAT(-1e0, '')
+SELECT CONCAT(PI() + -1e0, '')
+SELECT SUM(1e0) FROM fx
+SELECT AVG(1e0) FROM fx
+SELECT SUM(n + 1e0) FROM fx
+SELECT AVG(PI() + 1e0) FROM fx
+SELECT MAX(PI() + 1e0) FROM fx
+SELECT MIN(PI() + n) FROM fx
+SELECT AVG(PI() + n) FROM fx
+SELECT SUM(PI() + n) FROM fx
+SELECT SUM(n) FROM fx
+SELECT SUM(PI()) FROM fx WHERE id > 100
+SELECT MAX(PI()) FROM fx WHERE id > 100
+SELECT CONCAT(AVG(PI()), '') FROM fx
+SELECT i, SUM(PI() * i) FROM fx WHERE i IS NOT NULL GROUP BY i ORDER BY i
+SELECT SUM(PI()) FROM fx HAVING SUM(PI()) > 21
+SELECT COUNT(*) FROM fx WHERE PI() BETWEEN 3.1415926 AND 3.1415927
+SELECT COUNT(*) FROM fx WHERE PI() NOT IN (3.141593)
+SELECT COUNT(*) FROM fx WHERE PI() * i BETWEEN 9.424778 AND 9.424778
+SELECT ROUND(3.5e0), ROUND(4.5e0), ROUND(-2.5e0), ROUND(2.5)
+SELECT TRUNCATE(2.55e0, 1)
+SELECT FORMAT(2.5e0, 0), FORMAT(2.5, 0)
+SELECT CEIL(1e0), FLOOR(1.5e0)
+SELECT MOD(10e0, 3), 10e0 DIV 3, 10e0 % 3
+SELECT -(1e0)
+SELECT 1e0 IN (1), 1e0 BETWEEN 0 AND 1
+SELECT PI() BETWEEN 3.141593 AND 4
+SELECT PI() NOT BETWEEN 3.141593 AND 4
+SELECT PI() BETWEEN 3 AND 3.141593
+SELECT PI() BETWEEN 3.141593 AND 3.141593
+SELECT PI() NOT BETWEEN 3.141593 AND 3.141593
+SELECT PI() * 2 BETWEEN 6.283185 AND 6.283186
+SELECT PI() IN (3.141593, 3.141593)
+SELECT 1e3, 1e0 + 1, 2.5e0, 1.5E-3, -1e0, 2e0*3, 5e-1
+SELECT 1e0 AS x, 2e0 + 1 AS y
+SELECT CONCAT(MAX(PI()), '') FROM fx
+SELECT CONCAT(MIN(PI()), '|', MAX(PI()) + 0, '|', MAX(PI()) * 2, '|', MAX(PI() * 2), '|', MIN(PI() + n), '|', UPPER(MAX(PI())), '|', LENGTH(MAX(PI()))) FROM fx
+SELECT CONCAT(SUM(PI()) + 0, '|', AVG(PI()) + 0, '|', SUM(PI()) * 2) FROM fx
+SELECT CONCAT(MAX(PI() + d), '|', MIN(PI() + 1e0)) FROM fx
+SELECT MAX(PI()) > 3.1415926, MAX(PI()) = 3.141593, MAX(PI()) BETWEEN 3.1415926 AND 3.14159265 FROM fx
+SELECT i FROM fx GROUP BY i HAVING MAX(PI()) = 3.141593 ORDER BY i
+SELECT CONCAT(MAX(PI()), '|', MIN(PI())) FROM fx WHERE id > 100

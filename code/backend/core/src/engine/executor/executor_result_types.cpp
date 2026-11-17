@@ -198,7 +198,15 @@ private:
         const std::optional<ColumnDef>& def = column ? column->type.column : std::optional<ColumnDef>();
         const bool by_value = !column; // (an expression, or something that is not a column: a number if the values are)
         auto of_argument = [&](bool average) -> ResultColumnType {
-            if (!def) return ResultColumnType{std::nullopt, by_value};
+            if (!def) {
+                // an expression: a DOUBLE when it works in floating point (SUM(PI() * i), AVG(d * 2), SUM(1e0))
+                if (by_value && !arg.empty() && arg != "*") {
+                    try {
+                        if (double_expression(Parser::str_to_arith(arg), sel, sources)) return made_up(DataType(DataType::Double{}));
+                    } catch (const ParseError&) {}
+                }
+                return ResultColumnType{std::nullopt, by_value};
+            }
             if (approximate_type(def->data_type)) return made_up(DataType(DataType::Double{}));
             if (auto* dec = std::get_if<DataType::Decimal>(&def->data_type.data)) {
                 const unsigned scale = std::min<unsigned>(dec->scale + (average ? 4u : 0u), 30u);
@@ -309,6 +317,7 @@ private:
     // Is the expression done in floating point? An operand that is a FLOAT / DOUBLE column, a text (a string or a text column) or a function that works in
     // floating point makes it a DOUBLE; otherwise it is DECIMAL or integer arithmetic.
     bool double_expression(const ArithExpr& e, const Statement::Select& sel, const std::vector<Source>& sources) const {
+        if (auto* number = std::get_if<ArithExpr::Num>(&e.data)) return number->approx; // (1e0 is a DOUBLE)
         if (auto* text = std::get_if<ArithExpr::Str>(&e.data)) return !text->hex && text->value != EXECUTOR_NULL_VALUE; // (a hexadecimal literal is an integer where a number is asked of it; a NULL has no type: COALESCE(NULL, n) of a DECIMAL column is a DECIMAL)
         if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) {
             const NamedType* column = c->outer == 0 && plain_reference(c->name) ? find(sel, sources, c->name) : nullptr;

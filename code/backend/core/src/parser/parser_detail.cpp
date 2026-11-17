@@ -81,7 +81,7 @@ ArithExpr expand_arith(const ArithExpr& expr, const std::unordered_map<std::stri
             if constexpr (std::is_same_v<T, ArithExpr::Col>) {
                 return ArithExpr(ArithExpr::Col{expand_alias_str(alt.name, map)});
             } else if constexpr (std::is_same_v<T, ArithExpr::Num>) {
-                return ArithExpr(ArithExpr::Num{alt.value});
+                return ArithExpr(ArithExpr::Num{alt.value, alt.approx});
             } else if constexpr (std::is_same_v<T, ArithExpr::Str>) {
                 return ArithExpr(ArithExpr::Str{alt.value, alt.hex});
             } else if constexpr (std::is_same_v<T, ArithExpr::Add>) {

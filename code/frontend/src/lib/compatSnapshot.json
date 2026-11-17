@@ -556,9 +556,9 @@
     },
     {
       "name": "wrong_answers_r96",
-      "en": "A column a USING join made one is ambiguous again when a later table has it too (1052), a FLOAT that goes into a string function (CONCAT(f, '') is 3.14159), PI() with its six fixed places in arithmetic and comparisons, COALESCE / IFNULL / GREATEST / LEAST / UNION with the places of the widest side, ROUND / TRUNCATE that stop at the places the number shows",
-      "ko": "USING 조인이 하나로 만든 열을 뒤의 표가 또 가지면 모호함(1052), 글자 함수에 들어간 FLOAT(CONCAT(f, '')는 3.14159), 산술 · 비교에서 PI()의 고정 소수 여섯 자리, 가장 넓은 쪽의 자릿수로 쓰는 COALESCE · IFNULL · GREATEST · LEAST · UNION, 보이는 자릿수에서 멈추는 ROUND · TRUNCATE",
-      "statements": 193,
+      "en": "A column a USING join made one is ambiguous again when a later table has it too (1052), a FLOAT that goes into a string function (CONCAT(f, '') is 3.14159), PI() with its six fixed places in arithmetic and comparisons, COALESCE / IFNULL / GREATEST / LEAST / UNION with the places of the widest side, ROUND / TRUNCATE that stop at the places the number shows, HEX of a number (the hex of the integer it rounds to) with BIN / OCT / CONV reading a text, SUM / AVG / MIN / MAX of PI() shown with its places and BETWEEN / IN against it, a number written with an exponent (1e0) is a DOUBLE",
+      "ko": "USING 조인이 하나로 만든 열을 뒤의 표가 또 가지면 모호함(1052), 글자 함수에 들어간 FLOAT(CONCAT(f, '')는 3.14159), 산술 · 비교에서 PI()의 고정 소수 여섯 자리, 가장 넓은 쪽의 자릿수로 쓰는 COALESCE · IFNULL · GREATEST · LEAST · UNION, 보이는 자릿수에서 멈추는 ROUND · TRUNCATE, 정수로 반올림해 읽는 HEX(BIN · OCT · CONV는 글자로 읽음), 고정 자릿수로 보이는 PI()의 SUM · AVG · MIN · MAX와 그에 대한 BETWEEN · IN, 지수로 쓴 리터럴(1e0)은 DOUBLE",
+      "statements": 361,
       "different": 0,
       "bothFail": 9
     },
@@ -613,8 +613,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1056,
-    "assertions": 1526798
+    "cases": 1059,
+    "assertions": 1526921
   },
   "bugsFound": 206
 }

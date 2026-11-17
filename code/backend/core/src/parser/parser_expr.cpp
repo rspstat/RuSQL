@@ -931,14 +931,14 @@ ArithExpr Parser::parse_arith_factor() {
 
     if (p->kind == TokenKind::NumberLit) {
         const Token* t = advance();
-        return ArithExpr(ArithExpr::Num{t->text});
+        return ArithExpr(ArithExpr::Num{t->text, t->word == "double"});
     }
 
     if (p->kind == TokenKind::Minus) {
         advance();
         if (peek_is(TokenKind::NumberLit)) {
             const Token* n = advance();
-            return ArithExpr(ArithExpr::Num{negate_number_text(n->text)});
+            return ArithExpr(ArithExpr::Num{negate_number_text(n->text), n->word == "double"});
         }
         ArithExpr inner = parse_arith_factor();
         return ArithExpr(ArithExpr::Sub{std::make_unique<ArithExpr>(ArithExpr::Num{"0"}), std::make_unique<ArithExpr>(std::move(inner))});
@@ -1553,7 +1553,8 @@ std::string Parser::arith_to_string(const ArithExpr& expr) {
         [](const auto& alt) -> std::string {
             using T = std::decay_t<decltype(alt)>;
             if constexpr (std::is_same_v<T, ArithExpr::Col> || std::is_same_v<T, ArithExpr::Num>) {
-                if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name; else return alt.value;
+                if constexpr (std::is_same_v<T, ArithExpr::Col>) return alt.name;
+                else return alt.approx && alt.value.find_first_of("eE") == std::string::npos ? alt.value + "e0" : alt.value; // (1e0 stays a DOUBLE when its text is read again)
             } else if constexpr (std::is_same_v<T, ArithExpr::Str>) {
                 if (!alt.hex) return quoted_text(alt.value);
                 static const char digits[] = "0123456789ABCDEF"; // (a hexadecimal literal names its column as it is written: 0x4142, not the bytes, which need not be text)

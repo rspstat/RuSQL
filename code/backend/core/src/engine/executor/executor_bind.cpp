@@ -23,6 +23,7 @@
 
 #include "engine/column_text.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/number_shape.hpp"
 #include "engine/parser/parser.hpp"
 
 namespace engine {
@@ -292,6 +293,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 return approx || k == ValueClass::Text;
             }
             if (auto* str = std::get_if<ArithExpr::Str>(&e.data)) return str->value != "NULL";
+            if (auto* num = std::get_if<ArithExpr::Num>(&e.data)) return num->approx; // (1e0 is a DOUBLE)
             if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
             if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
             if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return expression_is_approx(*v->lhs) || expression_is_approx(*v->rhs);
@@ -328,6 +330,33 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             bool approx = false;
             class_of_name(arg, &approx, &def);
             return def && std::holds_alternative<DataType::Float>(def->data_type.data);
+        }
+
+        // The argument of an aggregate as the query spells it: the places it shows when it is a DOUBLE with a fixed number of them (PI(), PI() * 2 + 1: see number_shape.hpp), else -1.
+        // SUM / MIN / MAX of it are shown with those places (SUM(PI()) is 25.132741), AVG with four more (AVG(PI()) is 3.1415926536).
+        std::int8_t argument_places(const std::string& argument) {
+            std::string arg = argument;
+            if (arg.rfind("DISTINCT ", 0) == 0) arg.erase(0, 9);
+            if (arg.empty() || arg == "*" || upper(arg).find("PI") == std::string::npos) return -1; // (PI() is the only DOUBLE that has fixed places)
+            try {
+                ArithExpr e = Parser::str_to_arith(arg);
+                annotate(e);
+                const int places = number_shape::fixed_places(e);
+                return places >= 0 && places < 30 ? static_cast<std::int8_t>(places) : static_cast<std::int8_t>(-1);
+            } catch (const ParseError&) {
+                return -1;
+            }
+        }
+
+        // The places the aggregate that an expression names as `SUM(PI())` shows (SUM / MIN / MAX the places of the argument, AVG four more), -1 for any other
+        std::int8_t aggregate_reference_places(const std::string& name) {
+            const std::size_t lp = name.find('('), rp = name.rfind(')');
+            if (lp == std::string::npos || lp == 0 || rp != name.size() - 1) return -1;
+            const std::string function = upper(name.substr(0, lp));
+            if (function != "SUM" && function != "MIN" && function != "MAX" && function != "AVG") return -1;
+            const std::int8_t places = argument_places(name.substr(lp + 1, rp - lp - 1));
+            if (places < 0) return -1;
+            return function == "AVG" ? static_cast<std::int8_t>(std::min(30, places + 4)) : places;
         }
 
         // What `AGG(arg)` -- the text a HAVING or a select-list expression uses for an aggregate -- gives; nullopt when `name` is not one.
@@ -496,6 +525,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 const ColumnDef* def = nullptr;
                 col->cls = class_of_name(col->name, &col->approx, &def);
                 describe_column(*col, def);
+                if (col->approx && col->name.find('(') != std::string::npos) col->scale = aggregate_reference_places(col->name); // (SUM(PI()) + 1: see number_shape::fixed_places)
                 if (col->kind == ColKind::Plain && col->name.find('(') != std::string::npos) {
                     if (const ColKind k = aggregate_reference_kind(col->name); k != ColKind::Plain) { col->kind = k; col->fsp = 255; }
                 }
@@ -524,6 +554,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 const ColumnDef* def = nullptr;
                 col->cls = class_of_name(col->name, &col->approx, &def);
                 describe_column(*col, def);
+                if (col->approx && col->name.find('(') != std::string::npos) col->scale = aggregate_reference_places(col->name);
             }
             else if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
             else if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) { annotate(*v->lhs); annotate(*v->rhs); }
@@ -736,7 +767,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // the CASE -- the parser leaves the placeholder "__case__" in the column then.
         // `label` is the argument as the query spells it (it names the result column and stays as typed); `source` is where a row holds it, which is
         // set here when that is another spelling.
-        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter, bool* approx = nullptr, bool* single = nullptr) {
+        ValueClass aggregate(AggFunc& func, const std::string& label, std::string& source, std::optional<CondExpr>& filter, bool* approx = nullptr, bool* single = nullptr, std::int8_t* places = nullptr) {
             std::string column = source.empty() ? label : source;
             std::vector<CaseWhenBranch>* branches = nullptr;
             if (auto* counted = std::get_if<AggFunc::CountCase>(&func.data)) branches = &counted->branches;
@@ -763,6 +794,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
             const bool adds = std::holds_alternative<AggFunc::Sum>(func.data) || std::holds_alternative<AggFunc::Avg>(func.data) ||
                               std::holds_alternative<AggFunc::SumDistinct>(func.data) || std::holds_alternative<AggFunc::AvgDistinct>(func.data);
+            if (places) *places = !branches && (adds || std::holds_alternative<AggFunc::Min>(func.data) || std::holds_alternative<AggFunc::Max>(func.data)) ? argument_places(column) : static_cast<std::int8_t>(-1);
             if (!branches && adds) {
                 const std::string text = source.empty() ? label : source;
                 bool number_is_double = false;
@@ -824,8 +856,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 mark_outer(ca->name, ca->outer);
                 ca->cls = class_of_name(ca->name);
             }
-            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter, &agg->arg_approx, &agg->arg_single);
-            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter, &aa->arg_approx, &aa->arg_single);
+            else if (auto* agg = std::get_if<SelectColumn::Agg>(&c.data)) agg->arg_class = aggregate(agg->func, agg->col, agg->source, agg->filter, &agg->arg_approx, &agg->arg_single, &agg->arg_places);
+            else if (auto* aa = std::get_if<SelectColumn::AggAlias>(&c.data)) aa->arg_class = aggregate(aa->func, aa->col, aa->source, aa->filter, &aa->arg_approx, &aa->arg_single, &aa->arg_places);
             else if (auto* ex_col = std::get_if<SelectColumn::Expr>(&c.data)) {
                 // (the result column is named by the expression as it was typed, unless it has an alias)
                 std::string typed;

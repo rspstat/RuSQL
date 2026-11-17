@@ -54,9 +54,11 @@ struct ArithExpr {
     // number, and arithmetic and comparisons use that number widened to a DOUBLE, as MySQL does (0.1 in a FLOAT column is not the 0.1 of a DOUBLE)
     struct Col  { std::string name; ValueClass cls = ValueClass::Unknown; int outer = 0; bool approx = false; ColKind kind = ColKind::Plain;
                   std::shared_ptr<const std::vector<std::string>> members; std::uint8_t fsp = 0; bool single = false;
-                  // `scale`: the places an exact number column shows (DECIMAL(10,2): 2, an integer column: 0), -1 for any other column (a FLOAT / DOUBLE, a text, a date ...); set by the binder
+                  // `scale`: the places an exact number column shows (DECIMAL(10,2): 2, an integer column: 0), -1 for any other column (a FLOAT / DOUBLE, a text, a date ...); set by the binder.
+                  // The one exception is the name of an aggregate of a DOUBLE with fixed places (`SUM(PI())`, with `approx` set): it carries those places (number_shape::fixed_places)
                   std::int8_t scale = -1; };
-    struct Num  { std::string value; };
+    // `approx`: the number was written with an exponent (1e0, 2.5E-3): a DOUBLE, whatever its value, so PI() + 1e0 has no fixed places and n + 1e0 is done in floating point
+    struct Num  { std::string value; bool approx = false; };
     // `hex`: the string is a hexadecimal or bit literal (0x4142, X'41', b'101'): the bytes it spells, which a number is asked of as the unsigned integer they make (0x41 + 0 is 65)
     struct Str  { std::string value; bool hex = false; };
     struct Add  { std::unique_ptr<ArithExpr> lhs, rhs; };
@@ -560,8 +562,9 @@ struct SelectColumn {
     // table in place of the alias (`orders.amount`); empty when `col` already names the table (or none).
     // `arg_approx`: the argument is a FLOAT / DOUBLE (or text, which MySQL reads as a double): SUM / AVG are done and shown as doubles (set by the binder)
     // `arg_single`: the argument is a FLOAT column (single precision): MIN / MAX of it is shown with the six digits a FLOAT is shown with (set by the binder)
-    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; bool arg_single = false; };
-    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; bool arg_single = false; };
+    // `arg_places`: the places the argument shows when it is a DOUBLE with a fixed number of them (PI(), PI() * 2): SUM / MIN / MAX of it show those places, AVG four more; -1 for any other (set by the binder)
+    struct Agg { AggFunc func; std::string col; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; bool arg_single = false; std::int8_t arg_places = -1; };
+    struct AggAlias { AggFunc func; std::string col; std::string alias; std::optional<CondExpr> filter; std::string source; ValueClass arg_class = ValueClass::Unknown; bool arg_approx = false; bool arg_single = false; std::int8_t arg_places = -1; };
     struct Func { std::string name; std::vector<std::string> args; std::optional<std::string> alias; };
     struct Expr { ArithExpr expr; std::optional<std::string> alias; };
     struct CaseWhen {

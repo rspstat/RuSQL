@@ -103,6 +103,40 @@ std::string widen_single(const std::string& text) {
     return sqlval::format_double(widened); // (written as MySQL writes a DOUBLE: 9.999999747378752e-6, not the 9.999999747378752e-06 of to_chars)
 }
 
+// HEX(x) of a number is the hex of the integer MySQL reads it as: a DOUBLE or FLOAT rounds half to even (HEX(2.5e0) is 2), a DECIMAL half away from zero (HEX(2.5) is 3,
+// which the function does itself). A number too big for an integer is left as it is (the function saturates it).
+std::string whole_of_double(const std::string& text) {
+    const auto number = parse_number(text);
+    if (!number) return text;
+    const double rounded = std::nearbyint(*number);
+    if (!(std::fabs(rounded) < 9.2e18)) return text;
+    return std::to_string(static_cast<long long>(rounded));
+}
+
+// Does the expression give a DOUBLE? A FLOAT / DOUBLE column or a text, a number written with an exponent, PI(), SQRT(..) ...; arithmetic and the functions that hand a number on
+// (ABS, ROUND, GREATEST ...) when an operand does -- what HEX(ABS(f)) needs to round half to even
+bool double_valued(const ArithExpr& e) {
+    if (auto* c = std::get_if<ArithExpr::Col>(&e.data)) return c->approx || c->cls == ValueClass::Text;
+    if (auto* n = std::get_if<ArithExpr::Num>(&e.data)) return n->approx;
+    if (auto* s = std::get_if<ArithExpr::Str>(&e.data)) return !s->hex && s->value != EXECUTOR_NULL_VALUE;
+    if (auto* a = std::get_if<ArithExpr::Add>(&e.data)) return double_valued(*a->lhs) || double_valued(*a->rhs);
+    if (auto* a = std::get_if<ArithExpr::Sub>(&e.data)) return double_valued(*a->lhs) || double_valued(*a->rhs);
+    if (auto* a = std::get_if<ArithExpr::Mul>(&e.data)) return double_valued(*a->lhs) || double_valued(*a->rhs);
+    if (auto* a = std::get_if<ArithExpr::Div>(&e.data)) return double_valued(*a->lhs) || double_valued(*a->rhs);
+    if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+        static const std::unordered_set<std::string> floating = {"SQRT", "POW", "POWER", "EXP", "LN", "LOG", "LOG2", "LOG10", "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2",
+                                                                 "COT", "DEGREES", "RADIANS", "RAND", "PI"};
+        static const std::unordered_set<std::string> hands_on = {"ABS", "MOD", "ROUND", "TRUNCATE", "CEIL", "CEILING", "FLOOR", "SIGN", "GREATEST", "LEAST", "COALESCE", "IFNULL", "NULLIF", "IF", "CASE"};
+        const std::string name = number_shape::upper_of(f->name);
+        if (floating.count(name)) return true;
+        if (!hands_on.count(name)) return false;
+        for (const ArithExpr& a : f->args) {
+            if (double_valued(a)) return true;
+        }
+    }
+    return false;
+}
+
 // What a value is when a number is asked of it: nothing special (Plain), or a date, a time, an ENUM or a SET -- the column itself, or (a date function) only its kind
 struct View {
     ColKind kind = ColKind::Plain;
@@ -279,6 +313,12 @@ NumVal number_tree(const ArithExpr& e, Leaf& leaf) {
         v.null = true;
         return v;
     }
+    // a number written with an exponent (1e0) is a DOUBLE whatever its value: n + 1e0 is floating point, 2e0 / 3 is 0.6666666666666666
+    if (const auto* written = std::get_if<ArithExpr::Num>(&e.data); written && written->approx) {
+        v.dbl = sqlval::leading_number(text);
+        v.approx = true;
+        return v;
+    }
     // the second form of an AVG ("<digits>\x02<places shown>", see held_average): the quotient as MySQL goes on with it, and the places it shows
     int shown_places = -1;
     if (const std::size_t marker = text.find('\x02'); marker != std::string::npos) {
@@ -359,7 +399,7 @@ std::string arithmetic_text(const ArithExpr& e, Leaf leaf, bool exact = false, b
 bool reads_text(const std::string& upper) {
     static const std::unordered_set<std::string> names = {"CONCAT", "CONCAT_WS", "UPPER", "UCASE", "LOWER", "LCASE", "LENGTH", "OCTET_LENGTH", "CHAR_LENGTH", "CHARACTER_LENGTH",
                                                           "SUBSTR", "SUBSTRING", "MID", "LEFT", "RIGHT", "REPLACE", "LPAD", "RPAD", "TRIM", "LTRIM", "RTRIM", "REVERSE", "REPEAT",
-                                                          "INSERT", "SUBSTRING_INDEX", "INSTR", "LOCATE", "POSITION", "STRCMP", "CAST", "CONVERT", "ASCII", "ORD"};
+                                                          "INSERT", "SUBSTRING_INDEX", "INSTR", "LOCATE", "POSITION", "STRCMP", "CAST", "CONVERT", "ASCII", "ORD", "BIN", "OCT", "CONV"};
     return names.count(upper) > 0;
 }
 
@@ -370,7 +410,7 @@ bool case_of_float_columns(const ArithExpr& e) {
     bool any = false;
     auto result = [&](const ArithExpr& r) {
         if (auto* str = std::get_if<ArithExpr::Str>(&r.data); str && str->value == EXECUTOR_NULL_VALUE) return true;
-        if (auto* num = std::get_if<ArithExpr::Num>(&r.data); num && !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos) return true; // (a whole number keeps a FLOAT a FLOAT)
+        if (auto* num = std::get_if<ArithExpr::Num>(&r.data); num && !num->approx && !num->value.empty() && num->value.find_first_not_of("-0123456789") == std::string::npos) return true; // (a whole number keeps a FLOAT a FLOAT)
         auto* col = std::get_if<ArithExpr::Col>(&r.data);
         any = any || (col && col->single);
         return col && col->single && col->kind == ColKind::Plain && col->outer == 0;
@@ -635,7 +675,8 @@ std::string Executor::eval_arith_value(const Row& row, const ArithExpr& expr) {
                 return equal ? std::string(EXECUTOR_NULL_VALUE) : first;
             }
             if (is_builtin_function(upper)) {
-                const bool exact_args = takes_exact_numbers(upper);
+                const bool hex_number = upper == "HEX" && v->args.size() == 1; // (HEX of a number -- an INT column, a FLOAT, a sum -- is the hex of the integer, not of its digits)
+                const bool exact_args = takes_exact_numbers(upper) || hex_number;
                 // the arguments are worked out once, as values (NULL is NULL, not the text of a string), and the function is told what each one is
                 std::vector<std::string> raw, values;
                 std::vector<char> kinds;
@@ -657,6 +698,14 @@ std::string Executor::eval_arith_value(const Row& row, const ArithExpr& expr) {
                             values.back() = widen_single(values.back()); // (SQRT of a FLOAT column reads the single-precision number; GREATEST(f, d) of a FLOAT and a DOUBLE column is a DOUBLE)
                         } else if (text_args && c->single && c->kind == ColKind::Plain && values.back() != EXECUTOR_NULL_VALUE) {
                             values.back() = sqlval::format_float_display(values.back()); // (CONCAT(f, '') is 3.14159)
+                        } else if (text_args && c->approx && c->scale >= 0 && c->name.size() > 4 && c->name[3] == '(' && values.back() != EXECUTOR_NULL_VALUE &&
+                                   (number_shape::upper_of(c->name.substr(0, 3)) == "MIN" || number_shape::upper_of(c->name.substr(0, 3)) == "MAX")) {
+                            // (CONCAT(MAX(PI()), '') is 3.141593: MIN and MAX hand the value on with its places, SUM and AVG as the whole double)
+                            if (const auto number = parse_number(values.back())) values.back() = number_shape::with_places(*number, c->scale);
+                        }
+                        if (hex_number && c->kind == ColKind::Plain && c->cls == ValueClass::Number && values.back() != EXECUTOR_NULL_VALUE) {
+                            if (c->approx) values.back() = whole_of_double(values.back());
+                            kind = 'N';
                         }
                         kinds.push_back(kind);
                     } else if (auto* sv = std::get_if<ArithExpr::Str>(&a.data)) {
@@ -666,7 +715,12 @@ std::string Executor::eval_arith_value(const Row& row, const ArithExpr& expr) {
                     } else if (auto* n = std::get_if<ArithExpr::Num>(&a.data)) {
                         raw.push_back(n->value);
                         values.push_back(n->value);
-                        kinds.push_back('N');
+                        char kind = n->approx ? 'D' : 'N'; // (1e0 is a DOUBLE: ROUND(2.5e0) is 2, as for a DOUBLE column)
+                        if (hex_number && n->approx) { // (HEX(255.5e0) is the hex of 256)
+                            values.back() = whole_of_double(n->value);
+                            kind = 'N';
+                        }
+                        kinds.push_back(kind);
                     } else {
                         bool approx = false;
                         int places = -1;
@@ -686,9 +740,14 @@ std::string Executor::eval_arith_value(const Row& row, const ArithExpr& expr) {
                             } // (the FLOAT a COALESCE(f, 0) gives is written as the double it widens to: 3.1415927410125732)
                             else if (case_of_float_columns(a)) value = sqlval::format_float_display(value); // (a CASE over FLOAT columns gives them as a column does)
                         }
+                        char kind = approx ? 'D' : 'E';
+                        if (hex_number && value != EXECUTOR_NULL_VALUE && class_of_expr(a) == ValueClass::Number) {
+                            if (approx || single_result(a) || double_valued(a)) value = whole_of_double(value);
+                            kind = 'N';
+                        }
                         raw.push_back("'" + value + "'");
                         values.push_back(std::move(value));
-                        kinds.push_back(approx ? 'D' : 'E');
+                        kinds.push_back(kind);
                     }
                 }
                 // ROUND(x, D) / TRUNCATE(x, D) of an exact number stop at the places the number SHOWS (R96): ROUND(10 / 3, 6) is 3.3333 (a quotient shows 4 places, though it holds 9),
@@ -830,6 +889,23 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         }
         return compare_classed(lc, rc, lv, rv);
     };
+    // PI() BETWEEN 3.141592 AND 3.141593, PI() IN (3.141593): a DOUBLE with a fixed number of places meets numbers written out the way it does in a comparison (see below, R96)
+    // (a list of one value is `=`, and so is BETWEEN a AND a; MySQL compares a longer list, bounds that differ and NOT BETWEEN as plain doubles: PI() IN (3.141593, 1) is false,
+    // PI() NOT BETWEEN 3.141593 AND 4 and PI() NOT BETWEEN 3.141593 AND 3.141593 are true)
+    const auto* between_values = std::get_if<ConditionValue::Between>(&cond.value.data);
+    const auto* list_values = std::get_if<ConditionValue::LiteralList>(&cond.value.data);
+    const bool as_equal = between_values ? (cond.op != Operator::NotBetween && between_values->lo == between_values->hi && !between_values->lo_quoted && !between_values->hi_quoted)
+                                         : (!list_values || list_values->values.size() == 1);
+    // (the left class of MAX(PI()) is not known -- MIN / MAX take the class of their argument by name -- but fixed places are a number's)
+    const int fixed_left_places = compares_numbers && as_equal && number_shape::fixed_places(cond.left) >= 0 ? number_shape::places_of(cond.left) : -1;
+    auto compare_written = [&](const std::string& lv, const std::string& bound, bool quoted) {
+        if (fixed_left_places >= 0 && !quoted && number_shape::plain_decimal(bound)) {
+            const int bound_places = bound.find('.') == std::string::npos ? 0 : static_cast<int>(bound.size() - bound.find('.') - 1);
+            const auto a = parse_number(lv), b = parse_number(bound);
+            if (a && b) return std::fabs(*a - *b) < 5.0 / std::pow(10.0, std::max(fixed_left_places, bound_places) + 1) ? 0 : (*a < *b ? -1 : 1);
+        }
+        return compare(left_class, written_class(bound, quoted), lv, bound, quoted);
+    };
 
     if (auto* bv = std::get_if<ConditionValue::Between>(&cond.value.data)) {
         if (val == EXECUTOR_NULL_VALUE) return Tri::Unknown;
@@ -839,7 +915,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
         if (left_single) between_val = widen_single(between_val);
         auto side = [&](const std::string& bound, bool quoted, bool lower) {
             if (bound == EXECUTOR_NULL_VALUE) return Tri::Unknown;
-            const int order = compare(left_class, written_class(bound, quoted), between_val, bound, quoted);
+            const int order = compare_written(between_val, bound, quoted);
             return tri(lower ? order >= 0 : order <= 0);
         };
         const Tri low = side(bv->lo, bv->lo_quoted, true), high = side(bv->hi, bv->hi_quoted, false);
@@ -856,7 +932,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
             for (std::size_t i = 0; i < ll->values.size(); i++) {
                 if (ll->values[i] == EXECUTOR_NULL_VALUE) continue; // (a NULL in the list is UNKNOWN below, never equal)
                 const bool quoted = i < ll->quoted.size() && ll->quoted[i];
-                if (compare(left_class, written_class(ll->values[i], quoted), (left_viewed || left_single) && !quoted ? number_val : val, ll->values[i], quoted) == 0) return tri(cond.op == Operator::In);
+                if (compare_written((left_viewed || left_single) && !quoted ? number_val : val, ll->values[i], quoted) == 0) return tri(cond.op == Operator::In);
             }
             return has_null ? Tri::Unknown : tri(cond.op == Operator::NotIn);
         }
@@ -958,7 +1034,7 @@ Executor::Tri Executor::eval_single3(const Row& row, const Condition& cond) {
     // A DOUBLE with a fixed number of places (PI()) against an exact number or another such DOUBLE: MySQL takes the two as equal when they differ by less than 5 in the place after
     // the places they both have -- PI() = 3.141593 and PI() <= 3.14159265 are true, PI() > 3.14159265 false (R96)
     int tolerance_places = -1;
-    if (compares_numbers && left_class == ValueClass::Number && right_class == ValueClass::Number && (right_expr || !right_sure)) {
+    if (compares_numbers && (left_class == ValueClass::Number || number_shape::fixed_places(cond.left) >= 0) && right_class == ValueClass::Number && (right_expr || !right_sure)) {
         const int lp = number_shape::places_of(cond.left);
         const int rp = right_expr ? number_shape::places_of(*right_expr) : right_literal_places;
         const bool fixed = number_shape::fixed_places(cond.left) >= 0 || (right_expr && number_shape::fixed_places(*right_expr) >= 0);

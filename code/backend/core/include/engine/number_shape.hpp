@@ -36,7 +36,7 @@ constexpr int kNull = -2;     // a NULL written out: it has no type, the other a
 // The places an expression shows as an exact number, kNotExact when it is not one
 inline int exact_scale(const ArithExpr& e) {
     if (auto* num = std::get_if<ArithExpr::Num>(&e.data)) {
-        if (num->value.empty() || num->value.find_first_of("eE") != std::string::npos) return kNotExact;
+        if (num->approx || num->value.empty() || num->value.find_first_of("eE") != std::string::npos) return kNotExact;
         const std::size_t dot = num->value.find('.');
         return dot == std::string::npos ? 0 : static_cast<int>(num->value.size() - dot - 1);
     }
@@ -81,6 +81,9 @@ inline int places_of(const ArithExpr& e) {
 }
 
 inline int fixed_places(const ArithExpr& e) {
+    // an aggregate of such a DOUBLE named in an expression (`SUM(PI()) + 1`, the column the row holds it as): the binder leaves the places it shows in `scale`, which an exact column
+    // does not use for a DOUBLE (exact_scale asks !approx)
+    if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) return col->outer == 0 && col->approx && col->scale >= 0 ? col->scale : kNoPlaces;
     if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
         const std::string name = upper_of(f->name);
         if (name == "PI" && f->args.empty()) return 6;

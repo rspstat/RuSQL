@@ -548,25 +548,30 @@ std::string fn_unhex(const BuiltinCall& c) {
     return out;
 }
 
+std::string convert_base(const std::string& s, long long from, long long to);
+
+// BIN(x) and OCT(x) are CONV(x, 10, 2) and CONV(x, 10, 8): the argument is read as a text, so the digits after a point are not read (BIN(255.7) is BIN(255), not BIN(256))
 std::string fn_bin(const BuiltinCall& c) {
     if (argc(c) != 1) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
-    return base_text(static_cast<unsigned long long>(int_of(c.value(0))), 2);
+    return convert_base(c.value(0), 10, 2);
 }
 
 std::string fn_oct(const BuiltinCall& c) {
     if (argc(c) != 1) wrong_count(c);
     if (is_null(c.value(0))) return kNull;
-    return base_text(static_cast<unsigned long long>(int_of(c.value(0))), 8);
+    return convert_base(c.value(0), 10, 8);
 }
 
 std::string fn_conv(const BuiltinCall& c) {
     if (argc(c) != 3) wrong_count(c);
     if (any_null(c)) return kNull;
-    const long long from = int_of(c.value(1)), to = int_of(c.value(2));
+    return convert_base(c.value(0), int_of(c.value(1)), int_of(c.value(2)));
+}
+
+std::string convert_base(const std::string& s, long long from, long long to) {
     const long long afrom = from < 0 ? -from : from, ato = to < 0 ? -to : to;
     if (afrom < 2 || afrom > 36 || ato < 2 || ato > 36) return kNull;
-    std::string s = c.value(0);
     bool negative = false;
     std::size_t i = 0;
     if (!s.empty() && s[0] == '-') { negative = true; i = 1; }
