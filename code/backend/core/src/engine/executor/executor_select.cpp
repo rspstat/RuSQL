@@ -3263,7 +3263,14 @@ StringResult Executor::exec_select(SharedDatabase& s, std::string table, std::op
     if (having && !has_agg) { // (with aggregates and no GROUP BY, HAVING is about the one row of aggregates: below)
         std::vector<const Row*> kept;
         for (const Row* rp : rows_p) {
-            if (matches_condition_with_subquery(s, *rp, having)) kept.push_back(rp);
+            if (having_aliases.empty()) {
+                if (matches_condition_with_subquery(s, *rp, having)) kept.push_back(rp);
+                continue;
+            }
+            // `SELECT x AS k FROM t HAVING k > 1`: the alias of an item is read before a column of the same name
+            Row probe = *rp;
+            for (auto& a : having_aliases) probe[a.name] = having_alias_value(a, *rp);
+            if (matches_condition_with_subquery(s, probe, having)) kept.push_back(rp);
         }
         rows_p = std::move(kept);
     }

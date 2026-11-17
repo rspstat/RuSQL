@@ -120,7 +120,9 @@ TEST_CASE("a column that is not grouped by is an error", "[group_by_rules]") {
     REQUIRE(error_of(ex, "SELECT SUM(v) + id FROM a").find("nonaggregated column 'id'") != std::string::npos);
     REQUIRE(error_of(ex, "SELECT MAX(v), UPPER(s) FROM a").find(no_group + "2 ") == 0);
     REQUIRE(error_of(ex, "SELECT *, COUNT(*) FROM a").find(no_group + "1 ") == 0);
-    REQUIRE(error_of(ex, "SELECT v FROM a HAVING v > 1").find(no_group) == 0);
+    // a HAVING with no aggregate in it and no GROUP BY filters rows (MySQL answers them); one that has an aggregate makes the query an aggregated one
+    REQUIRE(q(ex, "SELECT v FROM a HAVING v > 1 ORDER BY v") == Rows{{"7"}, {"10"}, {"30"}});
+    REQUIRE(error_of(ex, "SELECT v FROM a HAVING SUM(v) > 1").find(no_group + "1 ") == 0);
     REQUIRE(error_of(ex, "SELECT g, id, COUNT(*) FROM a GROUP BY g").find("Expression #2" + grouped + "'id'") == 0);
     REQUIRE(error_of(ex, "SELECT COUNT(*), s FROM a GROUP BY g").find("Expression #2" + grouped) == 0);
     REQUIRE(error_of(ex, "SELECT g, SUM(v) + id FROM a GROUP BY g").find("Expression #2" + grouped) == 0);

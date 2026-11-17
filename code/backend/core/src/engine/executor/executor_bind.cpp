@@ -419,9 +419,23 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             return spelled == arg ? ref : ref.substr(0, lp + 1) + distinct + spelled + ")";
         }
 
+        // A name that only the select list gives (an alias) in a clause that reads the tables alone: WHERE and ON do not see `k` of `SELECT x AS k` (MySQL 1054); it used to
+        // be taken for a column that no row has, so `WHERE k > 1` answered no rows
+        bool alias_only(const std::string& n, const char* clause) const {
+            const std::string where = clause;
+            if ((where != "where clause" && where != "on clause" && where != "field list") || n.find('.') != std::string::npos || !plain_reference(n) || hidden_window_name(n)) return false;
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                for (const BindTable& t : (*it)->tables) {
+                    if (has_column(t, n)) return false;
+                }
+                if ((*it)->aliases.count(n)) return true;
+            }
+            return false;
+        }
+
         void name(std::string& n, const char* clause) {
             n = canonical(n);
-            if (check && !error && !known(n)) error = "Unknown column '" + n + "' in '" + clause + "'";
+            if (check && !error && (!known(n) || alias_only(n, clause))) error = "Unknown column '" + n + "' in '" + clause + "'";
             else if (check && !error && ambiguous(n, clause)) error = "Column '" + n + "' in " + clause + " is ambiguous";
         }
 
@@ -430,6 +444,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         bool ambiguous(const std::string& n, const char* clause) const {
             if (!plain_reference(n) || n.find('.') != std::string::npos) return false;
             const std::string where = clause;
+            if (where == "having clause") return false; // (HAVING reads the select list and the columns grouped by, or says 1054: having_names)
             const bool reads_select_list = where == "order clause" || where == "having clause";
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
                 const BindScope& scope = **it;
@@ -520,6 +535,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             if (error) return;
             if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) {
                 if (col->name.find('(') != std::string::npos) col->name = canonical_aggregate(col->name);
+                if (check && !error && col->name.find('(') != std::string::npos && std::string(clause) == "having clause") having_aggregate_argument(col->name);
                 name(col->name, clause);
                 mark_outer(col->name, col->outer);
                 const ColumnDef* def = nullptr;
@@ -626,7 +642,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                         c.right_class = ValueClass::Number;
                     } else {
                         lit->value = canonical(lit->value);
-                        if (check && !error && lit->value.find('.') != std::string::npos && !known(lit->value, false)) {
+                        if (check && !error && ((lit->value.find('.') != std::string::npos && !known(lit->value, false)) || alias_only(lit->value, clause))) {
                             error = "Unknown column '" + lit->value + "' in '" + clause + "'";
                         } else if (check && !error && lit->value.find('.') == std::string::npos && table_column(lit->value) && ambiguous(lit->value, clause)) {
                             error = "Column '" + lit->value + "' in " + clause + " is ambiguous"; // (a bare word is a column only when a table has it)
@@ -956,6 +972,91 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
             }
         }
 
+        // Does the expression name an aggregate (`SUM(v)`, the parser keeps one as a column of that text)? A HAVING that does makes the query an aggregated one.
+        bool has_aggregate_reference(const ArithExpr& e) const {
+            if (auto* col = std::get_if<ArithExpr::Col>(&e.data)) return col->name.find('(') != std::string::npos && aggregate_reference_class(col->name).has_value();
+            if (auto* v = std::get_if<ArithExpr::Add>(&e.data)) return has_aggregate_reference(*v->lhs) || has_aggregate_reference(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Sub>(&e.data)) return has_aggregate_reference(*v->lhs) || has_aggregate_reference(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Mul>(&e.data)) return has_aggregate_reference(*v->lhs) || has_aggregate_reference(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Div>(&e.data)) return has_aggregate_reference(*v->lhs) || has_aggregate_reference(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Cmp>(&e.data)) return has_aggregate_reference(*v->lhs) || has_aggregate_reference(*v->rhs);
+            if (auto* v = std::get_if<ArithExpr::Pred>(&e.data)) return has_aggregate_reference(*v->cond);
+            if (auto* f = std::get_if<ArithExpr::Func>(&e.data)) {
+                for (const ArithExpr& a : f->args) {
+                    if (has_aggregate_reference(a)) return true;
+                }
+            }
+            return false;
+        }
+
+        bool has_aggregate_reference(const CondExpr& e) const {
+            if (auto* a = std::get_if<CondExpr::And>(&e.data)) return has_aggregate_reference(*a->lhs) || has_aggregate_reference(*a->rhs);
+            if (auto* o = std::get_if<CondExpr::Or>(&e.data)) return has_aggregate_reference(*o->lhs) || has_aggregate_reference(*o->rhs);
+            if (auto* n = std::get_if<CondExpr::Not>(&e.data)) return has_aggregate_reference(*n->inner);
+            if (auto* leaf = std::get_if<CondExpr::Leaf>(&e.data)) {
+                if (has_aggregate_reference(leaf->condition.left)) return true;
+                if (auto* lit = std::get_if<ConditionValue::Literal>(&leaf->condition.value.data)) return !lit->quoted && lit->value.find('(') != std::string::npos && aggregate_reference_class(lit->value).has_value();
+                if (auto* value = std::get_if<ConditionValue::Arith>(&leaf->condition.value.data)) return has_aggregate_reference(value->expr);
+            }
+            return false;
+        }
+
+        // The names HAVING reads outside an aggregate (MySQL): the columns the select list gives (by name or as the source of an alias), its aliases, what `*` and `t.*` stand for and the
+        // columns grouped by -- any other is unknown (1054), even one two tables have (`SELECT a FROM ua JOIN ub ON ua.x = ub.x HAVING x > 0`); a name two select items give is ambiguous (1052).
+        // Inside an aggregate HAVING reads the columns of the tables, which having_aggregate_argument checks.
+        void having_names(const Statement::Select& sel, const BindScope& scope, const CondExpr& having) {
+            if (std::any_of(scope.tables.begin(), scope.tables.end(), [](const BindTable& t) { return t.open; })) return; // (a table whose columns are not known: nothing to say)
+            std::vector<std::string> names;
+            own_columns(having, names);
+            for (const std::string& name : names) {
+                if (scope.aliases.count(name) || std::any_of(scope.aliases.begin(), scope.aliases.end(), [&](const std::string& a) { return ieq(a, name); })) continue;
+                const std::string bare = last_part(name);
+                const bool qualified = bare.size() != name.size();
+                auto same = [&](const std::string& item) { return ieq(last_part(item), bare) && (!qualified || item.find('.') == std::string::npos || ieq(item, name)); };
+                std::unordered_set<std::string> items; // the columns of the select list that are this name
+                std::size_t star_hits = 0;
+                for (const SelectColumn& c : sel.columns) {
+                    if (auto* col = std::get_if<SelectColumn::Column>(&c.data)) {
+                        if (same(col->name)) items.insert(col->name);
+                    } else if (auto* ca = std::get_if<SelectColumn::ColumnAlias>(&c.data)) {
+                        if (same(ca->name)) items.insert(ca->name);
+                    } else if (auto* all = std::get_if<SelectColumn::All>(&c.data)) {
+                        std::size_t count = 0, outside = 0;
+                        const auto group = scope.merged_tables.find(bare);
+                        for (std::size_t ti = 0; ti < scope.tables.size(); ti++) {
+                            const BindTable& t = scope.tables[ti];
+                            if (t.open || !has_column(t, bare)) continue;
+                            if (!all->table.empty() && !ieq(t.full, all->table) && !ieq(t.bare, all->table)) continue;
+                            if (qualified && !ieq(t.full + "." + bare, name) && !ieq(t.bare + "." + bare, name)) continue;
+                            count++;
+                            if (group == scope.merged_tables.end() || !group->second.count(ti)) outside++;
+                        }
+                        star_hits += outside + (group != scope.merged_tables.end() && count > outside ? 1 : 0);
+                    }
+                }
+                const std::size_t hits = items.size() + star_hits;
+                if (hits >= 2 && !qualified) { error = "Column '" + name + "' in having clause is ambiguous"; return; }
+                if (hits >= 1) continue;
+                bool grouped = false;
+                if (sel.group_by) {
+                    for (const std::string& g : *sel.group_by) {
+                        if (plain_reference(g) && same(g)) grouped = true;
+                    }
+                }
+                if (!grouped) { error = "Unknown column '" + name + "' in 'having clause'"; return; }
+            }
+        }
+
+        // `HAVING COUNT(x) > 0` with an x that two tables have: an aggregate reads the columns of the tables, and the name is ambiguous (MySQL 1052)
+        void having_aggregate_argument(const std::string& ref) {
+            const std::size_t lp = ref.find('('), rp = ref.rfind(')');
+            if (lp == std::string::npos || lp == 0 || rp != ref.size() - 1 || !aggregate_reference_class(ref)) return;
+            std::string arg = ref.substr(lp + 1, rp - lp - 1);
+            if (arg.rfind("DISTINCT ", 0) == 0) arg.erase(0, 9);
+            if (!plain_reference(arg) || arg.find('.') != std::string::npos) return;
+            if (ambiguous(arg, "field list")) error = "Column '" + arg + "' in having clause is ambiguous";
+        }
+
         void having_any_value(const Statement::Select& sel, const CondExpr& having) {
             std::vector<std::string> names;
             any_value_columns(having, names);
@@ -1131,6 +1232,7 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                 }
             }
             if (sel.having) cond(*sel.having, "having clause");
+            if (sel.having && check && !error) having_names(sel, scope, *sel.having);
             if (sel.having && check && !error) having_any_value(sel, *sel.having);
             for (auto& o : sel.order_by) {
                 if (subquery_item_name(o.column)) continue; // (a scalar subquery of the select list, by its alias or position)
@@ -1209,7 +1311,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
         // by, columns that depend on them (the primary key of their table is grouped by) or none at all. The rest used to be left out of the answer (no
         // GROUP BY) or come out empty (with one): a column of some row of the group is no answer.
         void only_full_group_by(Statement::Select& sel, const BindScope& scope) {
-            const bool aggregated = sel.group_by.has_value() || sel.having.has_value() || Executor::columns_have_aggregate(sel.columns);
+            // (a HAVING with no aggregate in it and no GROUP BY filters rows: it does not make the query an aggregated one)
+            const bool aggregated = sel.group_by.has_value() || (sel.having.has_value() && has_aggregate_reference(*sel.having)) || Executor::columns_have_aggregate(sel.columns);
             if (!aggregated) return;
             // SET sql_mode = '' (what mysqldump does first, and an old application) or any mode without ONLY_FULL_GROUP_BY: the rule is off (ANSI includes it)
             if (auto mode = ex.user_vars.find("@sql_mode"); mode != ex.user_vars.end()) {
@@ -1287,18 +1390,8 @@ std::optional<std::string> Executor::bind_statement(SharedDatabase& s, Statement
                     return;
                 }
             }
-            // HAVING and ORDER BY read the columns of the group the same way (a name the select list gives is the select list's)
-            if (sel.having) {
-                std::vector<std::string> names;
-                own_columns(*sel.having, names);
-                for (auto& name : names) {
-                    if (scope.aliases.count(name)) continue;
-                    auto tc = table_column(name);
-                    if (!tc || is_grouped(tc->first, tc->second)) continue;
-                    error = "Non-grouping field '" + name + "' is used in HAVING clause";
-                    return;
-                }
-            }
+            // ORDER BY reads the columns of the group the same way (a name the select list gives is the select list's); HAVING reads only the select list and the columns
+            // grouped by (having_names says 1054 for any other name)
             std::size_t item = 0;
             for (auto& o : sel.order_by) {
                 item++;

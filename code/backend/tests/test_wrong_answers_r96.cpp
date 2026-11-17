@@ -329,3 +329,44 @@ TEST_CASE("R96b: a number written with an exponent is a DOUBLE", "[r96][double]"
           std::vector<std::string>{"2", "4", "4", "-2", "3", "2.5", "2", "3"});
     CHECK(rows_of(ex, "SELECT 1e0 = 1, 1e0 IN (1), 1e0 BETWEEN 0 AND 1, -(1e0), MOD(10e0, 3), 10e0 DIV 3")[0] == std::vector<std::string>{"1", "1", "1", "-1", "1", "3"});
 }
+
+// R96c -- the names HAVING and WHERE read (the row of RECOMMAND.md "a name HAVING cannot see is 1054, not 1052"), widened to the family: HAVING with no GROUP BY and no aggregate, the select list's
+// names, an aggregate in HAVING, a select-list alias in WHERE / ON / the select list. The answers are the ones a real MySQL 8.4.9 gives (corpus/having_names_r96c.sql compares them).
+TEST_CASE("R96c: HAVING reads the names of the select list and the columns grouped by, WHERE does not read an alias", "[r96][having]") {
+    TempDataDir dir("r96c_having_names");
+    Executor ex(dir.path);
+    ok(ex, "CREATE DATABASE d");
+    ok(ex, "USE d");
+    ok(ex, "CREATE TABLE ua (x INT, a INT)");
+    ok(ex, "CREATE TABLE ub (x INT, y INT, b INT)");
+    ok(ex, "INSERT INTO ua VALUES (1, 10), (2, 20), (3, 30)");
+    ok(ex, "INSERT INTO ub VALUES (1, 5, 100), (2, 6, 200), (3, 5, 300)");
+    const std::string join = " FROM ua JOIN ub ON ua.x = ub.x";
+    // a HAVING with no aggregate and no GROUP BY filters rows; an alias of the select list is read before a column
+    CHECK(rows_of(ex, "SELECT a FROM ua HAVING a > 10 ORDER BY a") == column({"20", "30"}));
+    CHECK(rows_of(ex, "SELECT x AS k FROM ua HAVING k > 1 ORDER BY k") == column({"2", "3"}));
+    CHECK(rows_of(ex, "SELECT x AS k FROM ua HAVING x > 1 ORDER BY k") == column({"2", "3"})); // (the source of an alias is a name of the select list too)
+    CHECK(rows_of(ex, "SELECT a + 1 AS k FROM ua HAVING k > 11 ORDER BY k") == column({"21", "31"}));
+    CHECK(rows_of(ex, "SELECT * FROM ua HAVING x > 1 ORDER BY x")[0] == std::vector<std::string>{"2", "20"});
+    CHECK(rows_of(ex, "SELECT ua.* FROM ua JOIN ub ON ua.x = ub.x HAVING x > 2")[0] == std::vector<std::string>{"3", "30"}); // (`t.*` gives its one x)
+    CHECK(error_of(ex, "SELECT a FROM ua HAVING SUM(x) > 0").find("In aggregated query without GROUP BY") == 0); // (an aggregate makes it an aggregated query)
+    // any other name is unknown (1054), even one two tables have; a column grouped by is a name of HAVING
+    CHECK(error_of(ex, "SELECT a FROM ua HAVING x > 1").find("Unknown column 'x' in 'having clause'") == 0);
+    CHECK(error_of(ex, "SELECT a + 1 FROM ua HAVING a > 11").find("Unknown column 'a' in 'having clause'") == 0);
+    CHECK(error_of(ex, "SELECT a" + join + " HAVING x > 0").find("Unknown column 'x' in 'having clause'") == 0);
+    CHECK(error_of(ex, "SELECT a" + join + " HAVING ua.x > 0").find("Unknown column 'ua.x' in 'having clause'") == 0);
+    CHECK(error_of(ex, "SELECT COUNT(*) FROM ua GROUP BY x HAVING a > 1").find("Unknown column 'a' in 'having clause'") == 0);
+    CHECK(rows_of(ex, "SELECT COUNT(*) FROM ua GROUP BY x HAVING x > 1 ORDER BY 1").size() == 2);
+    // two select items of one name are ambiguous (1052); an aggregate in HAVING reads the tables
+    CHECK(error_of(ex, "SELECT ua.x, ub.x" + join + " HAVING x > 0").find("Column 'x' in having clause is ambiguous") == 0);
+    CHECK(error_of(ex, "SELECT a, COUNT(*)" + join + " GROUP BY a HAVING COUNT(x) > 0").find("Column 'x' in having clause is ambiguous") == 0);
+    CHECK(rows_of(ex, "SELECT a AS x" + join + " HAVING x > 0").size() == 3); // (an alias wins over the two columns)
+    // a select-list alias is no name of WHERE, ON or the select list itself
+    CHECK(error_of(ex, "SELECT x AS k FROM ua WHERE k > 1").find("Unknown column 'k' in 'where clause'") == 0);
+    CHECK(error_of(ex, "SELECT a + 1 AS k FROM ua WHERE k > 11").find("Unknown column 'k' in 'where clause'") == 0);
+    CHECK(error_of(ex, "SELECT x AS k FROM ua WHERE EXISTS (SELECT 1 FROM ua u2 WHERE u2.x = k)").find("Unknown column 'k' in 'where clause'") == 0);
+    CHECK(error_of(ex, "SELECT x AS k, k + 1 FROM ua").find("Unknown column 'k' in 'field list'") == 0);
+    CHECK(rows_of(ex, "SELECT x AS k FROM ua ORDER BY k DESC") == column({"3", "2", "1"})); // (ORDER BY and GROUP BY read aliases)
+    CHECK(rows_of(ex, "SELECT * FROM (SELECT x AS k FROM ua) d WHERE k > 1 ORDER BY k") == column({"2", "3"})); // (a derived table's column is a column)
+    CHECK(rows_of(ex, "SELECT a AS x FROM ua WHERE x > 1 ORDER BY a") == column({"20", "30"})); // (WHERE reads the column x, not the alias)
+}

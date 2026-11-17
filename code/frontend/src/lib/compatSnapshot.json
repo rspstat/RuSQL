@@ -563,6 +563,14 @@
       "bothFail": 9
     },
     {
+      "name": "having_names_r96c",
+      "en": "The names HAVING and WHERE read: HAVING with no GROUP BY and no aggregate filters rows, HAVING reads the select list (columns, aliases, * and t.*) and the columns grouped by (any other name is 1054, even an ambiguous one; two select items of one name are 1052), an aggregate in HAVING reads the tables, and a select-list alias is no name of WHERE, ON or the select list (1054)",
+      "ko": "HAVING · WHERE이 읽는 이름: GROUP BY도 집계도 없는 HAVING은 행을 거름, HAVING은 선택 목록(열 · 별칭 · * · t.*)과 묶는 열만 읽음(그 밖의 이름은 모호한 것도 1054, 같은 이름의 선택 항목이 둘이면 1052), HAVING 안의 집계는 표의 열을 읽음, 선택 목록의 별칭은 WHERE · ON · 선택 목록 자신의 이름이 아님(1054)",
+      "statements": 66,
+      "different": 0,
+      "bothFail": 32
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -613,8 +621,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1059,
-    "assertions": 1526921
+    "cases": 1060,
+    "assertions": 1526978
   },
   "bugsFound": 206
 }

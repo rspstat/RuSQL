@@ -116,7 +116,7 @@ TEST_CASE("a column two tables have is ambiguous", "[name_resolution]") {
     REQUIRE(q(ex, "SELECT g, COUNT(*) FROM a JOIN b ON b.a_id = a.id GROUP BY g HAVING g > 0 ORDER BY g") == Rows{{"1", "2"}, {"2", "1"}});
     // HAVING reads the select list's id first, too
     REQUIRE(q(ex, "SELECT a.id, COUNT(*)" + join + " GROUP BY a.id HAVING id > 0 ORDER BY id") == Rows{{"1", "2"}, {"3", "1"}});
-    REQUIRE(fails_with(ex, "SELECT k" + join + " GROUP BY k HAVING id > 0", "ambiguous"));
+    REQUIRE(fails_with(ex, "SELECT k" + join + " GROUP BY k HAVING id > 0", "Unknown column 'id' in 'having clause'")); // (not a name of the select list: MySQL 1054 even for one two tables have)
     REQUIRE(q(ex, "SELECT a.g AS grp, COUNT(*) AS id" + join + " GROUP BY a.g HAVING id > 1") == Rows{{"1", "2"}}); // (a name the select list gives wins)
 }
 
@@ -190,8 +190,8 @@ TEST_CASE("HAVING and ORDER BY of an aggregating query name what is grouped", "[
     Executor ex(dir.path);
     open_db(ex);
     tables(ex);
-    REQUIRE(fails_with(ex, "SELECT g, COUNT(*) FROM a GROUP BY g HAVING v > 3", "Non-grouping field 'v' is used in HAVING clause"));
-    REQUIRE(fails_with(ex, "SELECT COUNT(*) FROM a HAVING v > 3", "Non-grouping field 'v' is used in HAVING clause"));
+    REQUIRE(fails_with(ex, "SELECT g, COUNT(*) FROM a GROUP BY g HAVING v > 3", "Unknown column 'v' in 'having clause'")); // (HAVING reads the select list and the columns grouped by: MySQL 1054)
+    REQUIRE(fails_with(ex, "SELECT COUNT(*) FROM a HAVING v > 3", "Unknown column 'v' in 'having clause'"));
     REQUIRE(fails_with(ex, "SELECT g, COUNT(*) FROM a GROUP BY g ORDER BY v", "Expression #1 of ORDER BY clause is not in GROUP BY clause"));
     REQUIRE(fails_with(ex, "SELECT g, COUNT(*) FROM a GROUP BY g ORDER BY g, w", "Expression #2 of ORDER BY clause is not in GROUP BY clause"));
     REQUIRE(fails_with(ex, "SELECT COUNT(*) FROM a ORDER BY v", "In aggregated query without GROUP BY, expression #1 of ORDER BY"));
