@@ -3795,6 +3795,16 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 - **앱 · 설치 파일**: `npm run tauri build`(`stage-engine`이 이 릴리스 엔진과 VC++ 런타임 3개를 넣음) → `rusql-ui.exe`(11월 21일 20:03)와 `RuSQL_2.3.0_x64-setup.exe`(6.26 MB, 같은 시각). 설치 파일을 Bandizip으로 풀어 `test_installed_layout.py`를 돌렸다: **19개 모두 통과**(엔진 · 런타임 DLL이 그 폴더의 것, 데이터가 `%APPDATA%\RuSQL\data`, 로그인 · SQL · 배경 스레드 동작).
 - **하지 않은 것**: 설치 파일을 실제로 설치(레지스트리 · 시작 메뉴)하는 것, 깨끗한 PC에서의 실행 — 이 PC에는 VC++ 재배포 패키지와 WebView2가 있어 "없는 경우"를 재현할 수 없다. 전시 전에 다른 PC나 새 Windows 계정에서 직접 한 번 설치해 봐야 한다(사용자 몫).
 
+### 11월 21일 (세 번째) — 전시 5분 시연 안내서와 리허설 (사용자 "필요합니다")
+
+**만든 것**: `docs/mds/EXHIBITION.md`(발표자용 한 장짜리 — 준비 · 5분 순서 표 · 복사해서 쓸 SQL · 주의 · 자주 받는 질문), 인쇄용 `docs/EXHIBITION_시연순서.pdf`(A4 2쪽), 시연 데이터 `docs/mds/EXHIBITION_setup.sql`(편집기에 붙여 넣고 Run All 한 번, 약 3초: 데이터베이스 `expo` — 고객 300 · 주문 1,500(외래키) · `logs` 131,072행), 리허설 스크립트 `code/test/frontend/cdp/rehearse_demo.py`. 옛 `code/test/demo/DEMO.md`는 개발 PC에서 Python(`seed.py`)으로 데이터를 넣는 3분짜리라 따로 두었고(`demo` 데이터베이스와 겹치지 않게 새 데이터는 `expo`), 안내서에서 연결만 해 두었다.
+**리허설**(실제 앱, 안내서의 SQL 그대로): 준비 스크립트 → 홈의 View Topology 창 → 조인 + 차트 → 인덱스 장면 → 인덱스 다시 지우기 → 문장의 여행 → 세션 패널의 행 락 → B+Tree · MVCC 페이지 → Start Server + MCP(`execute_sql`, 새 탭 · 쓰기 · 편집기에서 실행) — **9단계 모두 통과**. 인덱스 장면: `EXPLAIN ANALYZE`가 Seq Scan 131,072행 약 57~69 ms, 조언 카드의 Try it이 **약 39 ms → 0.2 ms(약 200배)**, 만든 뒤 Index Scan 약 0.2 ms, `DROP INDEX`로 다시 Seq Scan. 문장의 여행은 11단계.
+**리허설이 잡아낸 것 두 가지**(안내서의 "주의"에 적음):
+- 처음에는 인덱스 장면의 질의를 `SELECT COUNT(*) …`로 썼는데, 리허설 중간에 로그아웃 → 로그인(엔진 재시작)이 들어가자 Try it이 38.96 → 38.97 ms(변화 없음), 인덱스를 만든 뒤에도 57 ms가 나왔다. 811줄 "정직한 한계 ①"(재시작 직후엔 행 위치 캐시가 비어 인덱스를 타는 집계가 전체를 읽음)이 그대로 나온 것이다. 전시 때 "미리 준비해 두고 앱을 다시 켜는" 상황이 바로 이 경우라서 **시연 질의를 `SELECT *` 형태로 바꿨다**(재시작 뒤에도 Try it 38.9 → 0.17 ms, 인덱스 뒤 0.2 ms로 확인). 엔진을 고친 것이 아니라 시연에서 피한 것이다.
+- 문장의 여행은 직전에 실행한 문장에 누르면 결과 캐시에서 나와 "Step 1 of 1"뿐이다 → 실행하지 않은 새 문장에 누르도록 적었다.
+**엔진에서 새로 찾은 작은 차이**(고치지 않음, `RECOMMAND.md` 6번 표에 한 줄): `INSERT INTO t WITH … SELECT …`가 `Expected VALUES, SET or SELECT`로, `CREATE TABLE t AS WITH … SELECT …`가 `Expected '('`로 거절된다(MySQL 8.0은 받음; `WITH`로 시작하는 `SELECT`는 됨). 그래서 큰 표는 `INSERT … SELECT`로 행을 두 배씩 늘려 만들었다. 전시 전 엔진 동결 방침대로 적어만 둔다.
+**하지 않은 것**: Claude Desktop 자체(리허설은 MCP 클라이언트 SDK로 같은 도구를 호출) — 전시 전에 직접 한 번 해 보아야 한다. `DROP DATABASE expo;`로 다시 만드는 경로는 앱에서 돌려 보지 않았다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
