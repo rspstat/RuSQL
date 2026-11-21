@@ -163,7 +163,7 @@ const DURABILITY: Item[] = [
   },
   {
     t: L("Crash recovery", "크래시 복구"),
-    s: L("on boot: undo unfinished, replay redo, rebuild indexes; timed in information_schema.recovery", "부팅 시 미완료 undo → redo 재생 → 인덱스 재구성, 걸린 시간은 information_schema.recovery에 기록"),
+    s: L("on boot: undo unfinished, replay redo, rebuild indexes and the primary-key row positions (so an index-started aggregate works at once); timed in information_schema.recovery", "부팅 시 미완료 undo → redo 재생 → 인덱스와 기본키 행 위치 재구성(인덱스로 시작하는 집계가 바로 동작), 걸린 시간은 information_schema.recovery에 기록"),
   },
 ];
 
@@ -188,7 +188,7 @@ const AI: Item[] = [
 // The three engine_core stages: a few short points each.
 const PARSER: Text[] = [
   L("SQL text → AST (DDL, DML, DCL, TCL, procedures)", "SQL 텍스트 → AST (DDL, DML, DCL, TCL, 프로시저)"),
-  L("reads mysqldump files and the statements real clients send (SET lists, LIKE / AS SELECT, multi-action ALTER)", "mysqldump 파일과 실제 클라이언트가 보내는 문장(SET 목록, LIKE / AS SELECT, 여러 동작 ALTER)을 읽음"),
+  L("reads mysqldump files and the statements real clients send (SET lists, LIKE / AS SELECT, multi-action ALTER); INSERT / REPLACE / CREATE TABLE / CREATE VIEW take their rows from WITH … SELECT, INSERT … SELECT takes ON DUPLICATE KEY UPDATE", "mysqldump 파일과 실제 클라이언트가 보내는 문장(SET 목록, LIKE / AS SELECT, 여러 동작 ALTER)을 읽고, INSERT · REPLACE · CREATE TABLE · CREATE VIEW는 WITH … SELECT에서 행을 가져오며 INSERT … SELECT는 ON DUPLICATE KEY UPDATE도 받음"),
   L("window frames and WINDOW w, named foreign keys, TRACE", "윈도 프레임·WINDOW w, 이름 있는 외래키, TRACE"),
   L("hex and bit literals (0x41, X'41', b'101') are the bytes they spell; COMMENT and the sizes MEDIUMINT / TINYTEXT / CHAR(n) are kept", "16진·비트 리터럴(0x41, X'41', b'101')은 그 바이트로 읽고, COMMENT와 MEDIUMINT / TINYTEXT / CHAR(n) 크기는 그대로 보관"),
   L("a string names a column (AS 'Total'), SQL_NO_CACHE / HIGH_PRIORITY / STRAIGHT_JOIN are read and left alone, LOCK TABLES … READ LOCAL; routines keep the text they were written as (SHOW CREATE PROCEDURE / FUNCTION / TRIGGER)", "문자열이 열 이름이 되고(AS 'Total'), SQL_NO_CACHE / HIGH_PRIORITY / STRAIGHT_JOIN은 읽고 무시, LOCK TABLES … READ LOCAL, 루틴은 쓴 원문을 보관(SHOW CREATE PROCEDURE / FUNCTION / TRIGGER)"),
@@ -202,8 +202,8 @@ const PLANNER: Text[] = [
 const EXECUTOR: Text[] = [
   L("joins (NL, hash, sort-merge, index NL), subqueries, CTE, window functions (over groups too)", "조인(NL, 해시, 소트-머지, 인덱스 NL), 서브쿼리, CTE, 윈도 함수(그룹 위에서도)"),
   L("works on row pointers; subqueries and INSERT checks run once per statement", "행 포인터로 처리, 서브쿼리·INSERT 검사는 문장당 한 번"),
-  L("MySQL-exact results (0 differences from a real MySQL 8.4.9 over 47 corpora): DECIMAL places, FLOAT widened beside a DOUBLE, GROUP BY ... WITH ROLLUP, strict errors (division by zero, text read as a number) with MySQL's error numbers over the protocol", "MySQL과 같은 결과(진짜 MySQL 8.4.9와 코퍼스 47개에서 차이 0): DECIMAL 자릿수, DOUBLE 옆에서 넓혀지는 FLOAT, GROUP BY … WITH ROLLUP, 엄격한 오류(0으로 나누기, 글자를 수로 읽기)와 프로토콜의 MySQL 오류 번호"),
-  L("MAX_EXECUTION_TIME stops long SELECTs (3024); TRACE shows a statement's steps", "MAX_EXECUTION_TIME이 긴 SELECT를 멈춤(3024), TRACE가 문장의 단계를 보여 줌"),
+  L("MySQL-exact results (0 differences from a real MySQL 8.4.9 over 79 corpora): DECIMAL places, FLOAT widened beside a DOUBLE, GROUP BY ... WITH ROLLUP, strict errors (division by zero, text read as a number) with MySQL's error numbers over the protocol", "MySQL과 같은 결과(진짜 MySQL 8.4.9와 코퍼스 79개에서 차이 0): DECIMAL 자릿수, DOUBLE 옆에서 넓혀지는 FLOAT, GROUP BY … WITH ROLLUP, 엄격한 오류(0으로 나누기, 글자를 수로 읽기)와 프로토콜의 MySQL 오류 번호"),
+  L("MAX_EXECUTION_TIME stops long SELECTs (3024); TRACE shows a statement's steps (also of one just run: it skips the result cache)", "MAX_EXECUTION_TIME이 긴 SELECT를 멈춤(3024), TRACE가 문장의 단계를 보여 줌(방금 실행한 문장도: 결과 캐시를 건너뜀)"),
   L("privileges are enforced: every statement of an account (not root) is checked against its GRANTs and the roles it has switched on before it runs (1142 / 1143 / 1044 / 1227 …); SHOW TABLES, SHOW DATABASES, DESCRIBE and information_schema show only what the account may see (a column privilege shows that column alone); a login that names a database needs access to it (1044)", "권한이 실제로 강제됨: root가 아닌 계정의 모든 문장을 실행 전에 그 계정의 GRANT와 켜 둔 역할에 비춰 확인(1142 / 1143 / 1044 / 1227 …), SHOW TABLES·SHOW DATABASES·DESCRIBE·information_schema는 볼 수 있는 것만 보임(열 권한이면 그 열만), 접속할 때 데이터베이스를 지정하면 그곳에 접근 권한이 있어야 함(1044)"),
   L("transactions as MySQL does them: DDL commits the open transaction, READ ONLY (1792), @@transaction_isolation says the level really in use, COMMIT AND CHAIN; a statement on a table with triggers is all or nothing, and BEFORE UPDATE triggers can SET NEW.x", "MySQL처럼 도는 트랜잭션: DDL이 열린 트랜잭션을 먼저 커밋, READ ONLY(1792), @@transaction_isolation이 실제 수준을 말함, COMMIT AND CHAIN, 트리거가 걸린 표의 문장은 전부-아니면-전무이고 BEFORE UPDATE 트리거도 SET NEW.x를 할 수 있음"),
   L("foreign key actions work row by row like InnoDB, down the whole chain of tables (a <- b <- c, a table that is its own child too): RESTRICT, CASCADE (14 levels), SET NULL, ON UPDATE; a column can be in several foreign keys, and REPLACE is refused whole when a RESTRICT lies anywhere below; a key without a name is <table>_ibfk_<n> in the order written and keeps it when another key goes or the table is renamed, a rule left out reads NO ACTION", "외래키 동작은 InnoDB처럼 행 단위로, 표를 건너는 사슬 끝까지(a ← b ← c, 자기 표도): RESTRICT, CASCADE(14단계), SET NULL, ON UPDATE. 한 열에 외래키를 여럿 달 수 있고, REPLACE는 사슬 아래 어디서든 RESTRICT에 막히면 통째로 거절. 이름 없는 키는 쓴 순서대로 <표>_ibfk_<n>이고 다른 키를 지우거나 표 이름을 바꿔도 그대로이며, 규칙을 안 적으면 NO ACTION"),

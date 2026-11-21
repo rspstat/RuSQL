@@ -25,9 +25,9 @@ SETUP = (ROOT.parent / "docs" / "mds" / "EXHIBITION_setup.sql").read_text(encodi
 JOIN = ("SELECT c.name, c.city, COUNT(*) AS orders, SUM(o.total) AS total\nFROM customers c JOIN orders o ON o.customer_id = c.id\n"
         "GROUP BY c.id, c.name, c.city ORDER BY total DESC LIMIT 10;")
 STATUS = "SELECT status, COUNT(*) AS n, SUM(total) AS total FROM orders GROUP BY status;"
-ANALYZE = "EXPLAIN ANALYZE SELECT * FROM logs WHERE user_id = 777;"  # (SELECT *, not COUNT(*): an aggregate over an index is slow right after the engine restarts, see DATE.md "정직한 한계")
+ANALYZE = "EXPLAIN ANALYZE SELECT * FROM logs WHERE user_id = 777;"  # (SELECT * as the guide says; since R98 COUNT(*) also starts from the index right after an engine restart)
 ADVICE = "EXPLAIN SELECT * FROM logs WHERE user_id = 777;"
-JOURNEY = "SELECT c.city, SUM(o.total) AS total FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.city ORDER BY total DESC;"  # (not run before: Journey runs it itself; a statement that was just run comes out of the result cache as one step)
+JOURNEY = "SELECT c.city, SUM(o.total) AS total FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.city ORDER BY total DESC;"  # (run once before the Journey: since R98 TRACE skips the result cache, so the journey of a statement that was just run has all its steps; it used to be one)
 LOCKS = "BEGIN;\nUPDATE orders SET status = 'paid' WHERE id <= 3;"
 MCP_SQL = "SELECT c.city, COUNT(*) AS orders, SUM(o.total) AS total FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.city ORDER BY total DESC"
 
@@ -138,7 +138,7 @@ def main() -> int:
             def journey():
                 page.click('[title="SQL Editor"]')
                 page.wait("window.monaco && window.monaco.editor.getEditors().length > 0", 20, "the editor")
-                page.set_editor(JOURNEY)
+                ts.run_statement(page, JOURNEY, "row(s)")  # (the statement is run first, then selected: the answer is in the result cache)
                 page.eval("(() => { const e = window.monaco.editor.getEditors()[0]; e.focus(); e.setSelection(e.getModel().getFullModelRange()); })()")
                 time.sleep(0.3)
                 page.wait("(() => { const b = [...document.querySelectorAll('button')].find(x => (x.title || '').startsWith('Journey')); return b && !b.disabled; })()", 30, "the Journey button to be enabled")
@@ -151,7 +151,7 @@ def main() -> int:
                 steps = re.search(r"Step \d+ of (\d+)", full)
                 text = flat(full, 200)
                 page.eval("(document.querySelector('.modal-overlay') || {click() {}}).click()")
-                assert steps and int(steps.group(1)) >= 3, text
+                assert steps and int(steps.group(1)) >= 8, text  # (11 steps; the result cache used to make it 1 for a statement that was just run)
                 facts["journey_steps"] = int(steps.group(1))
                 return "Journey window: " + text
             step("4 journey", "select a statement, Journey", journey)

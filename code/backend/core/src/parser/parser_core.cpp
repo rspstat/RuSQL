@@ -759,4 +759,18 @@ Statement Parser::parse_with() {
     return Statement(Statement::With{std::move(ctes), std::make_unique<Statement>(std::move(query)), recursive});
 }
 
+Statement Parser::parse_row_source() {
+    const bool with_body = peek_is(TokenKind::With);
+    advance(); // SELECT or WITH
+    if (!with_body) return parse_select();
+    Statement with = parse_with();
+    auto* body = std::get_if<Statement::With>(&with.data);
+    const Statement& main = *body->query; // (MySQL: INSERT ... WITH ... SELECT -- the main part of the WITH is a query, not a write)
+    if (!std::holds_alternative<Statement::Select>(main.data) && !std::holds_alternative<Statement::Union>(main.data) &&
+        !std::holds_alternative<Statement::Intersect>(main.data) && !std::holds_alternative<Statement::Except>(main.data)) {
+        throw ParseError("Expected SELECT after the WITH list");
+    }
+    return with;
+}
+
 } // namespace engine

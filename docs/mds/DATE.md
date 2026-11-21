@@ -3805,6 +3805,28 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **엔진에서 새로 찾은 작은 차이**(고치지 않음, `RECOMMAND.md` 6번 표에 한 줄): `INSERT INTO t WITH … SELECT …`가 `Expected VALUES, SET or SELECT`로, `CREATE TABLE t AS WITH … SELECT …`가 `Expected '('`로 거절된다(MySQL 8.0은 받음; `WITH`로 시작하는 `SELECT`는 됨). 그래서 큰 표는 `INSERT … SELECT`로 행을 두 배씩 늘려 만들었다. 전시 전 엔진 동결 방침대로 적어만 둔다.
 **하지 않은 것**: Claude Desktop 자체(리허설은 MCP 클라이언트 SDK로 같은 도구를 호출) — 전시 전에 직접 한 번 해 보아야 한다. `DROP DATABASE expo;`로 다시 만드는 경로는 앱에서 돌려 보지 않았다.
 
+### 11월 21일 (네 번째) — R98: 직전 항목에서 찾은 작은 틈 세 가지와 `INSERT … SELECT … ON DUPLICATE KEY UPDATE`를 고침 (사용자 "고칠 시간은 된다 보는데 고치는거 힘들어?")
+
+앞 항목은 "전시 전에는 엔진을 건드리지 않는다"고 적고 끝냈지만, 사용자가 시간이 된다고 판단해 세 가지를 고쳤고, 그 대조 중에 같은 갈래의 빈틈(④) 하나를 더 찾아 같이 고쳤다. 모두 작았고, 시험과 진짜 MySQL 대조로 막을 수 있는 것들이었다.
+
+**① `WITH`로 시작하는 질의가 행의 원천이 됨**: `INSERT INTO t [(열)] WITH c AS (…) SELECT …`(`INSERT IGNORE` 포함), `REPLACE INTO t WITH …`, `CREATE TABLE t [(열)] [AS] WITH … SELECT …`, `CREATE VIEW v AS WITH … SELECT …`(mysqldump가 CTE를 쓴 뷰를 이렇게 씀). 파서에 `parse_row_source()` 하나를 더해 네 곳이 함께 쓴다 — `WITH` 목록 뒤가 질의가 아니라 쓰기 문장이면 `Expected SELECT after the WITH list`(MySQL은 1064). 실행기는 안쪽 질의를 이미 `execute_with_s`로 돌려서 바꿀 것이 없었고, `CREATE TABLE … AS`가 열의 형을 원본 표에서 가져올 때 `WITH`의 본문 질의를 따라가게 한 줄만 더했다. 새 코퍼스 `code/test/diff/corpus/with_rows_r98.sql`(24문장, 점수판 79번째)이 진짜 MySQL 8.4.9와 **차이 0**(둘 다 거절한 2개: `WITH` 뒤의 `DELETE`, 질의 없는 `WITH`).
+**② `TRACE` · 문장의 여행이 방금 실행한 문장도 전체 단계를 보임**: `TRACE`가 안쪽 SELECT를 돌릴 때 결과 캐시를 읽지 않는다(`explain_trace::active`일 때 건너뜀). 전에는 방금 실행한 SELECT의 Journey가 캐시에서 바로 나와 "1단계"뿐이었다.
+**③ 재시작 직후에도 인덱스로 시작하는 집계**: 엔진을 켤 때 기본키 → 행 위치 캐시(`row_pk_pos`)를 PK 트리를 만드는 단계(표마다 병렬)에서 함께 채운다. 삽입이 이미 채우던 캐시인데, 읽기는 표를 공유 잠금으로만 잡아 캐시를 못 채워서 재시작 직후 `COUNT(*)`·`SUM()`이 인덱스 후보의 위치를 못 찾고 전체를 읽었다(811줄 "정직한 한계 ①" — `UPDATE`/`DELETE`가 한 번 지나가야 풀렸다). redo 복구가 표를 고친 뒤에도 캐시를 비우기만 하던 것을 다시 채우게 했다.
+- **앱에서 잰 값**(로그아웃 → 로그인으로 엔진을 다시 켠 뒤, `SELECT COUNT(*) FROM logs WHERE user_id = 777`, 13만 행): 전 — Try it 38.96 → 38.97 ms(변화 없음), 인덱스를 만든 뒤에도 57 ms. 후 — Try it **39.4 → 0.27 ms(147배)**, 인덱스를 만든 뒤 Index Scan 0.25 ms. 시작 시간(13만 행 데이터에서 첫 질의의 답까지, 5회 중앙값): 0.383 → 0.391 s(+8 ms).
+**④ `INSERT … SELECT … ON DUPLICATE KEY UPDATE`**(앞의 `WITH` 항목을 진짜 MySQL과 맞춰 보다 찾음): `INSERT … SELECT` 뒤에 `ON DUPLICATE KEY UPDATE`가 붙으면 `Unexpected token(s) after end of statement`로 거절하던 것이다(MySQL은 받음). 이미 있던 절의 해석을 함수(`parse_conflict`)로 뽑아 `VALUES` 경로와 `SELECT` 경로가 함께 쓴다 — 실행기는 `INSERT … SELECT`가 이미 같은 `exec_insert`로 들어가 바꿀 것이 없었다. 새 코퍼스 `insert_select_dup_r98.sql`(20문장, 점수판 80번째: `VALUES(열)` · `WITH … SELECT` · `ORDER BY … LIMIT` · 조인 뒤의 `ON` · `FROM` 없는 SELECT, 영향 받은 행 수까지)이 진짜 MySQL과 **차이 0**(둘 다 거절한 2개: 없는 열, 끝나지 않은 절).
+
+**시험**: 새 3케이스 `test_r98_with_rows_trace_cache.cpp`(`INSERT`/`REPLACE`/`CREATE TABLE`/`CREATE VIEW`가 `WITH`로 시작하는 질의에서 행을 가져옴 · 재귀 목록 · `IGNORE` · 형이 `WITH` 없는 같은 문장과 같음 · 쓰기 문장이 뒤따르면 오류 / 방금 실행한 SELECT의 `TRACE`가 전체 경로를 냄 / 재시작 직후 집계가 인덱스를 탐). 기존 시험 1곳을 새 동작에 맞게 고쳤다(`test_dml_index.cpp`의 "cold position cache": 재시작 직후 스캔한다고 단언하던 것을, 재시작 직후 인덱스가 답하고 스캔 `DELETE`가 캐시를 비운 뒤에야 스캔한다는 것으로).
+- **전체 시험**: **1,065케이스**(이전 1,062) 세 모드(기본, `RUSQL_DML_INDEX_MIN_ROWS=0`, `RUSQL_PROBE_CHECK=1 RUSQL_PROBE_STREAK=0`) 모두 통과 — 단언 1,527,507 / 1,527,508 / 1,527,507(새 케이스 3개가 `INSERT … SELECT … ON DUPLICATE KEY UPDATE`까지 확인).
+- **점수판**: 진짜 MySQL 8.4.9와 **80개 코퍼스 · 7,740문장 차이 0**(이전 78개 · 7,696문장 + 새 코퍼스 둘 24 · 20문장), `compatSnapshot.json`을 다시 썼다(시험 1,065케이스 / 1,527,507단언). 이전 빌드(11월 21일 20:03) 대비 `diff_builds.py` 3,000질의 차이 0(두 번, 시드 1 · 2).
+- **앱**: Diagram 페이지 파서 · 복구 · 실행기 항목 갱신(코퍼스 수 47 → 79로 바로잡음; 79는 ④ 이전 값이고 점수판은 80), `rehearse_demo.py`가 이제 Journey를 **방금 실행한 문장**에 누르고 11단계를 확인 — 시연 리허설 9단계 모두 통과(인덱스 장면 Seq Scan 약 58~70 ms → Try it 39 → 0.19 ms, Journey 11단계). 릴리스 엔진 · 앱 · 설치 파일을 다시 만들었다(④까지 넣어 두 번째로, 아래 "문서" 참고).
+
+- **퍼저**(켤 때 위치 캐시를 채우는 변경이 크래시 복구와 겹치므로): `fuzz_crash.py` 60라운드 · `fuzz_crash_chain.py` 40 · `fuzz_crash_fk.py` 30 · `fuzz_concurrent.py` 20(확인한 행 11,610) · `fuzz_kill.py` 100라운드(`KILL QUERY` 3,491 · `KILL` 1,524) — 모두 **불일치 0**. 설치 파일을 풀어 `test_installed_layout.py` **19개 모두 통과**(들어 있는 엔진이 이 빌드의 것: 해시 일치).
+- **문서**: HWPX D01 · D05 · D07 · D08과 통합 문서 v29의 숫자를 갱신했다(1,065케이스 · 1,527,507단언 · 코퍼스 80개 7,740문장, D07 에픽별 E-01 675 → 678, D07의 점수판 문장은 날짜를 2026-11-21로 — mysqldump 왕복 · `fuzz_kill` 문장은 다시 돌리지 않은 2026-11-17 그대로라고 적음). 한글로 열어 쪽 수 확인: D01 3 · D05 5 · D07 17 · D08 7 · v29 48쪽으로 전과 같고 여백 밖으로 나간 글도 없다. 글이 아니라 숫자만 바뀌어 D03 · D04의 제/개정 이력 표는 그대로다. `EXHIBITION.md`(주의 두 줄, 숫자)와 `EXHIBITION_시연순서.pdf`(2쪽)도 갱신했다.
+  - 도구 함정: 한글 COM(`HWPFrame.HwpObject`)이 **한글 폴더 이름(`2026_졸업작품_…`)에 있는 파일은 열다가 멈춘다**(응답은 하는데 `Open`이 안 끝남). 같은 파일을 영문 경로(scratchpad)로 복사해서 열면 바로 된다 — 쪽 수를 셀 때는 복사본을 쓴다.
+
+**찾은 것(고치지 않음)**: 코퍼스를 만들다 `CREATE TABLE c AS SELECT id, name FROM src`로 만든 표의 `DESCRIBE`가 원본이 NOT NULL인 열(기본키 `id`)을 MySQL은 `NO`, 여기는 `YES`로 보인다는 것을 알았다. `WITH` 없는 문장도 같은 기존 차이라 `RECOMMAND.md` 6번 표에 한 줄 올렸고 코퍼스에서는 빼 두었다.
+**정직한 한계**: ① 위치 캐시는 삽입이 하던 대로 기본키가 있는 표만 채운다(복합 기본키는 첫 열 기준이고, 인덱스 시작은 단일 열 기본키만 쓰는 것도 전과 같다). ② 캐시의 크기는 삽입으로 채운 표와 같다 — 행마다 키 문자열과 위치 하나(표를 읽는 메모리에 더해짐). ③ `CREATE VIEW … AS WITH`의 `SHOW CREATE VIEW`는 쓴 원문 그대로 보인다(진짜 MySQL은 `with `c` as (select `src`.`id` AS `id` …`처럼 전체를 다시 써서 보임). ④ `INSERT … SELECT … ON DUPLICATE KEY UPDATE`에서 원본 표와 대상 표에 같은 이름의 열이 있는데 `UPDATE` 쪽에 한정 없이 쓰면 MySQL은 1052로 거절하고 여기는 대상 표의 열로 읽는다(`up_dst.v`처럼 한정하면 같음) — `RECOMMAND.md` 6번 표.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

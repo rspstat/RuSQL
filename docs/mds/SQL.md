@@ -24,7 +24,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - CREATE TABLE [IF NOT EXISTS] t (컬럼, 제약, ...) : 테이블 생성
 - CREATE TABLE t LIKE other : 다른 테이블의 구조를 그대로 복사해 생성
-- CREATE TABLE t [(컬럼 정의)] AS SELECT ... : 쿼리 결과로 테이블 생성(데이터 포함)
+- CREATE TABLE t [(컬럼 정의)] [AS] [WITH ...] SELECT ... : 쿼리 결과로 테이블 생성(데이터 포함; R98: `WITH c AS (...) SELECT ...`로 시작하는 질의도 됨)
 - CREATE TABLE db.t (...) : 데이터베이스를 붙여서 생성
 - ... ENGINE / AUTO_INCREMENT = n / [DEFAULT] CHARSET / COLLATE / COMMENT = '설명' / ROW_FORMAT / KEY_BLOCK_SIZE 등 테이블 옵션 : 옵션을 적어도 받아들임(AUTO_INCREMENT 시작값 · 문자 집합 검사 · `COMMENT`만 실제로 적용: `ALTER TABLE t COMMENT = '...'`, `SHOW CREATE TABLE`, `information_schema.tables.TABLE_COMMENT`, `CREATE TABLE ... LIKE`, `BACKUP`이 같이 다룸; R82)
 - PARTITION BY RANGE (col) (PARTITION p VALUES LESS THAN (n | MAXVALUE), ...) : 범위 파티션
@@ -94,6 +94,7 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 - DROP VIEW [IF EXISTS] v : 뷰 삭제
 - INSERT / UPDATE / DELETE 대상으로 뷰 사용 : 한 표의 행을 그대로 보여 주는 뷰(JOIN · DISTINCT · GROUP BY · 집계 · LIMIT 없음, 뷰 위의 뷰도 됨)는 쓰기도 가능. 열 이름을 바꾼 뷰(`id AS ident`)는 뷰의 이름으로 `SET`·`WHERE`를 쓰고, 열 목록 없는 `INSERT INTO v VALUES (...)`는 뷰의 열을 따른다(R71). 식으로 만든 열을 쓰면 오류 1348(UPDATE) · 1471(INSERT), 쓸 수 없는 뷰는 1288(UPDATE · DELETE) · 1471(INSERT), 조인 뷰의 DELETE는 1395, 뷰가 가린 NOT NULL 열은 1423
 - 조인 뷰(`CREATE VIEW v AS SELECT ... FROM a JOIN b ON ...`, 쉼표 조인과 조인 뷰 위의 뷰 포함)에 UPDATE · INSERT (R80): UPDATE는 **한 기본 표의 열만** 바꿀 때 되고(다중 표 UPDATE로 풀어 그 표의 행마다 한 번씩, 뷰의 WHERE와 문장의 WHERE가 함께 적용; 새 값은 다른 표의 열을 읽어도 됨), 두 표의 열이면 1393, 식으로 만든 열이면 1348, ORDER BY · LIMIT는 1221. INSERT는 **열 목록이 있어야** 하고(1394) 한 기본 표의 열만(1393), 그 표에 들어가며 뷰의 WHERE는 막지 않는다; 식으로 만든 열이 든 뷰는 1471, 기본값 없는 NOT NULL 열이 빠지면 1423, REPLACE는 1395, `ON DUPLICATE KEY UPDATE`는 뷰의 열 이름으로. 바깥 조인(LEFT / RIGHT)이 든 뷰는 UPDATE · DELETE가 1288, INSERT가 1471, 안쪽 조인 뷰의 DELETE는 1395. R86: 식으로 만든 열(`ja.x * 2 AS dbl`, `ja.x + jb.y AS s`, `CASE`)을 **새 값 · WHERE에서 읽는 문장도 되고**(뷰의 식을 그 자리에 넣어 행을 찾음; 조인 뷰 위의 뷰도), 쓰려는 열이 식이면 여전히 1348. 아직 안 되는 것: `WITH CHECK OPTION`이 든 조인 뷰(메시지로 거절), USING · NATURAL 조인이나 파생 표가 든 뷰, 같은 표를 두 번 쓴 뷰(쓰기가 거절됨)
+- CREATE VIEW v AS WITH c AS (...) SELECT ... : `WITH`로 시작하는 뷰 본문(R98; mysqldump가 CTE를 쓴 뷰를 이렇게 쓴다). 뷰는 바탕 표를 따라가고, `SHOW CREATE VIEW`는 쓴 원문 그대로 보여 준다(MySQL은 `with`를 소문자로 다시 써서 보임)
 - CREATE VIEW v AS SELECT ... WITH [CASCADED | LOCAL] CHECK OPTION : 뷰가 보여 주지 않을 행을 INSERT · UPDATE하면 오류 1369(CASCADED는 아래 뷰의 조건까지; R71)
 - CREATE SYNONYM 이름 FOR 대상 : 테이블 별칭 생성
 - CREATE OR REPLACE SYNONYM 이름 FOR 대상 : 별칭 덮어쓰기
@@ -106,12 +107,12 @@ RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문
 
 - INSERT INTO t [(cols)] VALUES (...)[, (...)...] : 행 입력(여러 행 한 번에, 값 자리에 식 · DEFAULT · 변수 가능; R90: `INSERT INTO t () VALUES ()`와 `INSERT INTO t VALUES ()`는 **빈 행** — 모든 열이 기본값 · AUTO_INCREMENT, `VALUES (), ()`로 여러 행도; 열 이름을 달고 값을 안 주는 `INSERT INTO t (v) VALUES ()`는 MySQL처럼 열 개수 오류)
 - INSERT INTO t SET col = 값, ... : SET 형식으로 입력
-- INSERT INTO t [(cols)] SELECT ... : 쿼리 결과 입력(UNION 포함). 원본은 REPEATABLE READ에서도 스냅샷이 아니라 지금 커밋된 최신 값으로 읽고(R73, MySQL과 같음), 한 표를 평범하게 읽는 원본이면 읽은 행과 기본키 조건의 틈을 공유 잠금한다 — 다른 세션의 쓰기가 기다린다(R74; REPEATABLE READ · SERIALIZABLE의 트랜잭션 안에서만)
+- INSERT INTO t [(cols)] [WITH ...] SELECT ... [ON DUPLICATE KEY UPDATE col = 식, ...] : 쿼리 결과 입력(UNION 포함; R98: `ON DUPLICATE KEY UPDATE`가 붙어도 됨(`VALUES(열)` 가능; 진짜 MySQL과 영향 받은 행 수까지 같음). **원본 표와 대상 표에 같은 열 이름이 있으면 `up_dst.v`처럼 한정해야 한다** — MySQL은 한정 없는 이름을 오류 1052로 거절하는데 여기는 대상 표의 열로 읽어 받아들임; `INSERT INTO t WITH c AS (...) SELECT ...`도 됨 — `WITH` 목록 뒤에는 질의만 오고, 쓰기 문장이 오면 문법 오류. 앞에 `WITH`를 두는 `WITH c AS (...) INSERT INTO t SELECT ...`는 전부터 됨). 원본은 REPEATABLE READ에서도 스냅샷이 아니라 지금 커밋된 최신 값으로 읽고(R73, MySQL과 같음), 한 표를 평범하게 읽는 원본이면 읽은 행과 기본키 조건의 틈을 공유 잠금한다 — 다른 세션의 쓰기가 기다린다(R74; REPEATABLE READ · SERIALIZABLE의 트랜잭션 안에서만)
 - INSERT IGNORE INTO ... : 제약에 걸린 행은 조용히 건너뜀
 - INSERT ... ON DUPLICATE KEY UPDATE col = 값, ... : 키가 겹치면 UPDATE로 전환(`VALUES(col)` 사용 가능)
 - INSERT ... RETURNING cols | * : 입력한 행을 바로 돌려줌
 - REPLACE [INTO] t [(cols)] VALUES (...) : 키가 겹치면 지우고 다시 입력
-- REPLACE INTO t SET ... / REPLACE INTO t SELECT ... : REPLACE의 SET · SELECT 형식
+- REPLACE INTO t SET ... / REPLACE INTO t [WITH ...] SELECT ... : REPLACE의 SET · SELECT 형식(R98: `WITH`로 시작하는 질의도)
 
 ### UPDATE
 
@@ -438,7 +439,7 @@ JSON 값은 MySQL이 쓰는 모양으로 저장되고 돌려준다(R77): 객체�
 
 - EXPLAIN SELECT | UPDATE | DELETE ... : 실행 계획(접근 경로 · 조인 알고리즘 · 비용). UPDATE · DELETE(다중 표 포함)는 "Statement" 줄에 종류를 적고 그 문장이 찾는 행의 계획을 보여 주며 **아무것도 실행하지 않음**(R70); 그 밖의 문장은 계획 없이 안내만
 - EXPLAIN ANALYZE 문장 : 실제로 실행하며 단계별 행 수 · 시간 · 비율(조인 종류 · 알고리즘, 서브쿼리 시간 포함; 쓰기 문장은 실제로 바뀜 — UPDATE · DELETE는 계획 줄도 함께 보여 줌. 쓰기 문장을 실행하지 않고 보려면 `EXPLAIN`만 씀)
-- TRACE 문장 : 단계별 시간 · 잠금 대기 · 인덱스 사용을 추적하며 실행
+- TRACE 문장 : 단계별 시간 · 잠금 대기 · 인덱스 사용을 추적하며 실행(R98: 방금 실행한 SELECT도 결과 캐시를 건너뛰고 전체 단계를 보임)
 - SUGGEST INDEX [FOR] SELECT | UPDATE | DELETE ... (`SUGGEST INDEXES`도 같음) : 그 문장이 스캔을 그만두게 할 인덱스를 제안 — 같음 조건 열(서로 다른 값이 많은 열 먼저), 범위 열 하나, ORDER BY 열 순서의 `CREATE INDEX` 문장과 이유, 인덱스로 읽을 행 수 추정, 이미 있는 인덱스, 인덱스가 도움이 안 되는 이유(열을 함수로 감쌈 · 앞이 `%`인 LIKE · OR · 100행 미만 표 · 대부분을 읽게 됨)를 한 줄씩 담은 표로 답함. 아무것도 만들지 않음. R70부터 **문장을 블록으로 읽음**: 겉 질의, 각 CTE · 파생 표(LATERAL 포함) · 하위 질의(IN · EXISTS · 스칼라, 겉 질의의 열을 쓰는 상관 하위 질의도), UNION · INTERSECT · EXCEPT의 가지를 각각 자기 표로 읽고, OR의 가지는 가지별로 읽어(`needs_rewrite`) 따로 문장으로 써야 한다고 알림. 답 표는 `block`(어느 부분의 제안인가: 비면 문장 자체)과 `needs_rewrite` 열을 더 가짐
 - ANALYZE TABLE t : 통계 정보 갱신
 - OPTIMIZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE t[, t2 ...] : 죽은 행 버전 정리 + 통계 갱신. MySQL의 응답 모양(`Table`, `Op`, `Msg_type`, `Msg_text`; "Table does not support optimize, doing recreate + analyze instead" 노트와 `OK`). 열린 트랜잭션을 먼저 커밋한다

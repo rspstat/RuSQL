@@ -127,6 +127,8 @@ private:
 
     Statement parse_use();
     Statement parse_with();
+    /// `[WITH ...] SELECT ...` that a statement takes its rows from (INSERT / REPLACE / CREATE TABLE ... [AS]); the next token is SELECT or WITH, and a WITH must lead to a query
+    Statement parse_row_source();
     /// DETERMINISTIC, NOT DETERMINISTIC, NO SQL, CONTAINS SQL, READS SQL DATA, MODIFIES SQL DATA, LANGUAGE SQL, COMMENT 'x', SQL SECURITY x between a
     /// routine's parameters (or return type) and its body: no effect here
     void skip_routine_characteristics();

@@ -270,10 +270,12 @@ void Executor::recover_from_redo() {
         if (tit == sw->tables.end()) continue;
         const std::vector<Row>& rows = tit->second;
         std::string pk_col = "id";
+        bool has_pk = false;
         if (auto* sc = sw->catalog.get_table(table)) {
             for (auto& c : sc->columns) {
                 if (c.primary_key) {
                     pk_col = c.name;
+                    has_pk = true;
                     break;
                 }
             }
@@ -283,7 +285,10 @@ void Executor::recover_from_redo() {
         for (auto& [k, ci] : sw->composite_indexes) {
             if (ci.table == table) ci.rebuild(rows);
         }
-        if (auto mit = sw->row_pk_pos.find(table); mit != sw->row_pk_pos.end()) mit->second.clear();
+        if (auto mit = sw->row_pk_pos.find(table); mit != sw->row_pk_pos.end()) {
+            mit->second.clear();
+            if (has_pk) rebuild_pk_positions(*sw, table, pk_col); // (the rows changed: the positions are read from them again, as at a start)
+        }
         sw->buffer_pool.write_through(table, rows, sw->disk);
     }
     sw->redo_log->clear();

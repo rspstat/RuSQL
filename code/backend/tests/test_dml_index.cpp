@@ -672,12 +672,17 @@ TEST_CASE("SELECT index: a cold position cache falls back to the scan until a wr
             REQUIRE(ex.execute_sql("INSERT INTO t VALUES (" + std::to_string(i) + ", " + std::to_string(i % 10) + ", 'x" + std::to_string(i % 6) + "', 1, 0)").is_ok());
         }
     }
-    Executor ex(dir.path); // the position cache starts empty
+    Executor ex(dir.path); // the position cache is filled from the rows as the tables are loaded (R98): the index answers right after the restart
     REQUIRE(ex.execute_sql("USE d").is_ok());
     const std::string agg = "SELECT COUNT(*), SUM(id) FROM t WHERE a = 3";
     auto h = hits();
-    auto cold = ok_text(ex, agg);
-    REQUIRE(cold == run(ex, NEVER, agg).value());
+    auto warm = ok_text(ex, agg);
+    REQUIRE(hits() == h + 1);
+    REQUIRE(warm == run(ex, NEVER, agg).value());
+    REQUIRE(ex.execute_sql("DELETE FROM t WHERE d + 0 = 12345").is_ok()); // a scan DELETE empties the cache (it deletes no row here)
+    h = hits();
+    auto cold = ok_text(ex, "SELECT COUNT(*), SUM(id) FROM t WHERE a = 3 AND id > 0"); // (another text: the answer of the first one is cached)
+    REQUIRE(cold == warm);
     REQUIRE(hits() == h); // a read cannot rebuild the cache (it holds the table shared): the scan answered
     REQUIRE(changed(ex.execute_sql("UPDATE t SET d = 1 WHERE a = 4"), 15, "updated")); // the write heals it
     h = hits();

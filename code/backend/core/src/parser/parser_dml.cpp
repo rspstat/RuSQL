@@ -157,25 +157,8 @@ Statement Parser::parse_insert() {
         columns = cols;
     }
 
-    // INSERT INTO table [(cols)] SELECT ...
-    if (peek_is(TokenKind::Select)) {
-        advance(); // consume SELECT
-        Statement query = parse_select();
-        InsertConflict on_conflict = ignore ? InsertConflict(InsertConflict::Ignore{}) : InsertConflict(InsertConflict::Abort{});
-        auto returning = parse_returning();
-        return Statement(Statement::InsertSelect{table, columns, std::make_unique<Statement>(std::move(query)), on_conflict, returning});
-    }
-
-    std::vector<std::vector<std::string>> all_values;
-    if (peek_is(TokenKind::Set)) {
-        parse_insert_set(columns, all_values); // INSERT INTO table SET col = value, ...
-    } else {
-        if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES, SET or SELECT");
-        advance();
-        all_values = parse_insert_values();
-    }
-
-    InsertConflict on_conflict = [&]() -> InsertConflict {
+    // [ON DUPLICATE KEY UPDATE col = expr, ...] after the rows (VALUES / SET / SELECT); with none, IGNORE or the plain abort
+    auto parse_conflict = [&]() -> InsertConflict {
         if (peek_is(TokenKind::On)) {
             advance(); // ON
             if (!peek_is(TokenKind::Duplicate)) throw ParseError("Expected DUPLICATE");
@@ -197,7 +180,26 @@ Statement Parser::parse_insert() {
         }
         if (ignore) return InsertConflict(InsertConflict::Ignore{});
         return InsertConflict(InsertConflict::Abort{});
-    }();
+    };
+
+    // INSERT INTO table [(cols)] SELECT ...
+    if (peek_is(TokenKind::Select) || peek_is(TokenKind::With)) {
+        Statement query = parse_row_source();
+        InsertConflict on_conflict = parse_conflict(); // (INSERT ... SELECT ... ON DUPLICATE KEY UPDATE; R98)
+        auto returning = parse_returning();
+        return Statement(Statement::InsertSelect{table, columns, std::make_unique<Statement>(std::move(query)), on_conflict, returning});
+    }
+
+    std::vector<std::vector<std::string>> all_values;
+    if (peek_is(TokenKind::Set)) {
+        parse_insert_set(columns, all_values); // INSERT INTO table SET col = value, ...
+    } else {
+        if (!peek_is(TokenKind::Values)) throw ParseError("Expected VALUES, SET or SELECT");
+        advance();
+        all_values = parse_insert_values();
+    }
+
+    InsertConflict on_conflict = parse_conflict();
 
     auto returning = parse_returning();
     return Statement(Statement::Insert{table, columns, all_values, on_conflict, returning});
@@ -225,9 +227,8 @@ Statement Parser::parse_replace() {
         columns = cols;
     }
 
-    if (peek_is(TokenKind::Select)) {
-        advance(); // consume SELECT
-        Statement query = parse_select();
+    if (peek_is(TokenKind::Select) || peek_is(TokenKind::With)) {
+        Statement query = parse_row_source();
         auto returning = parse_returning();
         return Statement(Statement::InsertSelect{table, columns, std::make_unique<Statement>(std::move(query)),
                                                    InsertConflict(InsertConflict::Replace{}), returning});

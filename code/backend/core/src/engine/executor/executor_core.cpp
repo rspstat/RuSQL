@@ -226,6 +226,7 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
         std::string pk_col;
         const std::vector<Row>* rows;
         std::vector<KeyKind> kinds; // how the key column is ordered
+        bool has_pk = false; // a declared primary key: the pk -> position cache is kept for such a table (as INSERT fills it)
     };
     std::vector<RebuildEntry> rebuild_needed;
 
@@ -274,20 +275,33 @@ Executor::Executor(const std::string& dir, std::size_t buffer_pool_capacity) {
                 break;
             }
         }
+        const bool has_pk = !pk_col.empty();
         if (pk_col.empty() && !schema.columns.empty()) pk_col = schema.columns.front().name;
         auto kinds = key_kinds_of(catalog.get_table(qualified_key), {pk_col});
-        rebuild_needed.push_back({qualified_key, std::move(pk_col), &tit->second, std::move(kinds)});
+        rebuild_needed.push_back({qualified_key, std::move(pk_col), &tit->second, std::move(kinds), has_pk});
     }
 
     // ── Phase 2: PK 인덱스 재빌드 병렬화 (모든 테이블) ──────
     if (!rebuild_needed.empty()) {
         std::vector<BPlusTree> built(rebuild_needed.size());
+        // the pk -> position cache of each table, filled here as INSERT fills it: left empty after a restart, an aggregate that starts from an index found no row position
+        // for its candidates (a read cannot fill the cache) and read the whole table until an UPDATE / DELETE had gone by
+        std::vector<std::unordered_map<std::string, std::size_t>> positions(rebuild_needed.size());
         ThreadPool::global().parallel_for(rebuild_needed.size(), [&](std::size_t i) {
             auto& entry = rebuild_needed[i];
             built[i] = build_pk_tree(*entry.rows, entry.pk_col, entry.kinds);
+            if (!entry.has_pk) return;
+            const std::vector<Row>& rows = *entry.rows;
+            positions[i].reserve(rows.size());
+            for (std::size_t r = 0; r < rows.size(); r++) {
+                auto x = rows[r].find("_xmax");
+                if (x != rows[r].end() && x->second != "0") continue; // a dead version is never "the" row of its pk
+                if (auto k = rows[r].find(entry.pk_col); k != rows[r].end()) positions[i][k->second] = r;
+            }
         });
         for (std::size_t i = 0; i < rebuild_needed.size(); i++) {
             indexes.insert({rebuild_needed[i].key, std::move(built[i])});
+            row_pk_pos[rebuild_needed[i].key] = std::move(positions[i]);
         }
     }
 
@@ -1869,7 +1883,7 @@ StringResult Executor::execute_sql_inner(const std::string& sql) {
     bool looks_like_select = trimmed.size() >= 6 && ieq_ascii(trimmed.substr(0, 6), "select");
     bool in_txn = txn.current_txn_id() != 0;
 
-    if (looks_like_select && !in_txn) {
+    if (looks_like_select && !in_txn && !explain_trace::active) { // (TRACE runs the statement for its steps: an answer from the cache would have none)
         std::string cache_key = current_db + "::" + trimmed + mode_cache_key(pipes_as_concat(), user_vars); // (what || means, and ONLY_FULL_GROUP_BY, change the answer)
         auto s = shared->read();
         // MVCC regression guard: once any transaction is open anywhere, the identical

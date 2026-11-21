@@ -637,6 +637,7 @@ StringResult Executor::exec_create_as(SharedDatabase& s, const std::string& name
             if (auto* u = std::get_if<Statement::Union>(&q->data)) q = u->left.get();
             else if (auto* i = std::get_if<Statement::Intersect>(&q->data)) q = i->left.get();
             else if (auto* e = std::get_if<Statement::Except>(&q->data)) q = e->left.get();
+            else if (auto* w = std::get_if<Statement::With>(&q->data)) q = w->query.get(); // (WITH ... SELECT: the main part of it)
             else break;
         }
         if (q) {

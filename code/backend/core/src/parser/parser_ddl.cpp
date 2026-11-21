@@ -752,10 +752,9 @@ Statement Parser::parse_create() {
         return Statement(Statement::CreateTableLike{name, source, if_not_exists});
     }
     // CREATE TABLE t [AS] SELECT ...
-    if (peek_is(TokenKind::Select) || (peek_is(TokenKind::As) && peek_at_is(1, TokenKind::Select))) {
+    if (peek_is(TokenKind::Select) || peek_is(TokenKind::With) || (peek_is(TokenKind::As) && (peek_at_is(1, TokenKind::Select) || peek_at_is(1, TokenKind::With)))) {
         if (peek_is(TokenKind::As)) advance();
-        advance(); // SELECT
-        Statement query = parse_select();
+        Statement query = parse_row_source();
         return Statement(Statement::CreateTableAs{name, if_not_exists, {}, std::make_unique<Statement>(std::move(query))});
     }
     if (!peek_is(TokenKind::LParen)) throw ParseError("Expected '('");
@@ -940,10 +939,9 @@ Statement Parser::parse_create() {
     }
 
     // CREATE TABLE t (columns) [AS] SELECT ...: the rows of the query are inserted
-    if (peek_is(TokenKind::Select) || (peek_is(TokenKind::As) && peek_at_is(1, TokenKind::Select))) {
+    if (peek_is(TokenKind::Select) || peek_is(TokenKind::With) || (peek_is(TokenKind::As) && (peek_at_is(1, TokenKind::Select) || peek_at_is(1, TokenKind::With)))) {
         if (peek_is(TokenKind::As)) advance();
-        advance(); // SELECT
-        Statement query = parse_select();
+        Statement query = parse_row_source();
         return Statement(Statement::CreateTableAs{name, if_not_exists, columns, std::make_unique<Statement>(std::move(query))});
     }
 
@@ -1352,9 +1350,8 @@ Statement Parser::parse_create_view() {
     if (!peek_is(TokenKind::As)) throw ParseError("Expected AS");
     advance();
     std::size_t pos_before_select = pos_;
-    if (!peek_is(TokenKind::Select)) throw ParseError("Expected SELECT");
-    advance();
-    Statement query = parse_select();
+    if (!peek_is(TokenKind::Select) && !peek_is(TokenKind::With)) throw ParseError("Expected SELECT");
+    Statement query = parse_row_source(); // (CREATE VIEW v AS WITH c AS (...) SELECT ...: what mysqldump writes for a view over a WITH)
     std::size_t pos_end = pos_;
     std::vector<Token> slice(tokens_.begin() + static_cast<std::ptrdiff_t>(pos_before_select),
                               tokens_.begin() + static_cast<std::ptrdiff_t>(pos_end));

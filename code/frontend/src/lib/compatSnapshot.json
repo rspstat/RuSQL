@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-17",
+  "generated": "2026-11-21",
   "mysql": "8.4.9",
   "corpora": [
     {
@@ -579,6 +579,22 @@
       "bothFail": 29
     },
     {
+      "name": "with_rows_r98",
+      "en": "The rows of INSERT / REPLACE / CREATE TABLE come from WITH ... SELECT (INSERT ... WITH ... SELECT, REPLACE, CREATE TABLE ... [AS] WITH, CREATE VIEW ... AS WITH), a WITH followed by a write is a syntax error",
+      "ko": "INSERT · REPLACE · CREATE TABLE의 행을 WITH ... SELECT에서 가져오기(INSERT ... WITH ... SELECT, REPLACE, CREATE TABLE ... [AS] WITH, CREATE VIEW ... AS WITH), WITH 뒤에 쓰기 문장이 오면 문법 오류",
+      "statements": 24,
+      "different": 0,
+      "bothFail": 2
+    },
+    {
+      "name": "insert_select_dup_r98",
+      "en": "INSERT ... SELECT ... ON DUPLICATE KEY UPDATE (with a WITH ... SELECT, ORDER BY / LIMIT, a join, VALUES(col), no FROM): the rows updated and inserted, the affected-row counts",
+      "ko": "INSERT ... SELECT ... ON DUPLICATE KEY UPDATE(WITH ... SELECT · ORDER BY / LIMIT · 조인 · VALUES(열) · FROM 없는 SELECT): 고쳐진 행과 새 행, 영향 받은 행 수",
+      "statements": 20,
+      "different": 0,
+      "bothFail": 2
+    },
+    {
       "name": "system_schema_r86",
       "en": "The system schema mysql: listed in information_schema.schemata for a MySQL-protocol session, never made or dropped (3552)",
       "ko": "시스템 스키마 mysql: MySQL 프로토콜 세션의 information_schema.schemata에 보이고, 만들거나 지울 수 없음(3552)",
@@ -629,8 +645,8 @@
   ],
   "conformanceCases": 4780,
   "tests": {
-    "cases": 1062,
-    "assertions": 1527111
+    "cases": 1065,
+    "assertions": 1527507
   },
   "bugsFound": 206
 }

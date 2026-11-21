@@ -1,6 +1,6 @@
 # RuSQL 전시 시연 순서 (5분) — 2026-11-24
 
-발표자용 한 장짜리입니다. 아래 순서와 SQL은 **실제 앱에서 그대로 돌려 본 것**이고(`py -3 code/test/frontend/cdp/rehearse_demo.py`, 2026-11-21, 8단계 모두 통과), 수치는 이 PC에서 잰 값입니다(전시 PC에서는 조금 달라질 수 있습니다). Claude Desktop 자체는 리허설하지 못했으니 **전시 전에 한 번 직접 해 보세요.**
+발표자용 한 장짜리입니다. 아래 순서와 SQL은 **실제 앱에서 그대로 돌려 본 것**이고(`py -3 code/test/frontend/cdp/rehearse_demo.py`, 2026-11-21, 9단계 모두 통과), 수치는 이 PC에서 잰 값입니다(전시 PC에서는 조금 달라질 수 있습니다). Claude Desktop 자체는 리허설하지 못했으니 **전시 전에 한 번 직접 해 보세요.**
 
 - **필수 4분 40초** = 장면 1, 2, 3, 5, 7 · **선택 1분** = 장면 4, 6 (시간이 모자라면 건너뜁니다)
 - 데이터: `docs/mds/EXHIBITION_setup.sql` → 데이터베이스 `expo` (고객 300행 · 주문 1,500행(고객을 가리키는 외래키) · `logs` 131,072행)
@@ -45,7 +45,7 @@ GROUP BY c.id, c.name, c.city ORDER BY total DESC LIMIT 10;
 SELECT status, COUNT(*) AS n, SUM(total) AS total FROM orders GROUP BY status;
 ```
 
-**장면 3** — 반드시 `SELECT *` 로 (아래 "주의" 참고)
+**장면 3** — `SELECT *` 로 (아래 "주의" 참고)
 
 ```sql
 EXPLAIN ANALYZE SELECT * FROM logs WHERE user_id = 777;
@@ -61,7 +61,7 @@ Insert into editor가 넣어 주는 문장은 `CREATE INDEX idx_logs_user_id ON 
 DROP INDEX idx_logs_user_id ON logs;
 ```
 
-**장면 4** — 실행하지 말고 쓰기만 한 채 전체 선택 → Journey
+**장면 4** — 쓰고 전체 선택 → Journey (방금 실행했어도 됩니다)
 
 ```sql
 SELECT c.city, SUM(o.total) AS total FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY c.city ORDER BY total DESC;
@@ -87,14 +87,14 @@ ROLLBACK;
 
 ## 주의 (이미 알고 있는 것)
 
-- **장면 3에서 `COUNT(*)`나 `SUM()` 같은 집계는 쓰지 마세요.** 엔진을 다시 켠 직후에는 인덱스를 타는 집계가 전체를 읽어서 인덱스 효과가 안 보입니다(`docs/mds/DATE.md`의 "정직한 한계"). `SELECT *`는 다시 켠 뒤에도 됩니다(리허설에서 로그아웃 → 로그인 뒤 확인).
-- **장면 4의 Journey는 방금 실행한 문장에 누르면 1단계만 나옵니다**(결과 캐시에서 바로 나오기 때문). 실행하지 않은 새 문장에 누르세요.
+- **장면 3은 위 문장 그대로 `SELECT *`로 하세요.** 앱을 다시 켠 직후에도 됩니다(리허설에서 로그아웃 → 로그인 뒤 확인). `COUNT(*)` 같은 집계도 2026-11-21에 고쳐서 다시 켠 직후에 인덱스를 탑니다(앱에서 확인: Try it 39 → 0.27 ms) — 이 안내서의 시간과 수치는 `SELECT *`로 잰 것입니다.
+- **장면 4의 Journey는 방금 실행한 문장에 눌러도 됩니다**(전에는 1단계만 나왔던 것을 2026-11-21에 고침, 리허설에서 11단계 확인). 이 PC에 **옛 설치 파일로 깐 앱**이 있으면 새 `RuSQL_2.3.0_x64-setup.exe`로 다시 설치해야 이 수정이 들어갑니다.
 - Claude가 편집기를 움직이려면 **앱이 로그인된 상태**이고 **Server Manager가 RUNNING**이어야 합니다.
 - 설치한 앱은 처음에 연결이 하나도 없습니다(위 준비 2번).
 
 ## 자주 받는 질문 (한 줄 답)
 
 - **AI는 어디에 있나요?** 앱 안에 AI 모델이 있는 것이 아니라 Claude Desktop을 MCP로 연결합니다. RuSQL이 데이터베이스 · 편집기 · 서버를 다루는 도구 37개를 내줍니다.
-- **MySQL과 호환되나요?** 진짜 MySQL 8.4.9에 같은 문장 7,696개(코퍼스 78개)를 보내 결과를 비교해 차이가 0입니다. mysql 클라이언트나 DBeaver로 접속됩니다.
-- **얼마나 검증했나요?** 자동 테스트 1,062케이스(확인 약 152만 개), 실제 MySQL과의 대조, 무작위 문장 퍼저로 확인합니다.
+- **MySQL과 호환되나요?** 진짜 MySQL 8.4.9에 같은 문장 7,740개(코퍼스 80개)를 보내 결과를 비교해 차이가 0입니다. mysql 클라이언트나 DBeaver로 접속됩니다.
+- **얼마나 검증했나요?** 자동 테스트 1,065케이스(확인 약 152만 개), 실제 MySQL과의 대조, 무작위 문장 퍼저로 확인합니다.
 - **무엇은 안 하나요?** XA 분산 트랜잭션, 페이지 단위 버퍼 풀 교체, WAL 기반 복제는 범위에서 뺐습니다.
