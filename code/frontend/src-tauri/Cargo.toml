@@ -24,3 +24,5 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
+# Claude Desktop 확장(.mcpb)은 zip 파일이다. 파일이 100 KB 남짓이라 압축 없이(Stored) 쓴다 -- 기능 플래그를 모두 끈다.
+zip = { version = "2", default-features = false }

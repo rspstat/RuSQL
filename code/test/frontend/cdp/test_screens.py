@@ -219,6 +219,9 @@ def server_manager_sessions_metrics_and_mcp_panels(page: Page):
     shown = sorted(page.eval("[...document.querySelectorAll('.srv-slide-panel span[title]')].map(e => e.innerText.trim())"))
     real = server_tools()
     assert shown == real, f"the panel lists {len(shown)} tools, the server has {len(real)}: {sorted(set(shown) ^ set(real))}"
+    # both ways to connect Claude Desktop are there (not clicked: the extension button opens the install window of the real Claude Desktop)
+    buttons = page.eval("[...document.querySelectorAll('.srv-slide-panel button')].map(b => b.innerText.trim())")
+    assert "Add to Claude Desktop (extension)" in buttons and "Auto-connect Claude Desktop (config file)" in buttons, buttons
 
 
 @scenario

@@ -3665,13 +3665,35 @@ function App() {
                     <div className="srv-slide-section">How to Use</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
                       <div className="srv-slide-desc" style={{ margin: 0 }}>① Start the RuSQL server (from this tab)</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>② Auto-register with Claude Desktop via the button below</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Restart Claude Desktop</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>② Add the extension to Claude Desktop with the first button, then press Install in Claude's window</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Not showing up? Use the second button (config file), then quit Claude Desktop from its tray icon and start it again</div>
                     </div>
 
                     <button
-                      className="srv-action-btn save"
+                      className="srv-action-btn primary"
                       style={{ marginTop: 14, width: "100%" }}
+                      onClick={async () => {
+                        setMcpSetupMsg(null);
+                        try {
+                          const msg = await invoke<string>("setup_mcp_extension", {
+                            host: "127.0.0.1",
+                            port: parseInt(portInput) || 7878,
+                            user: srvUser,
+                            password: srvPass,
+                            open: true,
+                          });
+                          setMcpSetupMsg({ ok: true, text: msg });
+                        } catch (e) {
+                          setMcpSetupMsg({ ok: false, text: String(e) });
+                        }
+                      }}
+                    >
+                      Add to Claude Desktop (extension)
+                    </button>
+
+                    <button
+                      className="srv-action-btn save"
+                      style={{ marginTop: 8, width: "100%" }}
                       onClick={async () => {
                         setMcpSetupMsg(null);
                         try {
@@ -3687,7 +3709,7 @@ function App() {
                         }
                       }}
                     >
-                      Auto-connect Claude Desktop
+                      Auto-connect Claude Desktop (config file)
                     </button>
                     {mcpSetupMsg && (
                       <div style={{

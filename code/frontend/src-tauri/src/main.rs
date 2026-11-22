@@ -1338,6 +1338,99 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     Ok(message)
 }
 
+// ─── Claude Desktop 확장(.mcpb) ───────────────────────────────
+// 설정 파일 방식(setup_mcp_config)은 Claude Desktop이 그 파일을 읽어 주어야 한다. 새로 설치한 Microsoft Store판은 읽는 위치가 달라 RuSQL이 목록에 나오지 않는 경우가 있다
+// (github.com/anthropics/claude-code/issues/26073). 확장(.mcpb = manifest.json + 서버 파일을 담은 zip)은 Claude Desktop 자신의 설치 창으로 들어가므로 그 설정 파일을 거치지 않는다.
+// 확장은 매번 여기서 만든다: 설치 위치의 Python과 접속 정보(host · port · 계정)가 PC마다 다르기 때문이다.
+const MCPB_ICON: &[u8] = include_bytes!("../icons/icon.png"); // (512x512: the size Claude Desktop recommends)
+
+fn write_mcpb_file(out: &std::path::Path, manifest: &serde_json::Value, server_script: &[u8]) -> Result<(), String> {
+    let manifest_text = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(out).map_err(|e| format!("{}: {}", out.display(), e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let entries: [(&str, &[u8]); 3] = [
+        ("manifest.json", manifest_text.as_bytes()),
+        ("icon.png", MCPB_ICON),
+        ("server/mcp_server.py", server_script),
+    ];
+    for (name, bytes) in entries {
+        zip.start_file(name, options).map_err(|e| e.to_string())?;
+        zip.write_all(bytes).map_err(|e| e.to_string())?;
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// `open`: 만든 확장 파일을 Windows가 연결해 둔 프로그램(Claude Desktop)으로 연다 -- 설치 창이 뜬다. 화면 검사는 false로 불러 실제 Claude Desktop을 건드리지 않는다.
+#[tauri::command]
+fn setup_mcp_extension(host: String, port: u16, user: String, password: String, open: bool) -> Result<String, String> {
+    let script_path = mcp_server_script();
+    let server_script = std::fs::read(&script_path).map_err(|e| format!("mcp_server.py를 읽을 수 없습니다:\n{} ({})", script_path.display(), e))?;
+    let python_path = find_python_with_mcp()?;
+    let app_path = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    // (설정 파일 방식과 같은 인수: 설치 폴더의 Python은 .pyc를 설치 폴더에 쓰지 않게 -B)
+    let mut args: Vec<String> = Vec::new();
+    if bundled_python_path().map_or(false, |p| p.to_string_lossy() == python_path) {
+        args.push("-B".to_string());
+    }
+    args.push("-u".to_string());
+    args.push("${__dirname}/server/mcp_server.py".to_string()); // Claude Desktop이 확장을 풀어 둔 폴더로 바꿔 준다
+
+    let manifest = serde_json::json!({
+        "manifest_version": "0.2",
+        "name": "rusql",
+        "display_name": "RuSQL",
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Lets Claude work with a RuSQL database: run SQL, read schemas and plans, check locks and health, and drive the RuSQL app.",
+        "long_description": "RuSQL is a C++ relational database with the MySQL wire protocol. This extension starts RuSQL's MCP server, which gives Claude database tools (SQL, schema, EXPLAIN, indexes, locks, slow queries, schema diff) and tools that drive the RuSQL desktop app. Start the RuSQL server before asking Claude.",
+        "author": { "name": "rspstat" },
+        "license": "MIT",
+        "repository": { "type": "git", "url": "https://github.com/rspstat/RuSQL" },
+        "icon": "icon.png",
+        "server": {
+            "type": "python",
+            "entry_point": "server/mcp_server.py",
+            "mcp_config": {
+                "command": python_path,
+                "args": args,
+                "env": {
+                    "RUSQL_HOST": host,
+                    "RUSQL_PORT": port.to_string(),
+                    "RUSQL_USER": user,
+                    "RUSQL_PASS": password,
+                    "RUSQL_APP_PATH": app_path,
+                    // (복사된 서버 파일은 code/ 옆이 아닌 Claude의 폴더에서 돌므로 앱과 같은 data 폴더를 알려 줘야 한다)
+                    "RUSQL_DATA_DIR": data_root().to_string_lossy().to_string(),
+                },
+            },
+        },
+        "tools_generated": true,
+        "compatibility": { "platforms": ["win32"] },
+    });
+
+    let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA 환경변수를 찾을 수 없습니다.".to_string())?;
+    let dir = std::path::Path::new(&appdata).join("RuSQL");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join("RuSQL.mcpb");
+    write_mcpb_file(&out, &manifest, &server_script)?;
+
+    let mut message = format!("확장 파일을 만들었습니다:\n  {}\n\nPython: {}\n", out.display(), python_path);
+    if open {
+        let mut start = std::process::Command::new("cmd");
+        start.args(["/c", "start", ""]).arg(&out);
+        #[cfg(windows)]
+        start.creation_flags(0x0800_0000);
+        match start.status() {
+            Ok(s) if s.success() => message.push_str("\nClaude Desktop의 설치 창이 뜨면 [설치(Install)]를 누르세요. 설치한 뒤 설정 → 확장(Extensions)에서 RuSQL이 켜져 있는지 확인하세요."),
+            _ => message.push_str("\n파일을 열지 못했습니다. Claude Desktop의 설정 → 확장(Extensions)에서 위 파일을 끌어다 놓거나 직접 선택해 설치하세요."),
+        }
+        message.push_str("\n창이 뜨지 않으면 위 파일을 더블클릭하거나 Claude Desktop 창으로 끌어다 놓으세요.");
+    }
+    message.push_str("\n\n설정 파일 방식(Auto-connect Claude Desktop)과 함께 쓰면 RuSQL이 두 번 등록됩니다. 하나만 쓰세요. RuSQL을 업데이트했다면 이 버튼을 다시 눌러 확장을 갱신하세요.");
+    Ok(message)
+}
+
 // ─── 생태계 보기: 저장된 모든 연결의 데이터 폴더를 디스크에서 읽는다 ─────────────────────────
 // 엔진을 띄우지 않고(로그인 없이, 읽기만) 파일에서 연결 → 데이터베이스 → 테이블을 알아낸다. 데이터 폴더 = <연결의 dataDir>: 그 아래 `_`로 시작하지 않는 폴더가 데이터베이스,
 // 그 안의 `<표>.schema.json`이 테이블(열 · 기본키 · 외래키), `<표>.rdb` 머리 32바이트의 row_count가 행 수(파일에 저장된 행 버전의 수), `indexes.json` · `views.json`이 인덱스 · 뷰,
@@ -2017,6 +2110,7 @@ fn main() {
             sync_current_db,
             sync_login_state,
             setup_mcp_config,
+            setup_mcp_extension,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -2073,6 +2167,31 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert!(after["mcpServers"]["other"].is_object(), "pre-existing entry must survive the merge");
         assert!(after["mcpServers"]["RuSQL"].is_object(), "new entry must be added");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The Claude Desktop extension is a zip with exactly the three files the manifest names (manifest.json, the icon, the entry point), readable back.
+    #[test]
+    fn write_mcpb_file_holds_manifest_icon_and_server() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("rusql_mcpb_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("RuSQL.mcpb");
+        let manifest = serde_json::json!({"name": "rusql", "server": {"entry_point": "server/mcp_server.py"}});
+        write_mcpb_file(&out, &manifest, b"print('hi')\n").unwrap();
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let mut names: Vec<String> = (0..archive.len()).map(|i| archive.by_index(i).unwrap().name().to_string()).collect();
+        names.sort();
+        assert_eq!(names, ["icon.png", "manifest.json", "server/mcp_server.py"]);
+        let mut script = String::new();
+        archive.by_name("server/mcp_server.py").unwrap().read_to_string(&mut script).unwrap();
+        assert_eq!(script, "print('hi')\n");
+        let mut text = String::new();
+        archive.by_name("manifest.json").unwrap().read_to_string(&mut text).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), manifest);
+        assert!(archive.by_name("icon.png").unwrap().size() > 1000, "the icon is the real picture");
 
         std::fs::remove_dir_all(&dir).ok();
     }

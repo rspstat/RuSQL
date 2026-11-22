@@ -19,8 +19,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-# 접속정보는 Claude Desktop 설정의 "env" 필드로 오버라이드 가능 (RuSQL UI의 "Auto-connect
-# Claude Desktop" 버튼이 지금 이 세션의 실제 host/port/계정으로 채워 씀 -- setup_mcp_config,
+# 접속정보는 Claude Desktop 설정의 "env" 필드(또는 확장(.mcpb) 매니페스트의 env)로 오버라이드 가능 (RuSQL UI의 "Auto-connect
+# Claude Desktop" / "Add to Claude Desktop (extension)" 버튼이 지금 이 세션의 실제 host/port/계정으로 채워 씀 -- setup_mcp_config · setup_mcp_extension,
 # code/frontend/src-tauri/src/main.rs). env가 없으면(수동 설정 등) 기존 기본값으로 폴백.
 RUSQL_HOST = os.environ.get("RUSQL_HOST", "127.0.0.1")
 RUSQL_PORT = int(os.environ.get("RUSQL_PORT", "7878"))

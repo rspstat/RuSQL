@@ -88,7 +88,7 @@ npm run tauri dev
 pip install -r code/mcp/requirements.txt
 python -u code/mcp/mcp_server.py
 ```
-`mcp_server.py`는 stdio로 통신하므로 보통 Claude Desktop이 직접 실행합니다. 연결하려면 `code/mcp/claude_desktop_config_example.json`의 `rusql` 항목을 Claude Desktop 설정 파일(`claude_desktop_config.json`)의 `mcpServers`에 넣고 경로를 이 PC에 맞게 고칩니다. 앱의 AI MCP 패널에서 자동으로 등록할 수도 있습니다. 도구 목록과 사용 방법은 `docs/mds/AI.md`를 봅니다.
+`mcp_server.py`는 stdio로 통신하므로 보통 Claude Desktop이 직접 실행합니다. 연결하려면 `code/mcp/claude_desktop_config_example.json`의 `rusql` 항목을 Claude Desktop 설정 파일(`claude_desktop_config.json`)의 `mcpServers`에 넣고 경로를 이 PC에 맞게 고칩니다. 앱의 AI MCP 패널에서 자동으로 등록할 수도 있습니다: **Add to Claude Desktop (extension)** 은 확장 파일(`RuSQL.mcpb`)을 만들어 Claude Desktop의 설치 창으로 넣고(설정 파일을 거치지 않음), **Auto-connect Claude Desktop (config file)** 은 위 설정 파일에 씁니다. 둘 중 하나만 씁니다. 도구 목록과 사용 방법은 `docs/mds/AI.md`를 봅니다.
 
 <br/>
 
