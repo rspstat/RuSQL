@@ -2,8 +2,7 @@
 // line-based protocol (AUTH handshake, queries terminated by a `---END---` sentinel).
 // Deliberately has no dependency on engine_core, mirroring the Rust original.
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "engine/net_compat.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -18,7 +17,9 @@
 
 #include <sha1/sha1.hpp>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 namespace {
 
@@ -211,8 +212,7 @@ int main(int argc, char** argv) {
         try { port = std::stoi(*p); } catch (...) { port = 7878; }
     }
 
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+    if (!net::startup()) {
         std::cerr << RED << BOLD << "WSAStartup failed" << RESET << "\n";
         return 1;
     }
@@ -221,13 +221,13 @@ int main(int argc, char** argv) {
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
         std::cerr << RED << BOLD << "Cannot create socket" << RESET << "\n";
-        WSACleanup();
+        net::cleanup();
         return 1;
     }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<u_short>(port));
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
         // Fall back to DNS resolution for non-literal hosts (e.g. "localhost").
         addrinfo hints{};
@@ -236,8 +236,8 @@ int main(int argc, char** argv) {
         addrinfo* result = nullptr;
         if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0 || !result) {
             std::cerr << RED << BOLD << "Cannot connect to " << host << ":" << port << RESET << "\n";
-            closesocket(sock);
-            WSACleanup();
+            net::close_socket(sock);
+            net::cleanup();
             return 1;
         }
         addr = *reinterpret_cast<sockaddr_in*>(result->ai_addr);
@@ -246,8 +246,8 @@ int main(int argc, char** argv) {
 
     if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::cerr << RED << BOLD << "Cannot connect to " << host << ":" << port << RESET << "\n";
-        closesocket(sock);
-        WSACleanup();
+        net::close_socket(sock);
+        net::cleanup();
         return 1;
     }
 
@@ -258,8 +258,8 @@ int main(int argc, char** argv) {
     auto nonce = extract_nonce(banner_lines);
     if (!nonce) {
         std::cerr << RED << BOLD << "Server did not send an auth challenge (NONCE)." << RESET << "\n";
-        closesocket(sock);
-        WSACleanup();
+        net::close_socket(sock);
+        net::cleanup();
         return 1;
     }
 
@@ -267,8 +267,8 @@ int main(int argc, char** argv) {
     std::string token = compute_native_password_token(pass, *nonce);
     if (!send_line(sock, "AUTH " + user + " " + token)) {
         std::cerr << RED << "Connection lost during auth." << RESET << "\n";
-        closesocket(sock);
-        WSACleanup();
+        net::close_socket(sock);
+        net::cleanup();
         return 1;
     }
 
@@ -278,8 +278,8 @@ int main(int argc, char** argv) {
     if (status.rfind("OK", 0) != 0) {
         std::string msg = auth_resp.size() > 1 ? auth_resp[1] : "authentication failed";
         std::cerr << RED << BOLD << "ERROR: " << msg << RESET << "\n";
-        closesocket(sock);
-        WSACleanup();
+        net::close_socket(sock);
+        net::cleanup();
         return 1;
     }
 
@@ -345,15 +345,15 @@ int main(int argc, char** argv) {
             auto resp = read_response(reader);
             if (resp.empty()) {
                 std::cerr << RED << "Connection closed by server." << RESET << "\n";
-                closesocket(sock);
-                WSACleanup();
+                net::close_socket(sock);
+                net::cleanup();
                 return 0;
             }
             display_response(resp);
         }
     }
 
-    closesocket(sock);
-    WSACleanup();
+    net::close_socket(sock);
+    net::cleanup();
     return 0;
 }

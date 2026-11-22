@@ -10,7 +10,7 @@
 .fk-warn { margin: 4px 0; padding: 6px 10px; background: #3a3320; border: 1px solid #6b5a2a; border-radius: 4px; color: #e5c97b; }
 .fk-ddl-title { margin: 12px 0 4px; color: #9cdcfe; }
 .fk-dim { color: #858585; }
-.fk-ddl { margin: 0; padding: 10px 12px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; font: 12px Consolas, "Courier New", monospace; color: #ce9178; white-space: pre-wrap; }
+.fk-ddl { margin: 0; padding: 10px 12px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; font: 12px Consolas, Menlo, "Courier New", monospace; color: #ce9178; white-space: pre-wrap; }
 .fk-error { margin-top: 10px; padding: 8px 10px; background: #3a2323; border: 1px solid #6b3a3a; border-radius: 4px; color: #f48771; }
 .fk-footer { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid #3c3c3c; }
 .fk-btn { background: #333; color: #d4d4d4; border: 1px solid #454545; border-radius: 4px; padding: 5px 14px; font-size: 12px; cursor: pointer; }

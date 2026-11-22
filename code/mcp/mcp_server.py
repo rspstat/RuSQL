@@ -1833,8 +1833,12 @@ def launch_app() -> str:
     if not RUSQL_APP_PATH:
         return ("Error: RUSQL_APP_PATH is not set. Use the \"Auto-connect Claude Desktop\" "
                 "button in the RuSQL app's AI MCP panel once to configure it.")
+    command = [RUSQL_APP_PATH]
+    # macOS: the path is the program inside the app bundle (RuSQL.app/Contents/MacOS/rusql-ui); `open -n` starts the bundle the way Finder does
+    if sys.platform == "darwin" and ".app/Contents/MacOS/" in RUSQL_APP_PATH:
+        command = ["open", "-n", RUSQL_APP_PATH.split(".app/Contents/MacOS/")[0] + ".app"]
     try:
-        subprocess.Popen([RUSQL_APP_PATH])
+        subprocess.Popen(command)
     except OSError as e:
         return f"Error: failed to launch '{RUSQL_APP_PATH}': {e}"
     return "Launched the RuSQL app. Give it a few seconds to start before calling login."

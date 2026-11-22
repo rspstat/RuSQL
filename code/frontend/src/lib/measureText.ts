@@ -9,7 +9,7 @@ export const measureTextPx = (text: string): number => {
     const c = document.createElement('canvas');
     _measureCtx = c.getContext('2d');
     if (!_measureCtx) return text.length * 8;
-    _measureCtx.font = '13px Consolas, "Malgun Gothic", monospace';
+    _measureCtx.font = '13px Consolas, Menlo, "Malgun Gothic", monospace';
   }
   return _measureCtx.measureText(text).width;
 };

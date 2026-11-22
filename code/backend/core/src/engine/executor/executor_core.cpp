@@ -7,6 +7,7 @@
 #include "engine/executor/executor.hpp"
 #include "engine/explain_trace.hpp"
 #include "engine/info_schema_scope.hpp"
+#include "engine/platform_compat.hpp"
 #include "engine/result_text.hpp"
 #include "engine/statement_deadline.hpp"
 #include "engine/storage/numeric_key.hpp"
@@ -1669,7 +1670,7 @@ void Executor::note_slow_statement(const std::string& sql, std::chrono::steady_c
     const auto began = std::chrono::system_clock::now() - std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
     const std::time_t whole = std::chrono::system_clock::to_time_t(began);
     std::tm local{};
-    localtime_s(&local, &whole);
+    engine::platform::local_time(&whole, &local);
     char stamp[48];
     std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(began.time_since_epoch()).count() % 1000000;
@@ -2505,7 +2506,7 @@ StringResult Executor::execute_with_s_body(SharedDatabase& s, Statement stmt) {
         std::string lower_name = v->name;
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return std::tolower(c); });
         if (lower_name == "rusql_parallel") {
-            _putenv_s("RUSTDB_PARALLEL", result_val.c_str());
+            engine::platform::set_env("RUSTDB_PARALLEL", result_val.c_str());
         }
         if (lower_name == "lock_wait_timeout") {
             try {

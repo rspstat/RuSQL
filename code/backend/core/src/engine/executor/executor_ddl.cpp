@@ -6,6 +6,7 @@
 // plus exec_use/exec_show_tables.
 
 #include "engine/executor/executor.hpp"
+#include "engine/float_chars.hpp"
 #include "engine/fk_name.hpp"
 #include "engine/now_text.hpp"
 #include "engine/routine_privilege.hpp"
@@ -132,7 +133,7 @@ bool parses_as_i64(const std::string& s) {
 bool parses_as_f64(const std::string& s) {
     if (s.empty()) return false;
     double val;
-    auto res = std::from_chars(s.data(), s.data() + s.size(), val);
+    auto res = engine::from_chars_double(s.data(), s.data() + s.size(), val);
     return res.ec == std::errc() && res.ptr == s.data() + s.size();
 }
 

@@ -43,6 +43,7 @@ interface HistoryEntry {
 }
 type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree" | "mvcc";
 const PAGE_SIZE = 100;
+const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform); // (a few lines of help text name Finder / ⌘Q instead of Explorer / the tray icon)
 // the chip colours of the tool groups in the AI MCP panel
 const MCP_ACCENTS = {
   teal: { bg: "rgba(78,201,176,0.12)", fg: "#4ec9b0", border: "rgba(78,201,176,0.25)" },
@@ -2699,7 +2700,7 @@ function App() {
                 theme="rusql-dark"
                 options={{
                   fontSize: 14,
-                  fontFamily: "Consolas, 'Courier New', monospace",
+                  fontFamily: "Consolas, Menlo, 'Courier New', monospace",
                   minimap: { enabled: true },
                   scrollBeyondLastLine: false,
                   lineNumbers: "on",
@@ -2883,7 +2884,7 @@ function App() {
                         theme="rusql-dark"
                         options={{
                           fontSize: 14,
-                          fontFamily: "Consolas, 'Courier New', monospace",
+                          fontFamily: "Consolas, Menlo, 'Courier New', monospace",
                           minimap: { enabled: true },
                           scrollBeyondLastLine: false,
                           lineNumbers: "on",
@@ -3665,9 +3666,9 @@ function App() {
                     <div className="srv-slide-section">How to Use</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
                       <div className="srv-slide-desc" style={{ margin: 0 }}>① Start the RuSQL server (from this tab)</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>② Press the first button. An Explorer window opens with RuSQL.mcpb selected: drag that file onto the Claude Desktop window (or double-click it), then press Install</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>{`② Press the first button. ${IS_MAC ? "A Finder" : "An Explorer"} window opens with RuSQL.mcpb selected: drag that file onto the Claude Desktop window (or double-click it), then press Install`}</div>
                       <div className="srv-slide-desc" style={{ margin: 0 }}>③ Check Claude Desktop → Settings → Extensions: RuSQL is on. When Claude asks to use a RuSQL tool, choose Always allow</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>④ Not showing up? Use the second button instead (it writes Claude's config file: quit Claude Desktop from its tray icon and start it again). Use only one of the two</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>{`④ Not showing up? Use the second button instead (it writes Claude's config file: quit Claude Desktop ${IS_MAC ? "with ⌘Q" : "from its tray icon"} and start it again). Use only one of the two`}</div>
                     </div>
 
                     <button

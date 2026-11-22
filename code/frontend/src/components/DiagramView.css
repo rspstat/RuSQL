@@ -12,7 +12,7 @@
   min-width: 940px;
   margin: 0 auto;
   color: #d4d4d4;
-  font-family: 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', -apple-system, 'Helvetica Neue', sans-serif;
   /* Korean: wrap between words, not in the middle of one */
   word-break: keep-all;
   overflow-wrap: break-word;
@@ -357,7 +357,7 @@
 }
 
 .dg-disk span {
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   color: #a0a0a0;
   word-break: break-word;
 }

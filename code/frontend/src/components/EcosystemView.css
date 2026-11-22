@@ -12,7 +12,7 @@
     radial-gradient(900px 480px at 100% 100%, rgba(139, 92, 246, 0.06), transparent 70%),
     #1e1e1e;
   color: #d4d4d4;
-  font-family: 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', -apple-system, 'Helvetica Neue', sans-serif;
   word-break: keep-all;
   overflow-wrap: break-word;
 }
@@ -108,7 +108,7 @@
 .eco-zoom-label {
   min-width: 36px;
   text-align: right;
-  font: 11px 'Consolas', monospace;
+  font: 11px 'Consolas', Menlo, monospace;
   color: #858585;
 }
 
@@ -219,7 +219,7 @@
 
 .eco-name {
   fill: #f0f0f0;
-  font: 600 13.5px 'Segoe UI', sans-serif;
+  font: 600 13.5px 'Segoe UI', -apple-system, 'Helvetica Neue', sans-serif;
   pointer-events: none;
 }
 
@@ -249,7 +249,7 @@
 
 .eco-caption {
   fill: #8a8a8a;
-  font: 11px 'Segoe UI', sans-serif;
+  font: 11px 'Segoe UI', -apple-system, 'Helvetica Neue', sans-serif;
   pointer-events: none;
   animation: eco-fade 0.7s ease-out backwards;
   animation-delay: 900ms;

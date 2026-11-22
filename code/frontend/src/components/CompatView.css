@@ -106,7 +106,7 @@
   border-color: var(--c);
   box-shadow: 0 4px 18px color-mix(in srgb, var(--c) 18%, transparent);
 }
-.cp-name { font-family: Consolas, monospace; color: #9cdcfe; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cp-name { font-family: Consolas, Menlo, monospace; color: #9cdcfe; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cp-what { color: #b0b0b5; line-height: 1.35; }
 .cp-bar {
   position: relative;
@@ -182,7 +182,7 @@
   color: var(--c);
   background: color-mix(in srgb, var(--c) 15%, #1c1c1e);
 }
-.cp-foot { margin-top: 28px; font-size: 11px; color: #6a6a70; font-family: Consolas, monospace; }
+.cp-foot { margin-top: 28px; font-size: 11px; color: #6a6a70; font-family: Consolas, Menlo, monospace; }
 
 @media (max-width: 980px) {
   .cp-summary { grid-template-columns: 1fr; }

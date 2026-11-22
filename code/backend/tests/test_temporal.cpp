@@ -5,6 +5,7 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/platform_compat.hpp"
 #include "engine/result_text.hpp"
 
 using namespace engine;
@@ -161,9 +162,9 @@ TEST_CASE("UTC_TIMESTAMP is the time in Greenwich, whatever the clock of the mac
     ok(ex, "USE d");
     const std::time_t now = std::time(nullptr);
     std::tm local{}, utc{};
-    localtime_s(&local, &now);
-    gmtime_s(&utc, &now);
-    const long long offset_minutes = (static_cast<long long>(_mkgmtime(&local)) - static_cast<long long>(_mkgmtime(&utc))) / 60;
+    engine::platform::local_time(&now, &local);
+    engine::platform::utc_time(&now, &utc);
+    const long long offset_minutes = (static_cast<long long>(engine::platform::utc_seconds(&local)) - static_cast<long long>(engine::platform::utc_seconds(&utc))) / 60;
     REQUIRE(rows_of(ex, "SELECT TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW())") == Rows{{std::to_string(offset_minutes)}});
     REQUIRE(rows_of(ex, "SELECT LENGTH(UTC_TIME()), LENGTH(UTC_TIME(2))") == Rows{{"8", "11"}});
     fails(ex, "SELECT NOW(7)");

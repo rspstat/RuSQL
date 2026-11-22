@@ -201,7 +201,7 @@ void DiskManager::save_table(const std::string& table, const std::vector<Row>& r
     header.row_count = static_cast<std::uint32_t>(rows.size());
     header.flags = FLAG_COMPRESSED;
     header.page_count = static_cast<std::uint32_t>(
-        std::max<std::size_t>((compressed.size() + PAGE_SIZE - 1) / PAGE_SIZE, 1));
+        std::max<std::size_t>((compressed.size() + PAGE_BYTES - 1) / PAGE_BYTES, 1));
 
     std::vector<std::uint8_t> out = header.to_bytes();
     out.insert(out.end(), compressed.begin(), compressed.end());

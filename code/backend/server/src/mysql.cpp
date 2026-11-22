@@ -7,9 +7,7 @@
 #include "engine/result_text.hpp"
 #include "engine/show_filter.hpp"
 
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "engine/net_compat.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1719,13 +1717,13 @@ StringResult exec_query(Executor& exec, const std::string& raw, std::string* ran
 void handle_mysql_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, std::uint32_t /*listener_count*/) {
     struct SocketGuard {
         SOCKET s;
-        ~SocketGuard() { closesocket(s); }
+        ~SocketGuard() { net::close_socket(s); }
     } guard{sock};
 
     std::string peer = "unknown";
     {
         sockaddr_in peer_addr{};
-        int addr_len = sizeof(peer_addr);
+        net::socklen addr_len = sizeof(peer_addr);
         if (getpeername(sock, reinterpret_cast<sockaddr*>(&peer_addr), &addr_len) == 0) {
             char ip_buf[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, &peer_addr.sin_addr, ip_buf, sizeof(ip_buf))) {
@@ -2029,9 +2027,17 @@ void start_mysql_listener(int port, const std::string& bind_addr, std::shared_pt
         return;
     }
 
+#ifndef _WIN32
+    // (a restart right after a stop: the port may still be held by the connections that were open; Windows lets a new listener take it, POSIX needs to be told)
+    {
+        int reuse = 1;
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    }
+#endif
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<u_short>(port));
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
     // Defaults to 127.0.0.1 (main.cpp's --mysql-bind default) rather than the previous
     // hardcoded INADDR_ANY (0.0.0.0) -- combined with the ensure_default_user() root/root
     // fallback account, binding all interfaces by default exposed the server to anyone on
@@ -2040,12 +2046,12 @@ void start_mysql_listener(int port, const std::string& bind_addr, std::shared_pt
 
     if (bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::cerr << "[mysql] Failed to bind " << bind_addr << ":" << port << "\n";
-        closesocket(listener);
+        net::close_socket(listener);
         return;
     }
     if (listen(listener, SOMAXCONN) != 0) {
         std::cerr << "[mysql] Failed to listen on " << bind_addr << ":" << port << "\n";
-        closesocket(listener);
+        net::close_socket(listener);
         return;
     }
 
@@ -2061,9 +2067,12 @@ void start_mysql_listener(int port, const std::string& bind_addr, std::shared_pt
     std::thread([listener, shared, counter]() {
         for (;;) {
             SOCKET client_sock = accept(listener, nullptr, nullptr);
-            if (client_sock == INVALID_SOCKET) break;
+            if (client_sock == INVALID_SOCKET) {
+                if (net::retry_accept(net::last_error())) continue; // (POSIX: interrupted by a signal, or a connection dropped before it was taken)
+                break;
+            }
             std::uint32_t id = counter->fetch_add(1);
-            std::thread(handle_mysql_client, client_sock, shared, id).detach();
+            net::spawn_detached([client_sock, shared, id] { handle_mysql_client(client_sock, shared, id); });
         }
     }).detach();
 }

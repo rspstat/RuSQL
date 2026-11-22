@@ -3,8 +3,16 @@
 // (per the migration plan's dependency mapping) this uses raw ANSI escape codes
 // directly, matching the established pattern in cpp/client/src/main.cpp.
 
+#ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <limits.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -174,6 +182,7 @@ std::optional<std::string> find_arg(const std::vector<std::string>& args, const 
 }
 
 std::string default_data_dir() {
+#ifdef _WIN32
     char path_buf[MAX_PATH];
     DWORD len = GetModuleFileNameA(nullptr, path_buf, MAX_PATH);
     if (len == 0 || len == MAX_PATH) return "data";
@@ -184,6 +193,23 @@ std::string default_data_dir() {
     if (dir.has_parent_path()) dir = dir.parent_path();
     if (dir.has_parent_path()) dir = dir.parent_path();
     return (dir / "data").string();
+#else
+    // code/build/backend/cli/engine_cli (a single-configuration build has no Release folder, so one level less to climb than on Windows): code/data
+    char path_buf[PATH_MAX];
+#ifdef __APPLE__
+    uint32_t size = sizeof(path_buf);
+    if (_NSGetExecutablePath(path_buf, &size) != 0) return "data";
+#else
+    const ssize_t len = readlink("/proc/self/exe", path_buf, sizeof(path_buf) - 1);
+    if (len <= 0) return "data";
+    path_buf[len] = '\0';
+#endif
+    fs::path dir = fs::path(path_buf).parent_path();
+    for (int i = 0; i < 3; i++) {
+        if (dir.has_parent_path()) dir = dir.parent_path();
+    }
+    return (dir / "data").string();
+#endif
 }
 
 } // namespace

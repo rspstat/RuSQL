@@ -13,6 +13,7 @@
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/platform_compat.hpp"
 #include "engine/result_text.hpp"
 
 using namespace engine;
@@ -1106,8 +1107,8 @@ TEST_CASE("R53: EXPLAIN ANALYZE names the way each join was done and tells the t
 namespace {
 // RUSQL_PROBE_CHECK=1 for the engines made while it lives: every use of the cache of values counts the rows again and compares (the engine throws when they differ)
 struct ProbeCheck {
-    ProbeCheck() { _putenv_s("RUSQL_PROBE_CHECK", "1"); }
-    ~ProbeCheck() { _putenv_s("RUSQL_PROBE_CHECK", ""); }
+    ProbeCheck() { engine::platform::set_env("RUSQL_PROBE_CHECK", "1"); }
+    ~ProbeCheck() { engine::platform::set_env("RUSQL_PROBE_CHECK", ""); }
 };
 
 std::uint64_t probe_skipped(Executor& ex) { return ex.get_shared()->read()->unique_probes->skipped.load(); }

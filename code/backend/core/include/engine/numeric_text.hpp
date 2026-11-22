@@ -17,6 +17,8 @@
 #include <string_view>
 #include <vector>
 
+#include "engine/float_chars.hpp"
+
 namespace engine {
 
 // The length of the number `s` starts with: an optional sign, digits with an optional fraction ("12", "12.5", "12.", ".5") and an
@@ -46,7 +48,7 @@ inline std::size_t number_length(std::string_view s) {
 inline double number_value(std::string_view number) {
     if (!number.empty() && number.front() == '+') number.remove_prefix(1); // from_chars does not read a plus sign
     double value = 0.0;
-    auto result = std::from_chars(number.data(), number.data() + number.size(), value);
+    auto result = from_chars_double(number.data(), number.data() + number.size(), value);
     return result.ec == std::errc() ? value : 0.0;
 }
 
@@ -63,7 +65,7 @@ inline std::optional<double> parse_number(std::string_view s) {
     if (q != end && *q == '-') ++q;
     if (q == end || !((*q >= '0' && *q <= '9') || *q == '.')) return std::nullopt; // not "inf", "nan", "0x..." either
     double value = 0.0;
-    auto result = std::from_chars(p, end, value);
+    auto result = from_chars_double(p, end, value);
     if (result.ec != std::errc() || result.ptr != end) return std::nullopt;
     return value;
 }

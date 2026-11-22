@@ -21,7 +21,7 @@
 body {
   background: #1e1e1e;
   color: #cccccc;
-  font-family: 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', -apple-system, 'Helvetica Neue', sans-serif;
   font-size: 13px;
   height: 100vh;
   overflow: hidden;
@@ -966,14 +966,14 @@ body {
   padding: 8px 12px;
   background: #2d1a1a;
   border-radius: 3px;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
 }
 
 .result-msg {
   color: #4ec9b0;
   font-size: 13px;
   padding: 6px 0;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
 }
 
 .result-info {
@@ -1026,7 +1026,7 @@ body {
   width: auto;
   border-collapse: collapse;
   font-size: 13px;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
 }
 
 .result-table th {
@@ -1106,7 +1106,7 @@ body {
 .history-time { font-size: 11px; color: #555; }
 .history-elapsed { font-size: 11px; color: #444; margin-left: auto; }
 .history-sql {
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   font-size: 12px;
   color: #9cdcfe;
   white-space: nowrap;
@@ -1191,7 +1191,7 @@ body {
   padding: 5px 12px 6px !important;
   font-size: 11px !important;
   color: #888888 !important;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   letter-spacing: 0.5px;
   cursor: default !important;
   text-transform: uppercase;
@@ -1325,7 +1325,7 @@ body {
 .erd-zoom-label {
   font-size: 11px;
   color: #555;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   min-width: 36px;
   text-align: right;
 }
@@ -1496,7 +1496,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   font-size: 12px;
 }
 
@@ -1508,7 +1508,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   margin-right: 6px;
 }
 
@@ -1600,7 +1600,7 @@ body {
   border-radius: 3px;
   color: #cccccc;
   font-size: 12px;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   padding: 3px 8px;
   outline: none;
   min-width: 0;
@@ -1624,7 +1624,7 @@ body {
   background: #252526;
   border-bottom: 1px solid #3c3c3c;
   flex-shrink: 0;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
 }
 
 .erd-data-empty {
@@ -1637,7 +1637,7 @@ body {
 .erd-data-error {
   padding: 12px 16px;
   color: #f48771;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   font-size: 13px;
   background: #2d1a1a;
   margin: 12px;
@@ -1654,7 +1654,7 @@ body {
   align-self: flex-start;
   border-collapse: collapse;
   font-size: 13px;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
 }
 
 .erd-data-table th {
@@ -1787,7 +1787,7 @@ body {
   border: 1px solid #3c3c3c;
   border-radius: 4px;
   padding: 8px 10px;
-  font-family: Consolas, monospace;
+  font-family: Consolas, Menlo, monospace;
   font-size: 11px;
   color: #9cdcfe;
   white-space: pre;
@@ -1795,7 +1795,7 @@ body {
   line-height: 1.6;
 }
 .srv-slide-flow { display: flex; flex-direction: column; gap: 4px; }
-.srv-slide-flow-row { display: flex; align-items: flex-start; gap: 6px; font-family: Consolas, monospace; font-size: 11px; }
+.srv-slide-flow-row { display: flex; align-items: flex-start; gap: 6px; font-family: Consolas, Menlo, monospace; font-size: 11px; }
 .srv-slide-arrow { font-size: 11px; flex-shrink: 0; margin-top: 1px; }
 .srv-slide-arrow.out { color: #4ec9b0; }
 .srv-slide-arrow.in  { color: #ce9178; }
@@ -2103,7 +2103,7 @@ body {
   color: #888;
   font-size: 12px;
   padding: 7px 12px;
-  font-family: Consolas, monospace;
+  font-family: Consolas, Menlo, monospace;
 }
 
 /* 구분선 */
@@ -2120,7 +2120,7 @@ body {
   gap: 10px;
   margin-bottom: 10px;
 }
-.srv-strip-text { font-size: 12px; font-family: Consolas, monospace; }
+.srv-strip-text { font-size: 12px; font-family: Consolas, Menlo, monospace; }
 .srv-strip-text.running { color: #4ec9b0; }
 .srv-strip-text.stopped { color: #555; }
 
@@ -2150,7 +2150,7 @@ body {
   background: #1e1e1e;
   padding: 8px 12px;
   margin-bottom: 12px;
-  font-family: Consolas, monospace;
+  font-family: Consolas, Menlo, monospace;
   font-size: 12px;
 }
 .srv-recovery.crashed { border-left-color: #d7ba7d; }
@@ -2173,7 +2173,7 @@ body {
 .srv-feedback {
   font-size: 12px;
   color: #9cdcfe;
-  font-family: Consolas, monospace;
+  font-family: Consolas, Menlo, monospace;
   background: #1e2d3d;
   border-radius: 3px;
   padding: 5px 10px;
@@ -2261,7 +2261,7 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
-  font-family: Consolas, monospace;
+  font-family: Consolas, Menlo, monospace;
   font-size: 12px;
 }
 .srv-log-empty {
@@ -2313,7 +2313,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  font-family: 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', -apple-system, 'Helvetica Neue', sans-serif;
 }
 /* ── 홈 레이아웃 ── */
 .home-layout {
@@ -3035,7 +3035,7 @@ th.result-rownum { background: #252526 !important; font-weight: 400 !important; 
   background: #1a1a2e;
   border: 1px solid #4ec9b0;
   color: #d4d4d4;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   font-size: 13px;
   padding: 0 4px;
   margin: 0;
@@ -3049,7 +3049,7 @@ th.result-rownum { background: #252526 !important; font-weight: 400 !important; 
   border: 1px solid #3c3c3c;
   border-radius: 4px;
   padding: 12px 16px;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
   font-size: 13px;
   max-width: 720px;
 }

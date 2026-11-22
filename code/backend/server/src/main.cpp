@@ -3,9 +3,7 @@
 // The MySQL wire protocol listener (mysql.rs, start_mysql_listener) is ported
 // separately; this file covers the native-protocol half only.
 
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include "engine/net_compat.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -24,7 +22,9 @@
 #include "mysql.hpp"
 #include "wake_connection.hpp"
 
+#ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 using namespace engine;
 
@@ -193,7 +193,7 @@ private:
 void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, std::shared_ptr<std::atomic<std::size_t>> client_count,
                     std::chrono::steady_clock::time_point server_start) {
     sockaddr_in peer_addr{};
-    int addr_len = sizeof(peer_addr);
+    net::socklen addr_len = sizeof(peer_addr);
     std::string peer = "unknown";
     if (getpeername(sock, reinterpret_cast<sockaddr*>(&peer_addr), &addr_len) == 0) {
         char ip_buf[INET_ADDRSTRLEN];
@@ -206,7 +206,7 @@ void handle_client(SOCKET sock, std::shared_ptr<RwLock<SharedDatabase>> shared, 
 
     struct SocketGuard {
         SOCKET s;
-        ~SocketGuard() { closesocket(s); }
+        ~SocketGuard() { net::close_socket(s); }
     } socket_guard{sock};
 
     auto cleanup_and_return = [&]() { client_count->fetch_sub(1); };
@@ -378,6 +378,7 @@ std::optional<std::string> find_arg(const std::vector<std::string>& args, const 
 
 std::atomic<bool> g_running{true};
 
+#ifdef _WIN32
 BOOL WINAPI ctrl_handler(DWORD ctrl_type) {
     if (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_CLOSE_EVENT) {
         std::cout << "\n[!] Ctrl+C received. Shutting down...\n";
@@ -386,6 +387,15 @@ BOOL WINAPI ctrl_handler(DWORD ctrl_type) {
     }
     return FALSE;
 }
+#else
+// Ctrl+C (SIGINT) or a stop request (SIGTERM, what a closing app sends): only async-signal-safe calls in here
+void stop_signal(int) {
+    static const char message[] = "\n[!] Ctrl+C received. Shutting down...\n";
+    const auto written = write(STDOUT_FILENO, message, sizeof(message) - 1);
+    (void)written;
+    g_running.store(false);
+}
+#endif
 
 } // namespace
 
@@ -429,8 +439,7 @@ int main(int argc, char** argv) {
         data_dir = *v;
     }
 
-    WSADATA wsa_data;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+    if (!net::startup()) {
         std::cerr << "WSAStartup failed\n";
         return 1;
     }
@@ -438,29 +447,36 @@ int main(int argc, char** argv) {
     SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listener == INVALID_SOCKET) {
         std::cerr << "Cannot create socket\n";
-        WSACleanup();
+        net::cleanup();
         return 1;
     }
 
+#ifndef _WIN32
+    // (a restart right after a stop: the port may still be held by the connections that were open; Windows lets a new listener take it, POSIX needs to be told)
+    {
+        int reuse = 1;
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    }
+#endif
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<u_short>(port));
+    addr.sin_port = htons(static_cast<std::uint16_t>(port));
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::cerr << "Failed to bind 127.0.0.1:" << port << "\n";
-        closesocket(listener);
-        WSACleanup();
+        net::close_socket(listener);
+        net::cleanup();
         return 1;
     }
     if (listen(listener, SOMAXCONN) != 0) {
         std::cerr << "Failed to listen on 127.0.0.1:" << port << "\n";
-        closesocket(listener);
-        WSACleanup();
+        net::close_socket(listener);
+        net::cleanup();
         return 1;
     }
-    u_long nonblocking = 1;
-    ioctlsocket(listener, FIONBIO, &nonblocking);
+    net::set_blocking(listener, false);
 
     Executor boot(data_dir, buffer_pool_size);
     auto shared = boot.get_shared();
@@ -487,7 +503,12 @@ int main(int argc, char** argv) {
     auto client_count = std::make_shared<std::atomic<std::size_t>>(0);
     auto server_start = std::chrono::steady_clock::now();
 
+#ifdef _WIN32
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
+#else
+    std::signal(SIGINT, stop_signal);
+    std::signal(SIGTERM, stop_signal);
+#endif
 
     std::cout << "+-----------------------------------------+\n";
     std::cout << "|   RuSQL Server v2.3.0                  |\n";
@@ -520,25 +541,23 @@ int main(int argc, char** argv) {
     while (g_running.load()) {
         SOCKET client_sock = accept(listener, nullptr, nullptr);
         if (client_sock == INVALID_SOCKET) {
-            int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK) {
+            int err = net::last_error();
+            if (net::retry_accept(err)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             std::cerr << "Accept error: " << err << "\n";
             break;
         }
-        u_long blocking = 0;
-        ioctlsocket(client_sock, FIONBIO, &blocking);
-        BOOL nodelay = TRUE;
-        setsockopt(client_sock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+        net::set_blocking(client_sock, true); // (macOS: a connection taken from a non-blocking listener is non-blocking too)
+        net::set_no_delay(client_sock);
 
-        std::thread(handle_client, client_sock, shared, client_count, server_start).detach();
+        net::spawn_detached([client_sock, shared, client_count, server_start] { handle_client(client_sock, shared, client_count, server_start); });
     }
 
     auto uptime_secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - server_start).count();
     log("Server stopped. Total uptime: " + std::to_string(uptime_secs) + "s");
-    closesocket(listener);
-    WSACleanup();
+    net::close_socket(listener);
+    net::cleanup();
     return 0;
 }

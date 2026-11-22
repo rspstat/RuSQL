@@ -21,6 +21,7 @@
 
 #include "engine/executor/builtin_functions.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/float_chars.hpp"
 #include "engine/parser/parser.hpp"
 #include "engine/sql_value_util.hpp"
 
@@ -407,7 +408,7 @@ std::optional<std::string> Executor::coerce_column_value(const ColumnDef& col, s
         if (u && d->negative && !is_zero(*d)) return "Out of range value for column '" + col.name + "'" + at_row(row); // (FLOAT / DOUBLE UNSIGNED)
         std::string_view t = trimmed(value);
         double x = 0;
-        auto res = std::from_chars(t.data() + (t.front() == '+' ? 1 : 0), t.data() + t.size(), x);
+        auto res = engine::from_chars_double(t.data() + (t.front() == '+' ? 1 : 0), t.data() + t.size(), x);
         if (res.ec != std::errc() || !std::isfinite(x)) return "Out of range value for column '" + col.name + "'" + at_row(row);
         if (std::holds_alternative<DataType::Float>(dt.data) && std::fabs(x) > 3.4028234663852886e38) return "Out of range value for column '" + col.name + "'" + at_row(row); // (more than a FLOAT holds)
         // written the way MySQL writes a DOUBLE / FLOAT: 1000000 and 10000000000 as they are (not 1e+06), 1e15 and 1.5e-16 with an exponent

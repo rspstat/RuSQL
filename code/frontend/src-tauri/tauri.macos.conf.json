@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "resources": {
+      "engine/engine_server.exe": null,
+      "engine/msvcp140.dll": null,
+      "engine/vcruntime140.dll": null,
+      "engine/vcruntime140_1.dll": null,
+      "engine/engine_server": "engine/engine_server"
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
+  }
+}

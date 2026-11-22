@@ -3,6 +3,7 @@
 // `tauri build` runs this through beforeBuildCommand. The first run needs the internet and a Python with pip on this PC (it only downloads the wheels); a later run sees the stamp
 // and goes on at once. It stops the build instead of making an installer whose MCP server cannot start.
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,8 +15,9 @@ const MCP = "1.27.2"; // (the version the MCP server was tested with)
 const frontend = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pyenv = join(frontend, "src-tauri", "pyenv");
 const target = join(pyenv, "python");
-const exe = join(target, "python.exe");
-const sitePackages = join(target, "Lib", "site-packages");
+const darwin = process.platform === "darwin"; // (macOS: a relocatable CPython of python-build-standalone instead of python.org's embeddable zip)
+const exe = darwin ? join(target, "bin", "python3") : join(target, "python.exe");
+const sitePackages = darwin ? join(target, "lib", `python${PYTHON.split(".").slice(0, 2).join(".")}`, "site-packages") : join(target, "Lib", "site-packages");
 const stamp = join(target, ".rusql-stage");
 const want = `python ${PYTHON}, mcp ${MCP}`;
 
@@ -54,6 +56,63 @@ if (existsSync(stamp) && readFileSync(stamp, "utf8").trim() === want && existsSy
 
 rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });
+
+if (darwin) {
+  // python-build-standalone (astral-sh): the file name and its SHA-256 are pinned (the SHA256SUMS of that release); nothing of it is run before the hash matches.
+  const PBS = "20250409";
+  const sums = {
+    aarch64: "0be1fe0b35a4d3c382141764ef16ed3b8cc2b4620b657f678daa7b7f8df39699",
+    x86_64: "ad3bef94b6054adcf8e0a47886e21b00dfc6a37f22eea229cf0f8725bd0e1023",
+  };
+  const arch = process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : fail(`unsupported CPU: ${process.arch}`);
+  const name = `cpython-${PYTHON}+${PBS}-${arch}-apple-darwin-install_only_stripped.tar.gz`;
+  const archive = join(pyenv, name);
+  const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+  if (!existsSync(archive) || sha256(archive) !== sums[arch]) {
+    const url = `https://github.com/astral-sh/python-build-standalone/releases/download/${PBS}/${encodeURIComponent(name)}`;
+    console.log(`stage-python: downloading ${url}`);
+    const response = await fetch(url);
+    if (!response.ok) fail(`${url} answered ${response.status}`);
+    writeFileSync(archive, Buffer.from(await response.arrayBuffer()));
+  }
+  if (sha256(archive) !== sums[arch]) fail(`${name} is not the file this script was written for (SHA-256 differs)`);
+  const untar = run("tar", ["-xzf", archive, "-C", pyenv]); // (the archive holds a folder `python/`)
+  if (!untar.ok || !existsSync(exe)) fail(`could not unpack ${archive}\n${untar.out}`);
+
+  // the mcp package, into the Python's own site-packages (no .pyc: nothing may be written into the folder the app bundle will carry)
+  const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1" };
+  console.log(`stage-python: pip install mcp==${MCP}`);
+  const install = run(exe, ["-B", "-m", "pip", "install", "--no-compile", "--only-binary=:all:", "--upgrade", `mcp==${MCP}`], { env });
+  if (!install.ok) fail(`pip install failed\n${install.out.split("\n").slice(-12).join("\n")}`);
+  // (pip's launcher scripts in bin/ name the build machine's path in their first line: of no use in an app bundle)
+  for (const entry of readdirSync(join(target, "bin"))) {
+    if (!entry.startsWith("python")) rmSync(join(target, "bin", entry), { force: true });
+  }
+
+  // every Mach-O file of it gets an ad-hoc signature (Apple Silicon runs nothing unsigned; a hash of the file is all an ad-hoc signature is)
+  let signedFiles = 0;
+  const signTree = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) { signTree(path); continue; }
+      const head = readFileSync(path).subarray(0, 4).toString("hex");
+      if (!["cffaedfe", "feedfacf", "cafebabe", "bebafeca"].includes(head)) continue;
+      const signed = run("codesign", ["--force", "--sign", "-", path]);
+      if (!signed.ok) fail(`codesign failed for ${path}\n${signed.out}`);
+      signedFiles += 1;
+    }
+  };
+  signTree(target);
+
+  const probe = run(exe, ["-B", "-c", "from mcp.server.fastmcp import FastMCP"], { cwd: tmpdir(), env });
+  if (!probe.ok) fail(`the staged Python cannot import mcp.server.fastmcp\n${probe.out}`);
+
+  writeFileSync(stamp, `${want}\n`);
+  const { n, bytes } = countFiles(target);
+  console.log(`stage-python: ${want} staged in ${target} (${n} files, ${(bytes / 1024 / 1024).toFixed(1)} MB, ${signedFiles} signed)`);
+  process.exit(0);
+}
 
 // 1. the embeddable Python of python.org
 const zip = join(pyenv, `python-${PYTHON}-embed-amd64.zip`);

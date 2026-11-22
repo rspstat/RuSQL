@@ -22,6 +22,7 @@
 #include "engine/now_text.hpp"
 #include "engine/numeric_text.hpp"
 #include "engine/parser/parser.hpp"
+#include "engine/platform_compat.hpp"
 #include "engine/sql_value_util.hpp"
 
 namespace engine {
@@ -308,7 +309,7 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         auto now = std::chrono::system_clock::now();
         std::time_t t = std::chrono::system_clock::to_time_t(now);
         std::tm tm_buf{};
-        localtime_s(&tm_buf, &t);
+        engine::platform::local_time(&t, &tm_buf);
         char buf[16];
         std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
         return buf;
@@ -407,7 +408,7 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         if (func_name == "UTC_TIMESTAMP") return time_now_text(fraction_arg(), true, true);
         std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm tm_buf{};
-        gmtime_s(&tm_buf, &t);
+        engine::platform::utc_time(&t, &tm_buf);
         char buf[32];
         std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
         return buf;
@@ -452,7 +453,7 @@ std::string Executor::apply_scalar_func(const std::string& typed_name, const std
         long long ts = parse_i64(whole).value_or(0);
         std::time_t t = static_cast<std::time_t>(ts); // (shown in the system's time zone, the session's)
         std::tm local{};
-        if (ts < 0 || localtime_s(&local, &t) != 0) return EXECUTOR_NULL_VALUE;
+        if (ts < 0 || engine::platform::local_time(&t, &local) != 0) return EXECUTOR_NULL_VALUE;
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
         return fraction.empty() ? std::string(buf) : std::string(buf) + "." + fraction;

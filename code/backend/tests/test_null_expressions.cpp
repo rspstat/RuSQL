@@ -14,6 +14,7 @@
 
 #include "catch.hpp"
 #include "engine/executor/executor.hpp"
+#include "engine/platform_compat.hpp"
 #include "engine/result_text.hpp"
 
 using namespace engine;
@@ -25,7 +26,7 @@ namespace fs = std::filesystem;
 
 namespace {
 // UNIX_TIMESTAMP and FROM_UNIXTIME work in the system's time zone (the session's time_zone is SYSTEM, as MySQL's): the expected values below are for UTC
-const bool kUtcForTheTable = (_putenv_s("TZ", "UTC") == 0, _tzset(), true);
+const bool kUtcForTheTable = (engine::platform::set_env("TZ", "UTC") == 0, engine::platform::reload_time_zone(), true);
 
 struct TempDataDir {
     std::string path;

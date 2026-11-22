@@ -3,6 +3,7 @@
 
 #include "engine/executor/executor.hpp"
 #include "engine/info_schema_scope.hpp"
+#include "engine/platform_compat.hpp"
 #include "engine/subquery_walk.hpp"
 #include "engine/view_rename.hpp"
 #include "engine/check_names.hpp"
@@ -1216,7 +1217,7 @@ std::vector<Row> Executor::info_schema_rows(const SharedDatabase& s, const std::
                 r["TRX_MYSQL_THREAD_ID"] = std::to_string(session);
                 const std::time_t whole = std::chrono::system_clock::to_time_t(p.txn_started);
                 std::tm local{};
-                localtime_s(&local, &whole);
+                engine::platform::local_time(&whole, &local);
                 char stamp[32];
                 std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &local);
                 r["TRX_STARTED"] = stamp;

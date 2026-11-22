@@ -7,7 +7,7 @@
   background: #1e1e1e;
   border: 1px solid #3c3c3c;
   border-radius: 4px;
-  font-family: 'Consolas', monospace;
+  font-family: 'Consolas', Menlo, monospace;
 }
 .rc-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-bottom: 8px; font-size: 11px; color: #9cdcfe; }
 .rc-controls label { display: inline-flex; align-items: center; gap: 5px; color: #9cdcfe; }
@@ -17,8 +17,8 @@
 .rc-svg { display: block; overflow: visible; }
 .rc-grid { stroke: #2f2f2f; stroke-width: 1; }
 .rc-zero { stroke: #5a5a5a; stroke-width: 1.2; }
-.rc-tick { fill: #9a9a9a; font-size: 10px; font-family: 'Consolas', monospace; }
-.rc-legend { fill: #d4d4d4; font-size: 11px; font-family: 'Consolas', monospace; }
+.rc-tick { fill: #9a9a9a; font-size: 10px; font-family: 'Consolas', Menlo, monospace; }
+.rc-legend { fill: #d4d4d4; font-size: 11px; font-family: 'Consolas', Menlo, monospace; }
 .rc-bar:hover, .rc-slice:hover { filter: brightness(1.25); }
 .rc-dot:hover { r: 5.5; }
 .rc-note { margin-top: 4px; font-size: 11px; color: #858585; }

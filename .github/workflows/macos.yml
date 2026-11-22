@@ -1,0 +1,109 @@
+name: macOS and Linux build
+
+# What this does: builds the engine on macOS (Apple Silicon and Intel) and Linux and runs the whole engine test suite there, builds the desktop app as a .dmg, and checks that what
+# the app carries (engine, Python, MCP server) works. The Windows installer is built on a Windows PC as before and is not touched here.
+# It runs when the mac-port branch is pushed, and by hand (Actions -> macOS and Linux build -> Run workflow). A .dmg is a build artifact of the run; it is put on the release by hand.
+on:
+  push:
+    branches: [mac-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: Engine + tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build every target
+        run: cmake --build code/build --parallel
+      - name: Test (the whole suite)
+        run: ctest --test-dir code/build/backend --output-on-failure --timeout 3000
+
+  app:
+    name: App (.dmg) on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: aarch64
+          - os: macos-15-intel
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: code/frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: code/frontend/src-tauri
+      - name: Build the engine (Release)
+        run: |
+          cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build code/build --target engine_server --parallel
+      - name: Install the npm packages
+        working-directory: code/frontend
+        run: npm ci
+      - name: "Build the app (tauri build: frontend, engine + Python staging, .app, .dmg)"
+        working-directory: code/frontend
+        run: npm run tauri build
+      - name: Rust unit tests of the app
+        working-directory: code/frontend/src-tauri
+        run: cargo test --bin rusql-ui
+      - name: What was built
+        run: |
+          ls -la code/frontend/src-tauri/target/release/bundle/dmg code/frontend/src-tauri/target/release/bundle/macos
+      - name: Install from the .dmg the way a user does (copy the app out of it)
+        run: |
+          DMG=$(ls code/frontend/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          hdiutil attach "$DMG" -nobrowse -mountpoint /tmp/rusql-dmg
+          ls -la /tmp/rusql-dmg
+          cp -R /tmp/rusql-dmg/RuSQL.app /Applications/
+          hdiutil detach /tmp/rusql-dmg
+          APP=/Applications/RuSQL.app
+          echo "--- bundle"
+          ls -la "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Resources/engine"
+          echo "--- signature"
+          codesign -dv "$APP" 2>&1 || true
+          codesign --verify --deep --strict "$APP" 2>&1 || true
+          lipo -archs "$APP/Contents/MacOS/rusql-ui" "$APP/Contents/Resources/engine/engine_server"
+          plutil -p "$APP/Contents/Info.plist" | grep -i "version\|identifier\|minimum"
+      - name: Smoke test of what the app carries (engine, MySQL protocol, bundled Python, MCP server)
+        run: |
+          APP=/Applications/RuSQL.app
+          "$APP/Contents/Resources/python/bin/python3" -B code/test/mac/smoke_bundle.py "$APP/Contents/Resources"
+      - name: Start the app and take a screenshot (the runner has a desktop session)
+        continue-on-error: true
+        run: |
+          open -n /Applications/RuSQL.app
+          sleep 30
+          pgrep -fl rusql-ui || echo "rusql-ui is not running"
+          screencapture -x /tmp/rusql-home.png || true
+          ls -la /tmp/rusql-home.png || true
+          ls -la "$HOME/Library/Application Support/RuSQL" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RuSQL-macos-${{ matrix.arch }}
+          path: code/frontend/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-macos-${{ matrix.arch }}
+          path: /tmp/rusql-home.png
+          if-no-files-found: ignore
+          retention-days: 14

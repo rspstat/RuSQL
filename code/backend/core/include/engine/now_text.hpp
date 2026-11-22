@@ -7,6 +7,8 @@
 #include <ctime>
 #include <string>
 
+#include "engine/platform_compat.hpp"
+
 namespace engine {
 
 // "YYYY-MM-DD HH:MM:SS[.ffffff]" (date_too: false gives "HH:MM:SS[.ffffff]")
@@ -16,8 +18,8 @@ inline std::string time_now_text(int fsp, bool utc, bool date_too) {
     const auto now = std::chrono::system_clock::now();
     const std::time_t t = std::chrono::system_clock::to_time_t(now);
     std::tm tm_buf{};
-    if (utc) gmtime_s(&tm_buf, &t);
-    else localtime_s(&tm_buf, &t);
+    if (utc) platform::utc_time(&t, &tm_buf);
+    else platform::local_time(&t, &tm_buf);
     char buf[32];
     if (date_too) std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
     else std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);

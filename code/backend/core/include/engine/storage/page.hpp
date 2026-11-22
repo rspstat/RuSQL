@@ -8,7 +8,7 @@
 
 namespace engine {
 
-constexpr std::size_t PAGE_SIZE = 16384;
+constexpr std::size_t PAGE_BYTES = 16384; // (not PAGE_SIZE: some POSIX system headers -- macOS, Cygwin -- define that name as a macro for the memory page size)
 constexpr std::uint32_t MAGIC = 0x52444200; // "RDB\0"
 constexpr std::uint16_t VERSION = 1;
 constexpr std::uint8_t FLAG_COMPRESSED = 0x01; // LZ4 compression

@@ -138,6 +138,42 @@ fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()))
 }
 
+// ─── 플랫폼별 이름과 폴더 ─────────────────────────────────────
+// Windows: 엔진 engine_server.exe, Python python/python.exe, 사용자 데이터 %APPDATA%, 설치된 engine/ python/ mcp/는 실행 파일 옆.
+// macOS: 엔진 engine_server, Python python/bin/python3, 사용자 데이터 ~/Library/Application Support, 설치된 engine/ python/ mcp/는 RuSQL.app/Contents/Resources/ 안
+// (실행 파일은 RuSQL.app/Contents/MacOS/에 있다).
+const ENGINE_FILE: &str = if cfg!(windows) { "engine_server.exe" } else { "engine_server" };
+
+fn resource_dir() -> Option<std::path::PathBuf> {
+    let dir = exe_dir()?;
+    if cfg!(target_os = "macos") {
+        Some(dir.parent()?.join("Resources"))
+    } else {
+        Some(dir)
+    }
+}
+
+fn user_data_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA").ok().map(std::path::PathBuf::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Library").join("Application Support"))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local").join("share")))
+    }
+}
+
+fn user_data_dir_error() -> String {
+    if cfg!(windows) { "APPDATA 환경변수를 찾을 수 없습니다.".to_string() } else { "HOME 환경변수를 찾을 수 없습니다.".to_string() }
+}
+
 // 소스 트리(code/) 안에서 실행 중인가. 그 트리에는 방금 빌드한 엔진 · MCP 스크립트 · data 폴더가 있으므로 번들보다 그것을 쓴다 (target/release/rusql-ui.exe를 트리 안에서
 // 그냥 실행하는 개발자의 흐름 -- UI · CLI · MCP가 같은 code/data를 본다). tauri-build는 target/release/engine/에도 번들 파일을 복사해 두므로 구분이 필요하다.
 fn in_code_tree() -> bool {
@@ -150,7 +186,7 @@ fn bundled_engine_path() -> Option<std::path::PathBuf> {
     if cfg!(debug_assertions) || in_code_tree() {
         return None;
     }
-    let path = exe_dir()?.join("engine").join("engine_server.exe");
+    let path = resource_dir()?.join("engine").join(ENGINE_FILE);
     let big_enough = path.metadata().map(|m| m.len() > 1 << 20).unwrap_or(false);
     big_enough.then_some(path)
 }
@@ -163,8 +199,8 @@ fn data_root() -> std::path::PathBuf {
         }
     }
     if bundled_engine_path().is_some() {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return std::path::PathBuf::from(appdata).join("RuSQL").join("data");
+        if let Some(appdata) = user_data_dir() {
+            return appdata.join("RuSQL").join("data");
         }
     }
     code_dir().join("data")
@@ -174,13 +210,15 @@ fn data_root() -> std::path::PathBuf {
 // 쓰고(엔진과 같은 조건), build.rs가 만든 자리표시 파일(10 KB 미만)은 없는 것으로 본다.
 fn bundled_python_path() -> Option<std::path::PathBuf> {
     bundled_engine_path()?;
-    let path = exe_dir()?.join("python").join("python.exe");
+    // (macOS: python-build-standalone의 bin/python3 -- 기호 링크라 metadata()는 가리키는 실제 파일의 크기를 본다)
+    let python = if cfg!(windows) { std::path::Path::new("python").join("python.exe") } else { std::path::Path::new("python").join("bin").join("python3") };
+    let path = resource_dir()?.join(python);
     path.metadata().map(|m| m.len() > 10_000).unwrap_or(false).then_some(path)
 }
 
 fn mcp_server_script() -> std::path::PathBuf {
     if bundled_engine_path().is_some() {
-        if let Some(dir) = exe_dir() {
+        if let Some(dir) = resource_dir() {
             let bundled = dir.join("mcp").join("mcp_server.py");
             if bundled.is_file() {
                 return bundled;
@@ -202,9 +240,17 @@ fn engine_server_path() -> std::path::PathBuf {
         return bundled; // 설치본: 실행 파일 옆에 같이 설치된 엔진
     }
     let build_dir = code_dir().join("build").join("backend").join("server");
-    let release = build_dir.join("Release").join("engine_server.exe");
-    let debug = build_dir.join("Debug").join("engine_server.exe");
+    let release = build_dir.join("Release").join(ENGINE_FILE);
+    let debug = build_dir.join("Debug").join(ENGINE_FILE);
     let mtime = |p: &std::path::Path| p.metadata().and_then(|m| m.modified()).ok();
+
+    // (Makefile · Ninja 같은 단일 구성 생성기는 -- macOS · Linux -- Release/Debug 폴더가 없고 build/backend/server/ 바로 아래에 만든다)
+    if !cfg!(windows) {
+        let direct = build_dir.join(ENGINE_FILE);
+        if direct.is_file() {
+            return direct;
+        }
+    }
 
     match (mtime(&release), mtime(&debug)) {
         (Some(r), Some(d)) => if r >= d { release } else { debug },
@@ -1192,12 +1238,26 @@ fn csv_parse_row(line: &str) -> Vec<String> {
 fn find_python_with_mcp() -> Result<String, String> {
     // 설치 폴더에 든 Python(mcp 포함)이 먼저, 그다음 PATH의 파이썬들
     let mut candidates: Vec<String> = bundled_python_path().map(|p| p.to_string_lossy().into_owned()).into_iter().collect();
-    let mut where_cmd = std::process::Command::new("where");
-    where_cmd.arg("python");
+    let mut where_cmd = std::process::Command::new(if cfg!(windows) { "where" } else { "which" });
+    if cfg!(windows) {
+        where_cmd.arg("python");
+    } else {
+        where_cmd.args(["-a", "python3"]);
+    }
     #[cfg(windows)]
     where_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: 콘솔 창이 깜박이지 않게
     if let Ok(where_out) = where_cmd.output() {
         candidates.extend(String::from_utf8_lossy(&where_out.stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()));
+    }
+    // macOS: Finder로 연 앱은 PATH가 최소라 Homebrew의 Python이 안 보이고, /usr/bin/python3는 개발자 도구가 없으면 설치 창만 띄우는 껍데기라 시험하지 않는다
+    #[cfg(target_os = "macos")]
+    {
+        candidates.retain(|c| c != "/usr/bin/python3");
+        for extra in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"] {
+            if std::path::Path::new(extra).is_file() && !candidates.iter().any(|c| c == extra) {
+                candidates.push(extra.to_string());
+            }
+        }
     }
 
     for path in &candidates {
@@ -1305,9 +1365,8 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
         }
     };
 
-    // 1. 일반 설치 버전 경로
-    let appdata = std::env::var("APPDATA")
-        .map_err(|_| "APPDATA 환경변수를 찾을 수 없습니다.".to_string())?;
+    // 1. 일반 설치 버전 경로 (Windows %APPDATA%\Claude, macOS ~/Library/Application Support/Claude)
+    let appdata = user_data_dir().ok_or_else(user_data_dir_error)?;
     let real_dir = std::path::Path::new(&appdata).join("Claude");
     std::fs::create_dir_all(&real_dir).map_err(|e| e.to_string())?;
     write_checked(real_dir.join("claude_desktop_config.json"));
@@ -1337,7 +1396,11 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     if claude_config_dirs().iter().any(|dir| rusql_extension_installed(dir)) {
         message.push_str("\n\n주의: Claude Desktop에 RuSQL 확장도 설치돼 있어 RuSQL이 두 번 등록됩니다. 하나만 쓰세요 -- 확장을 쓰려면 \"Add to Claude Desktop (extension)\" 단추를 다시 누르면 이 설정 파일의 항목이 지워지고, 이 설정 파일 방식을 쓰려면 Claude Desktop 설정 → 확장(Extensions)에서 RuSQL 확장을 끄거나 삭제하세요.");
     }
-    message.push_str("\n\nClaude Desktop을 완전히 종료한 뒤 다시 실행하세요. 창을 닫기만 하면 작업 표시줄 오른쪽 아래(숨겨진 아이콘)에 계속 떠 있어 설정을 다시 읽지 않습니다: 그 아이콘을 우클릭 → Quit.\n다시 실행한 뒤 Claude의 설정 → 개발자에서 RuSQL이 running으로 보이면 연결된 것입니다.");
+    if cfg!(windows) {
+        message.push_str("\n\nClaude Desktop을 완전히 종료한 뒤 다시 실행하세요. 창을 닫기만 하면 작업 표시줄 오른쪽 아래(숨겨진 아이콘)에 계속 떠 있어 설정을 다시 읽지 않습니다: 그 아이콘을 우클릭 → Quit.\n다시 실행한 뒤 Claude의 설정 → 개발자에서 RuSQL이 running으로 보이면 연결된 것입니다.");
+    } else {
+        message.push_str("\n\nClaude Desktop을 완전히 종료한 뒤(⌘Q, 또는 Dock의 Claude 아이콘 우클릭 → 종료) 다시 실행하세요. 창을 닫기만 하면 앱이 계속 떠 있어 설정을 다시 읽지 않습니다.\n다시 실행한 뒤 Claude의 설정 → 개발자에서 RuSQL이 running으로 보이면 연결된 것입니다.");
+    }
     Ok(message)
 }
 
@@ -1346,7 +1409,7 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
 // Claude Desktop의 설정 폴더: 일반 설치 %APPDATA%\Claude, Store판 Packages\Claude_*\LocalCache\Roaming\Claude (있는 것만).
 fn claude_config_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(appdata) = std::env::var("APPDATA") {
+    if let Some(appdata) = user_data_dir() {
         let dir = std::path::Path::new(&appdata).join("Claude");
         if dir.is_dir() {
             dirs.push(dir);
@@ -1431,6 +1494,7 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
     args.push("-u".to_string());
     args.push("${__dirname}/server/mcp_server.py".to_string()); // Claude Desktop이 확장을 풀어 둔 폴더로 바꿔 준다
 
+    let platform = match std::env::consts::OS { "windows" => "win32", "macos" => "darwin", other => other }; // (the names an extension manifest uses)
     let manifest = serde_json::json!({
         "manifest_version": "0.2",
         "name": "rusql",
@@ -1460,10 +1524,10 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
             },
         },
         "tools_generated": true,
-        "compatibility": { "platforms": ["win32"] },
+        "compatibility": { "platforms": [platform] },
     });
 
-    let appdata = std::env::var("APPDATA").map_err(|_| "APPDATA 환경변수를 찾을 수 없습니다.".to_string())?;
+    let appdata = user_data_dir().ok_or_else(user_data_dir_error)?;
     let dir = std::path::Path::new(&appdata).join("RuSQL");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let out = dir.join("RuSQL.mcpb");
@@ -1491,10 +1555,23 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
     if open {
         // 탐색기가 그 파일을 고른 채로 열린다. 파일을 바로 열지(`start`) 않는 까닭: .mcpb를 Claude Desktop에 연결해 두지 않은 PC(Store판 등)에서는 아무 일도 없거나 "연결 프로그램 선택" 창만
         // 뜬다 -- 파일 위치가 보여야 더블클릭 · 끌어다 놓기 · 설정의 파일 설치 중 되는 것을 고를 수 있다. (explorer는 성공해도 종료 코드가 1이라 결과는 spawn 성공만 본다)
-        let mut explorer = std::process::Command::new("explorer.exe");
         #[cfg(windows)]
-        explorer.raw_arg(format!("/select,\"{}\"", out.display())); // (경로에 공백이 있어도 /select,"경로" 모양이어야 탐색기가 알아듣는다)
-        message.push_str(if explorer.spawn().is_ok() { "\n탐색기가 위 파일을 고른 채로 열렸습니다. 다음 중 하나로 설치하세요:" } else { "\n탐색기를 열지 못했습니다. 위 경로의 파일을 다음 중 하나로 설치하세요:" });
+        let revealed = {
+            let mut explorer = std::process::Command::new("explorer.exe");
+            explorer.raw_arg(format!("/select,\"{}\"", out.display())); // (경로에 공백이 있어도 /select,"경로" 모양이어야 탐색기가 알아듣는다)
+            explorer.spawn().is_ok()
+        };
+        // (macOS: `open -R`은 Finder가 그 파일을 고른 채로 연다)
+        #[cfg(target_os = "macos")]
+        let revealed = std::process::Command::new("open").arg("-R").arg(&out).spawn().is_ok();
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let revealed = std::process::Command::new("xdg-open").arg(&dir).spawn().is_ok();
+        message.push_str(match (cfg!(windows), revealed) {
+            (true, true) => "\n탐색기가 위 파일을 고른 채로 열렸습니다. 다음 중 하나로 설치하세요:",
+            (true, false) => "\n탐색기를 열지 못했습니다. 위 경로의 파일을 다음 중 하나로 설치하세요:",
+            (false, true) => "\nFinder가 위 파일을 고른 채로 열렸습니다. 다음 중 하나로 설치하세요:",
+            (false, false) => "\nFinder를 열지 못했습니다. 위 경로의 파일을 다음 중 하나로 설치하세요:",
+        });
         message.push_str("\n  ① 파일을 더블클릭 (Claude Desktop이 .mcpb에 연결돼 있으면 설치 창이 뜹니다)\n  ② 파일을 Claude Desktop 창으로 끌어다 놓기\n  ③ Claude Desktop 설정 → 확장(Extensions)의 파일 설치(Install Extension…)에서 위 파일 선택\n설치 창이 뜨면 [Install]을 누르고, 설정 → 확장에서 RuSQL이 켜져 있는지 확인하세요.");
     }
     message.push_str("\n\n설정 파일 방식(Auto-connect Claude Desktop) 단추를 다시 누르면 이 확장과 RuSQL이 두 번 등록됩니다. 하나만 쓰세요. RuSQL을 업데이트했다면 이 단추를 다시 눌러 확장을 갱신하세요.");
@@ -1752,20 +1829,37 @@ fn scan_ecosystem(requests: Vec<EcoRequest>, flush: bool, state: State<AppState>
 #[tauri::command]
 fn open_terminal() {
     let mut frontend_dir = code_dir().join("frontend");
-    if !frontend_dir.is_dir() { // 설치본에는 소스 트리가 없다: 실행 파일 폴더에서 연다
-        frontend_dir = exe_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    if !frontend_dir.is_dir() { // 설치본에는 소스 트리가 없다: 실행 파일 폴더에서 연다 (macOS: 앱 꾸러미 안이 아니라 홈 폴더)
+        frontend_dir = if cfg!(windows) {
+            exe_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+        } else {
+            std::env::var_os("HOME").map(std::path::PathBuf::from).or_else(exe_dir).unwrap_or_else(|| std::path::PathBuf::from("."))
+        };
     }
+    #[cfg(windows)]
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "cmd"])
         .current_dir(frontend_dir)
         .spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").args(["-a", "Terminal"]).arg(frontend_dir).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = frontend_dir;
+}
+
+// 파일이나 주소를 운영체제의 기본 프로그램으로 연다
+fn open_with_system(target: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("cmd").args(["/c", "start", "", target]).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(target).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
 }
 
 #[tauri::command]
 fn open_url(url: String) {
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", "", &url])
-        .spawn();
+    open_with_system(&url);
 }
 
 fn bench_dir() -> std::path::PathBuf {
@@ -1780,10 +1874,19 @@ fn read_bench_result() -> String {
 #[tauri::command]
 fn open_bench_terminal() {
     let dir = bench_dir();
+    #[cfg(windows)]
     let _ = std::process::Command::new("cmd")
         .args(["/c", "start", "cmd", "/k", "pip install -q -r requirements.txt && python bench.py"])
         .current_dir(dir)
         .spawn();
+    // (macOS: Terminal.app에서 같은 두 명령. 소스 트리(code/test/perf)가 있을 때만 의미가 있는 개발용 단추)
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("tell application \"Terminal\" to do script \"cd '{}' && pip3 install -q -r requirements.txt && python3 bench.py\"\ntell application \"Terminal\" to activate", dir.display());
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).spawn();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = dir;
 }
 
 // ─── MCP용 UI 상태 파일 (읽기 전용 조회) ────────────────────────
@@ -2067,9 +2170,7 @@ fn complete_ui_command(id: String, result: String) -> Result<(), String> {
 #[tauri::command]
 fn open_bench_graph() {
     let path = bench_dir().join("benchmark_result.png");
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", "", &path.to_string_lossy()])
-        .spawn();
+    open_with_system(&path.to_string_lossy());
 }
 
 
