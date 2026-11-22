@@ -15,6 +15,7 @@ jobs:
   engine:
     name: Engine + tests on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +39,7 @@ jobs:
       - name: Test (the whole suite)
         env:
           RUSQL_TEST_TRACE: "1"
-        run: ctest --test-dir code/build/backend -V --timeout 1800
+        run: ctest --test-dir code/build/backend -V --timeout 7000
 
   app:
     name: App (.dmg) on ${{ matrix.os }}

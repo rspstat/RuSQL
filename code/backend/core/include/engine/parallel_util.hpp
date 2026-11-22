@@ -75,20 +75,21 @@ void parallel_sort(std::vector<Row>& v, Less less) {
         chunks[c].assign(std::make_move_iterator(v.begin() + static_cast<std::ptrdiff_t>(starts[c])),
                           std::make_move_iterator(v.begin() + static_cast<std::ptrdiff_t>(starts[c + 1])));
     }
-    // A slice asks the clock and the KILL flag once in a thousand comparisons (the statement's thread throws when the slices are back). A slice that is stopped compares
-    // every two rows as equal, which a sort runs out of at once: what it leaves is thrown away with the statement.
+    // A slice asks the clock and the KILL flag once in a thousand comparisons (the statement's thread throws when the slices are back). A slice that is stopped leaves its sort by an
+    // exception of its own that the slice catches itself (an exception that leaves a pool thread ends the process): what it leaves is thrown away with the statement. (It once made the
+    // comparison say "equal" for every pair from then on, which the sort of MSVC and libstdc++ runs out of at once but the sort of libc++, on macOS, does not: its loops rely on
+    // a smaller element to stop at and ran past the end of the rows.)
+    struct SortHalted {};
     deadline::ParallelStop stop;
     ThreadPool::global().parallel_for(n_chunks, [&](std::size_t c) {
         std::size_t compared = 0;
-        bool halted = false;
-        std::sort(chunks[c].begin(), chunks[c].end(), [&](const Row& a, const Row& b) {
-            if (halted) return false;
-            if ((++compared & 1023u) == 0 && stop.due()) {
-                halted = true;
-                return false;
-            }
-            return less(a, b);
-        });
+        try {
+            std::sort(chunks[c].begin(), chunks[c].end(), [&](const Row& a, const Row& b) {
+                if ((++compared & 1023u) == 0 && stop.due()) throw SortHalted{};
+                return less(a, b);
+            });
+        } catch (const SortHalted&) {
+        }
     });
     stop.finish();
 
