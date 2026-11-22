@@ -1182,8 +1182,11 @@ fn csv_parse_row(line: &str) -> Vec<String> {
 
 // ─── MCP 자동 설정 ───────────────────────────────────────────
 fn find_python_with_mcp() -> Result<String, String> {
-    let where_out = std::process::Command::new("where")
-        .arg("python")
+    let mut where_cmd = std::process::Command::new("where");
+    where_cmd.arg("python");
+    #[cfg(windows)]
+    where_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: 콘솔 창이 깜박이지 않게
+    let where_out = where_cmd
         .output()
         .map_err(|_| "Python을 찾을 수 없습니다.".to_string())?;
 
@@ -1191,10 +1194,13 @@ fn find_python_with_mcp() -> Result<String, String> {
     for path in paths_str.lines() {
         let path = path.trim();
         if path.is_empty() { continue; }
-        if let Ok(test) = std::process::Command::new(path)
-            .args(["-c", "import mcp"])
-            .output()
-        {
+        // `import mcp`만으로는 부족하다: 현재 폴더에 mcp라는 폴더가 있으면(설치 폴더에는 mcp/mcp_server.py가 있다) 파이썬이 그 폴더를 패키지로 읽어 mcp가 없는 파이썬도
+        // 통과시키고, Claude Desktop이 그 파이썬으로 mcp_server.py를 띄우면 "No module named 'mcp'"로 죽는다. mcp_server.py가 실제로 가져오는 것을, 폴더가 없는 곳에서 가져와 본다.
+        let mut probe = std::process::Command::new(path);
+        probe.args(["-c", "from mcp.server.fastmcp import FastMCP"]).current_dir(std::env::temp_dir());
+        #[cfg(windows)]
+        probe.creation_flags(0x0800_0000);
+        if let Ok(test) = probe.output() {
             if test.status.success() {
                 return Ok(path.to_string());
             }
