@@ -36,7 +36,9 @@ jobs:
       - name: "Build every target (a fixed number of parallel compiles; an unlimited make -j starved the runner of memory)"
         run: cmake --build code/build --parallel ${{ matrix.jobs }} -- -k
       - name: Test (the whole suite)
-        run: ctest --test-dir code/build/backend --output-on-failure --timeout 3000
+        env:
+          RUSQL_TEST_TRACE: "1"
+        run: ctest --test-dir code/build/backend --output-on-failure --timeout 1800
 
   app:
     name: App (.dmg) on ${{ matrix.os }}
