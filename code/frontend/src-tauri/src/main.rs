@@ -2392,6 +2392,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // The app's own way of starting the engine and signing in (spawn_and_connect: where the engine is, the process, AUTH with the challenge) and of asking it something over the native
+    // protocol. It runs where an engine is built (code/build): the CI of macOS and Linux builds one before `cargo test`, a Windows PC has the Release one; with none it says so and passes.
+    #[test]
+    fn the_app_starts_the_engine_signs_in_and_asks_it() {
+        let engine = engine_server_path();
+        if !engine.is_file() {
+            eprintln!("no engine at {} -- skipped", engine.display());
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rusql_app_engine_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut conn = spawn_and_connect(dir.to_str().unwrap(), 64, "root", "root", pick_free_port(), None).expect("the engine starts and the sign-in works");
+        let (ok, body, _) = send_one(&mut conn, "SELECT 1 + 1 AS two").expect("an answer");
+        assert!(ok, "{}", body);
+        assert!(body.contains('2'), "{}", body);
+        drop(conn); // (the end of an EngineConn ends the engine process)
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn write_mcp_into_merges_into_a_valid_existing_config() {
         let dir = std::env::temp_dir().join(format!("rusql_mcp_test_valid_{}", std::process::id()));
