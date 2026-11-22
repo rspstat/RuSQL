@@ -42,6 +42,7 @@
       "../../mcp/mcp_server.py": "mcp/mcp_server.py",
       "../../mcp/requirements.txt": "mcp/requirements.txt"
     },
+    "licenseFile": "installer/license.txt",
     "windows": {
       "webviewInstallMode": { "type": "embedBootstrapper" },
       "nsis": {
@@ -50,7 +51,8 @@
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "sidebarImage": "installer/sidebar.bmp",
-        "headerImage": "installer/header.bmp"
+        "headerImage": "installer/header.bmp",
+        "installerHooks": "installer/installer-hooks.nsh"
       }
     }
   }
