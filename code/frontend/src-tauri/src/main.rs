@@ -1362,7 +1362,7 @@ fn write_mcpb_file(out: &std::path::Path, manifest: &serde_json::Value, server_s
     Ok(())
 }
 
-// `open`: 만든 확장 파일을 Windows가 연결해 둔 프로그램(Claude Desktop)으로 연다 -- 설치 창이 뜬다. 화면 검사는 false로 불러 실제 Claude Desktop을 건드리지 않는다.
+// `open`: 만든 확장 파일을 탐색기에서 골라 보여 준다(사용자가 그 파일을 Claude Desktop에 넣는다). 시험은 false로 불러 탐색기 창을 띄우지 않는다.
 #[tauri::command]
 fn setup_mcp_extension(host: String, port: u16, user: String, password: String, open: bool) -> Result<String, String> {
     let script_path = mcp_server_script();
@@ -1417,15 +1417,13 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
 
     let mut message = format!("확장 파일을 만들었습니다:\n  {}\n\nPython: {}\n", out.display(), python_path);
     if open {
-        let mut start = std::process::Command::new("cmd");
-        start.args(["/c", "start", ""]).arg(&out);
+        // 탐색기가 그 파일을 고른 채로 열린다. 파일을 바로 열지(`start`) 않는 까닭: .mcpb를 Claude Desktop에 연결해 두지 않은 PC(Store판 등)에서는 아무 일도 없거나 "연결 프로그램 선택" 창만
+        // 뜬다 -- 파일 위치가 보여야 더블클릭 · 끌어다 놓기 · 설정의 파일 설치 중 되는 것을 고를 수 있다. (explorer는 성공해도 종료 코드가 1이라 결과는 spawn 성공만 본다)
+        let mut explorer = std::process::Command::new("explorer.exe");
         #[cfg(windows)]
-        start.creation_flags(0x0800_0000);
-        match start.status() {
-            Ok(s) if s.success() => message.push_str("\nClaude Desktop의 설치 창이 뜨면 [설치(Install)]를 누르세요. 설치한 뒤 설정 → 확장(Extensions)에서 RuSQL이 켜져 있는지 확인하세요."),
-            _ => message.push_str("\n파일을 열지 못했습니다. Claude Desktop의 설정 → 확장(Extensions)에서 위 파일을 끌어다 놓거나 직접 선택해 설치하세요."),
-        }
-        message.push_str("\n창이 뜨지 않으면 위 파일을 더블클릭하거나 Claude Desktop 창으로 끌어다 놓으세요.");
+        explorer.raw_arg(format!("/select,\"{}\"", out.display())); // (경로에 공백이 있어도 /select,"경로" 모양이어야 탐색기가 알아듣는다)
+        message.push_str(if explorer.spawn().is_ok() { "\n탐색기가 위 파일을 고른 채로 열렸습니다. 다음 중 하나로 설치하세요:" } else { "\n탐색기를 열지 못했습니다. 위 경로의 파일을 다음 중 하나로 설치하세요:" });
+        message.push_str("\n  ① 파일을 더블클릭 (Claude Desktop이 .mcpb에 연결돼 있으면 설치 창이 뜹니다)\n  ② 파일을 Claude Desktop 창으로 끌어다 놓기\n  ③ Claude Desktop 설정 → 확장(Extensions)의 파일 설치(Install Extension…)에서 위 파일 선택\n설치 창이 뜨면 [Install]을 누르고, 설정 → 확장에서 RuSQL이 켜져 있는지 확인하세요.");
     }
     message.push_str("\n\n설정 파일 방식(Auto-connect Claude Desktop)과 함께 쓰면 RuSQL이 두 번 등록됩니다. 하나만 쓰세요. RuSQL을 업데이트했다면 이 버튼을 다시 눌러 확장을 갱신하세요.");
     Ok(message)
