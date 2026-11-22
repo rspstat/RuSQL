@@ -972,6 +972,8 @@ fn authenticate(user: String, password: String, data_dir: String, buffer_pool_si
     let bp = if buffer_pool_size > 0 { buffer_pool_size } else { 64 };
     // 이전 연결이 있으면 정리 (Drop이 자식 프로세스를 종료한다)
     *state.db.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // 새 엔진은 서버가 꺼진 채(빈 포트, MySQL 없이) 시작한다 -- 옛 엔진의 "서버 켜짐" 기록이 남으면 Server Manager와 홈 화면의 점이 거짓말을 한다
+    state.servers.lock().unwrap_or_else(|e| e.into_inner()).clear();
 
     let port = pick_free_port();
     match spawn_and_connect(&data_dir, bp, &user, &password, port, None) {
@@ -1182,8 +1184,11 @@ fn csv_parse_row(line: &str) -> Vec<String> {
 
 // ─── MCP 자동 설정 ───────────────────────────────────────────
 fn find_python_with_mcp() -> Result<String, String> {
-    let where_out = std::process::Command::new("where")
-        .arg("python")
+    let mut where_cmd = std::process::Command::new("where");
+    where_cmd.arg("python");
+    #[cfg(windows)]
+    where_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: 콘솔 창이 깜박이지 않게
+    let where_out = where_cmd
         .output()
         .map_err(|_| "Python을 찾을 수 없습니다.".to_string())?;
 
@@ -1191,10 +1196,13 @@ fn find_python_with_mcp() -> Result<String, String> {
     for path in paths_str.lines() {
         let path = path.trim();
         if path.is_empty() { continue; }
-        if let Ok(test) = std::process::Command::new(path)
-            .args(["-c", "import mcp"])
-            .output()
-        {
+        // `import mcp`만으로는 부족하다: 현재 폴더에 mcp라는 폴더가 있으면(설치 폴더에는 mcp/mcp_server.py가 있다) 파이썬이 그 폴더를 패키지로 읽어 mcp가 없는 파이썬도
+        // 통과시키고, Claude Desktop이 그 파이썬으로 mcp_server.py를 띄우면 "No module named 'mcp'"로 죽는다. mcp_server.py가 실제로 가져오는 것을, 폴더가 없는 곳에서 가져와 본다.
+        let mut probe = std::process::Command::new(path);
+        probe.args(["-c", "from mcp.server.fastmcp import FastMCP"]).current_dir(std::env::temp_dir());
+        #[cfg(windows)]
+        probe.creation_flags(0x0800_0000);
+        if let Ok(test) = probe.output() {
             if test.status.success() {
                 return Ok(path.to_string());
             }
@@ -1726,7 +1734,15 @@ struct AppInstance {
     current_db: String,
     #[serde(rename = "lastHeartbeat")]
     last_heartbeat: u64,
+    // 이 창이 TCP 서버를 켜 둔 연결의 id와 포트(서버가 꺼져 있으면 비어 있음/0) -- 다른 창의 홈 화면이 초록 점을 켜는 데 쓴다. 옛 항목에는 없어서 기본값을 둔다.
+    #[serde(rename = "serverConnId", default)]
+    server_conn_id: String,
+    #[serde(rename = "serverPort", default)]
+    server_port: u16,
 }
+
+// 하트비트가 이 시간(초) 넘게 없는 인스턴스는 죽은 창으로 본다
+const INSTANCE_STALE_SECS: u64 = 15;
 
 fn app_instances_file_path() -> std::path::PathBuf {
     data_root().join("app_instances.json")
@@ -1792,20 +1808,54 @@ fn unix_now() -> u64 {
 
 // 이 인스턴스의 하트비트를 기록하고, 15초 넘게 소식 없는(창이 비정상 종료된) 다른
 // 인스턴스는 정리한다.
-fn heartbeat_instance(instance_id: &str, ui: &UiStore) {
-    const STALE_SECS: u64 = 15;
+fn heartbeat_instance(instance_id: &str, ui: &UiStore, server: Option<(String, u16)>) {
     let _lock = InstancesLock::acquire();
     let now = unix_now();
     let mut instances = read_app_instances();
-    instances.retain(|i| i.id != instance_id && now.saturating_sub(i.last_heartbeat) < STALE_SECS);
+    instances.retain(|i| i.id != instance_id && now.saturating_sub(i.last_heartbeat) < INSTANCE_STALE_SECS);
+    let (server_conn_id, server_port) = server.unwrap_or_default();
     instances.push(AppInstance {
         id: instance_id.to_string(),
         pid: std::process::id(),
         logged_in: *ui.logged_in.lock().unwrap_or_else(|e| e.into_inner()),
         current_db: ui.current_db.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         last_heartbeat: now,
+        server_conn_id,
+        server_port,
     });
     write_app_instances(&instances);
+}
+
+// 이 창이 지금 TCP 서버를 켜 둔 연결: `start_server`가 적어 둔 것 중, 그 엔진 프로세스가 아직 살아 있는 것. (엔진이 질의를 돌리느라 잠금이 잡혀 있으면 살아 있는 것이다.)
+fn own_server(state: &AppState) -> Option<(String, u16)> {
+    fn alive(engine: &mut Option<EngineConn>) -> bool {
+        engine.as_mut().map_or(false, |c| matches!(c.child.try_wait(), Ok(None)))
+    }
+    let engine_alive = match state.db.try_lock() {
+        Ok(mut g) => alive(&mut *g),
+        Err(std::sync::TryLockError::Poisoned(e)) => alive(&mut *e.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => true,
+    };
+    if !engine_alive { return None; }
+    state.servers.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(_, s)| s.running).map(|(id, s)| (id.clone(), s.port))
+}
+
+// TCP 서버가 켜져 있는 연결들(연결 id -> 포트): 이 창의 것(`own`)과, 살아 있는 다른 창들이 app_instances.json에 적어 둔 것.
+fn running_servers(own: Option<(String, u16)>, instances: &[AppInstance], own_id: &str, now: u64) -> HashMap<String, u16> {
+    let mut out = HashMap::new();
+    for i in instances {
+        if i.id != own_id && !i.server_conn_id.is_empty() && now.saturating_sub(i.last_heartbeat) < INSTANCE_STALE_SECS {
+            out.insert(i.server_conn_id.clone(), i.server_port);
+        }
+    }
+    if let Some((id, port)) = own { out.insert(id, port); }
+    out
+}
+
+// 홈 화면의 초록/빨간 점이 쓴다: 목록에 있으면 그 연결의 TCP 서버가 켜져 있다.
+#[tauri::command]
+fn get_running_servers(state: State<AppState>) -> HashMap<String, u16> {
+    running_servers(own_server(&state), &read_app_instances(), &state.instance_id, unix_now())
 }
 
 fn read_ui_commands() -> Vec<UiCommand> {
@@ -1911,7 +1961,7 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(400));
                 tick = tick.wrapping_add(1);
                 if tick % 5 == 0 {
-                    heartbeat_instance(&instance_id, &ui_for_thread);
+                    heartbeat_instance(&instance_id, &ui_for_thread, own_server(&app_handle.state::<AppState>()));
                 }
                 let _lock = UiCommandsLock::acquire();
                 let mut cmds = read_ui_commands();
@@ -1953,6 +2003,7 @@ fn main() {
             start_server,
             stop_server,
             get_server_status,
+            get_running_servers,
             get_activity,
             get_status_counters,
             clear_server_log,
@@ -2057,6 +2108,36 @@ mod tests {
             *m.lock().unwrap_or_else(|e| e.into_inner())
         }));
         assert_eq!(recovered.ok(), Some(42), "lock() must recover from poisoning, not panic again");
+    }
+
+    // ── 홈 화면의 서버 점: 어느 연결의 TCP 서버가 켜져 있나 ─────────────────────────────────
+    fn instance(id: &str, beat: u64, conn: &str, port: u16) -> AppInstance {
+        AppInstance { id: id.into(), pid: 1, logged_in: true, current_db: String::new(), last_heartbeat: beat, server_conn_id: conn.into(), server_port: port }
+    }
+
+    #[test]
+    fn running_servers_lists_this_window_and_the_live_other_windows() {
+        let now = 1_000;
+        let all = [
+            instance("me", now, "old-entry-of-this-window", 1), // this window is told by `own`, not by its own old file entry
+            instance("b", now - 3, "conn-b", 7879),             // another window that is alive
+            instance("dead", now - 60, "conn-dead", 7880),      // a window that stopped beating
+            instance("quiet", now, "", 0),                      // a window with no server on
+        ];
+        let got = running_servers(Some(("conn-a".into(), 7878)), &all, "me", now);
+        assert_eq!(got.len(), 2, "{:?}", got);
+        assert_eq!(got["conn-a"], 7878);
+        assert_eq!(got["conn-b"], 7879);
+        // nothing on in this window: only the other window's server is listed
+        let got = running_servers(None, &all, "me", now);
+        assert_eq!(got.keys().cloned().collect::<Vec<_>>(), vec!["conn-b".to_string()]);
+    }
+
+    #[test]
+    fn instances_written_before_the_server_fields_still_load() {
+        let old = r#"[{"id":"x","pid":5,"loggedIn":true,"currentDb":"shop","lastHeartbeat":10}]"#;
+        let list: Vec<AppInstance> = serde_json::from_str(old).unwrap();
+        assert_eq!((list[0].server_conn_id.as_str(), list[0].server_port), ("", 0));
     }
 
     // ── 생태계 창의 행 수 (R94) ──────────────────────────────────────────────────────────
