@@ -1277,6 +1277,14 @@ fn find_python_with_mcp() -> Result<String, String> {
     Err("mcp 패키지가 설치된 Python을 찾을 수 없습니다.\n설치 방법: pip install mcp".to_string())
 }
 
+// macOS: 내려받은 .dmg나 다운로드 폴더에서 바로 연 앱은 임시 읽기 전용 위치(.../AppTranslocation/...)에서 돈다. 그 경로를 Claude Desktop 설정에 적으면 다시 시작한 뒤에는 없어진다.
+fn refuse_translocated(path: &str) -> Result<(), String> {
+    if path.contains("/AppTranslocation/") {
+        return Err("RuSQL이 macOS의 임시 위치(AppTranslocation)에서 실행되고 있어 그 경로는 곧 사라집니다.\nRuSQL.app을 응용 프로그램(Applications) 폴더로 옮기고, RuSQL을 종료했다가 다시 실행한 뒤 이 단추를 누르세요.".to_string());
+    }
+    Ok(())
+}
+
 fn write_mcp_into(config_path: &std::path::Path, entry: &serde_json::Value) -> Result<(), String> {
     // "MCP 설정 병합 실패 시 기존 설정 덮어씀" 수정: 기존 설정 파일이 있는데
     // 파싱에 실패하면(트렁케이트/문법 오류 등) 조용히 빈 객체로 대체한 뒤 그대로 덮어써서
@@ -1307,6 +1315,7 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     }
 
     let python_path = find_python_with_mcp()?;
+    refuse_translocated(&python_path)?;
     // mcp_server.py의 접속정보(RUSQL_HOST/PORT/USER/PASS)는 하드코딩 기본값(127.0.0.1:7878,
     // root/root)만 있었고 이 UI가 실제로 연결 중인 서버의 host/port/계정을 전혀 전달하지
     // 않아, 기본값과 다른 연결에서는 MCP 도구가 항상 연결/인증에 실패했음. Claude Desktop
@@ -1485,6 +1494,7 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
     let script_path = mcp_server_script();
     let server_script = std::fs::read(&script_path).map_err(|e| format!("mcp_server.py를 읽을 수 없습니다:\n{} ({})", script_path.display(), e))?;
     let python_path = find_python_with_mcp()?;
+    refuse_translocated(&python_path)?;
     let app_path = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     // (설정 파일 방식과 같은 인수: 설치 폴더의 Python은 .pyc를 설치 폴더에 쓰지 않게 -B)
     let mut args: Vec<String> = Vec::new();
@@ -1860,6 +1870,62 @@ fn open_with_system(target: &str) {
 #[tauri::command]
 fn open_url(url: String) {
     open_with_system(&url);
+}
+
+// ─── macOS: 파일 저장과 대화상자 ──────────────────────────────────
+// macOS의 WebView는 링크(<a download>)로 내려받지도, window.confirm / alert를 띄우지도 않는다(confirm은 "아니오"로 답한다). 그래서 앱이 직접 한다:
+// 파일은 사용자의 다운로드 폴더에 쓰고(같은 이름이 있으면 "이름 (2).확장자" -- 덮어쓰지 않는다) Finder가 그 파일을 고른 채로 열린다, 확인 · 알림은 시스템 대화상자(osascript).
+// Windows에서는 프런트가 이 명령들을 부르지 않는다(lib/platform.ts).
+#[tauri::command]
+fn save_download(name: String, content: String) -> Result<String, String> {
+    let file_name = std::path::Path::new(&name).file_name().ok_or_else(|| "파일 이름이 올바르지 않습니다.".to_string())?.to_string_lossy().into_owned();
+    let home = if cfg!(windows) { std::env::var_os("USERPROFILE") } else { std::env::var_os("HOME") };
+    let dir = std::path::PathBuf::from(home.ok_or_else(|| "사용자 폴더를 찾을 수 없습니다.".to_string())?).join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("다운로드 폴더를 만들 수 없습니다: {}", e))?;
+    let stem = std::path::Path::new(&file_name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| file_name.clone());
+    let ext = std::path::Path::new(&file_name).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let mut path = dir.join(&file_name);
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{} ({}){}", stem, n, ext));
+        n += 1;
+    }
+    std::fs::write(&path, content.as_bytes()).map_err(|e| format!("{} 저장 실패: {}", path.display(), e))?;
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+    Ok(path.display().to_string())
+}
+
+// AppleScript 문자열 리터럴로 바꾼다(역슬래시와 큰따옴표를 이스케이프)
+#[cfg(target_os = "macos")]
+fn applescript_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+// (async: 대화상자가 닫힐 때까지 기다리는 동안 앱 화면이 멈추지 않게 한다)
+#[tauri::command]
+async fn native_confirm(message: String) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("display dialog {} buttons {{\"Cancel\", \"OK\"}} default button \"Cancel\" cancel button \"Cancel\" with icon caution", applescript_string(&message));
+        return std::process::Command::new("osascript").args(["-e", &script]).output().map(|o| o.status.success()).unwrap_or(false);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = message;
+        false
+    }
+}
+
+#[tauri::command]
+async fn native_alert(message: String) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("display dialog {} buttons {{\"OK\"}} default button \"OK\" with icon caution", applescript_string(&message));
+        let _ = std::process::Command::new("osascript").args(["-e", &script]).output();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = message;
 }
 
 fn bench_dir() -> std::path::PathBuf {
@@ -2267,6 +2333,9 @@ fn main() {
             import_csv,
             open_terminal,
             open_url,
+            save_download,
+            native_confirm,
+            native_alert,
             get_app_data_dir,
             get_connections,
             save_connections,

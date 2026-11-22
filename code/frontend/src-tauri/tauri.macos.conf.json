@@ -10,7 +10,7 @@
       "engine/engine_server": "engine/engine_server"
     },
     "macOS": {
-      "minimumSystemVersion": "11.0",
+      "minimumSystemVersion": "13.3",
       "signingIdentity": "-"
     }
   }

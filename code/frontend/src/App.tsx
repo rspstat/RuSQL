@@ -31,6 +31,7 @@ import { computeErdLayout, type ErdPos } from "./lib/erd";
 import { measureTextPx } from "./lib/measureText";
 import { MCP_TOOL_GROUPS } from "./lib/mcpTools";
 import { rowsToJson } from "./lib/resultExport";
+import { IS_MAC, alertBox, confirmBox, saveTextFile } from "./lib/platform";
 import { registerSqlCompletion, clearSqlCompletionCache } from "./lib/sqlCompletion";
 
 // ─── 타입 ─────────────────────────────────────────────────────
@@ -43,7 +44,6 @@ interface HistoryEntry {
 }
 type ActiveView = "editor" | "erd" | "server" | "diagram" | "compat" | "btree" | "mvcc";
 const PAGE_SIZE = 100;
-const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform); // (a few lines of help text name Finder / ⌘Q instead of Explorer / the tray icon)
 // the chip colours of the tool groups in the AI MCP panel
 const MCP_ACCENTS = {
   teal: { bg: "rgba(78,201,176,0.12)", fg: "#4ec9b0", border: "rgba(78,201,176,0.25)" },
@@ -1151,15 +1151,7 @@ function App() {
     const tab = tabs.find(t => t.id === id);
     if (!tab) return;
     const content = id === activeTabId ? currentContent : tab.content;
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = tab.name.endsWith(".sql") ? tab.name : `${tab.name}.sql`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    void saveTextFile(tab.name.endsWith(".sql") ? tab.name : `${tab.name}.sql`, content, "text/plain;charset=utf-8");
   };
 
   // MCP write_to_editor용 — 이름으로 탭을 찾아 내용을 덮어쓰거나(없으면 새로 만들어) 채움.
@@ -1504,12 +1496,12 @@ function App() {
   };
 
   const dropColumn = async (table: string, colName: string) => {
-    if (!window.confirm(`Are you sure you want to delete the "${table}.${colName}" column?`)) return;
+    if (!(await confirmBox(`Are you sure you want to delete the "${table}.${colName}" column?`))) return;
     try {
       await invoke<MultiQueryResult>("execute_query", { query: `ALTER TABLE ${table} DROP COLUMN ${colName};`, ts: Date.now() });
       await refreshEditTableModal(table);
       await refreshSidebar();
-    } catch (e) { window.alert(String(e)); }
+    } catch (e) { await alertBox(String(e)); }
   };
 
   const addColumn = async () => {
@@ -1524,7 +1516,7 @@ function App() {
       setEditTableNewCol({ name: "", type: "VARCHAR(50)", notNull: false, defaultVal: "" });
       await refreshEditTableModal(table);
       await refreshSidebar();
-    } catch (e) { window.alert(String(e)); }
+    } catch (e) { await alertBox(String(e)); }
   };
 
   const extractTableName = (sql: string): string | null => {
@@ -1650,11 +1642,7 @@ function App() {
         { label: "", divider: true },
         { label: "Save", shortcut: "Ctrl+S", action: () => {
           const content = queryRef.current;
-          const blob = new Blob([content], { type: "text/plain" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = (tabs.find(t => t.id === activeTabId)?.name ?? "query") + (tabs.find(t => t.id === activeTabId)?.name?.endsWith(".sql") ? "" : ".sql");
-          a.click();
+          void saveTextFile((tabs.find(t => t.id === activeTabId)?.name ?? "query") + (tabs.find(t => t.id === activeTabId)?.name?.endsWith(".sql") ? "" : ".sql"), content, "text/plain");
         }},
         { label: "", divider: true },
         { label: "Exit", shortcut: "Alt+F4", action: () => window.close() },
@@ -3073,24 +3061,14 @@ function App() {
                                     r.columns.map(escape).join(","),
                                     ...r.rows.map(row => row.map(escape).join(",")),
                                   ].join("\r\n");
-                                  const blob = new Blob(["﻿" + lines], { type: "text/csv;charset=utf-8" });
-                                  const a = document.createElement("a");
-                                  a.href = URL.createObjectURL(blob);
-                                  a.download = `result_${i + 1}.csv`;
-                                  a.click();
-                                  URL.revokeObjectURL(a.href);
+                                  void saveTextFile(`result_${i + 1}.csv`, "﻿" + lines, "text/csv;charset=utf-8");
                                 }}
                               >⬇ CSV</button>
                               <button
                                 className="csv-btn"
                                 title="Export as JSON (NULL is null, a plain number is a number, the rest is text)"
                                 onClick={() => {
-                                  const blob = new Blob([rowsToJson(r.columns, r.rows)], { type: "application/json;charset=utf-8" });
-                                  const a = document.createElement("a");
-                                  a.href = URL.createObjectURL(blob);
-                                  a.download = `result_${i + 1}.json`;
-                                  a.click();
-                                  URL.revokeObjectURL(a.href);
+                                  void saveTextFile(`result_${i + 1}.json`, rowsToJson(r.columns, r.rows), "application/json;charset=utf-8");
                                 }}
                               >⬇ JSON</button>
                               <ResultChart columns={r.columns} rows={r.rows} />

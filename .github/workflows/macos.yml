@@ -22,9 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        run: cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+        run: cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
       - name: Build every target
-        run: cmake --build code/build --parallel
+        run: cmake --build code/build --parallel -- -k
       - name: Test (the whole suite)
         run: ctest --test-dir code/build/backend --output-on-failure --timeout 3000
 
@@ -52,8 +52,8 @@ jobs:
           workspaces: code/frontend/src-tauri
       - name: Build the engine (Release)
         run: |
-          cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-          cmake --build code/build --target engine_server --parallel
+          cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
+          cmake --build code/build --target engine_server --parallel -- -k
       - name: Install the npm packages
         working-directory: code/frontend
         run: npm ci
