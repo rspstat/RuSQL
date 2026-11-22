@@ -18,13 +18,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-15-intel, ubuntu-24.04]
+        include:
+          - os: macos-15
+            jobs: 3
+          - os: macos-15-intel
+            jobs: 4
+          - os: ubuntu-24.04
+            jobs: 4
     steps:
       - uses: actions/checkout@v4
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: engine-${{ matrix.os }}
+          max-size: 600M
       - name: Configure
-        run: cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
-      - name: Build every target
-        run: cmake --build code/build --parallel -- -k
+        run: cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: "Build every target (a fixed number of parallel compiles; an unlimited make -j starved the runner of memory)"
+        run: cmake --build code/build --parallel ${{ matrix.jobs }} -- -k
       - name: Test (the whole suite)
         run: ctest --test-dir code/build/backend --output-on-failure --timeout 3000
 
@@ -50,10 +60,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: code/frontend/src-tauri
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: app-${{ matrix.os }}
+          max-size: 400M
       - name: Build the engine (Release)
         run: |
-          cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3
-          cmake --build code/build --target engine_server --parallel -- -k
+          cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -DNDEBUG" -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build code/build --target engine_server --parallel 3 -- -k
       - name: Install the npm packages
         working-directory: code/frontend
         run: npm ci

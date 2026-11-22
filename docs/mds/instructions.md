@@ -108,3 +108,26 @@ git add -A
 git commit -m "commit"
 git push -u origin 브랜치이름
 ```
+
+<br/>
+
+7. macOS (Apple Silicon · Intel, macOS 13.3 이상)
+
+Xcode 명령줄 도구, CMake, Node.js, Rust가 있으면 같은 소스가 맥에서 빌드됩니다. Makefile 같은 단일 구성 생성기를 쓰므로 `--config`와 `Release/` 폴더가 없고 실행 파일에 `.exe`가 없습니다.
+```
+cmake -S code -B code/build -DCMAKE_BUILD_TYPE=Release
+cmake --build code/build --parallel
+ctest --test-dir code/build/backend --output-on-failure
+
+code/build/backend/server/engine_server              # 서버
+code/build/backend/cli/engine_cli                    # 터미널 REPL
+code/build/backend/client/engine_client -u root -p root -P 7878
+code/build/backend/tests/engine_tests                # Catch2 시험
+
+cd code/frontend
+npm ci
+npm run tauri build                                  # -> src-tauri/target/release/bundle/dmg/RuSQL_<버전>_<aarch64|x64>.dmg
+```
+`npm run tauri build`는 `tauri.macos.conf.json`(대상 `app` · `dmg`, 자원은 `engine/engine_server`, 최소 macOS 13.3)을 함께 읽고, `stage-engine`이 `code/build/backend/server/engine_server`를 복사해 ad-hoc 서명하고, `stage-python`이 python-build-standalone(3.12.10, SHA-256을 고정해 확인)을 내려받아 `mcp`를 넣고 모든 Mach-O 파일에 ad-hoc 서명합니다(처음 한 번 인터넷이 필요). 설치본은 `RuSQL.app/Contents/Resources/` 안의 `engine/` · `python/` · `mcp/`를 쓰고, 데이터와 연결 목록은 `~/Library/Application Support/RuSQL/data`에 둡니다. Apple 개발자 서명이 아니므로 처음 실행할 때 시스템 설정 → 개인정보 보호 및 보안에서 **그래도 열기**를 누르거나 `xattr -dr com.apple.quarantine /Applications/RuSQL.app`를 한 번 실행합니다. 응용 프로그램 폴더에서 실행해야 합니다(`.dmg`나 다운로드 폴더에서 바로 열면 앱이 임시 위치에서 돌아 MCP 단추가 거절합니다).
+
+GitHub Actions(`.github/workflows/macos.yml`; `mac-port` 브랜치를 푸시하거나 Actions에서 직접 실행)가 macOS(Apple Silicon · Intel)와 Linux에서 엔진을 빌드해 시험 전체를 돌리고, `.dmg`를 만들어 설치한 앱에 `code/test/mac/smoke_bundle.py`를 돌립니다(엔진 · MySQL 핸드셰이크 · 번들 Python · MCP 도구 37개). 같은 점검을 직접 하려면 설치된 앱의 Python으로 `RuSQL.app/Contents/Resources/python/bin/python3 -B code/test/mac/smoke_bundle.py /Applications/RuSQL.app/Contents/Resources`.
