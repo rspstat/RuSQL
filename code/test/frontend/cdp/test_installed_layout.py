@@ -41,6 +41,34 @@ def as_list(value):
     return value if isinstance(value, list) else ([] if value is None else [value])
 
 
+# the titles of the console windows that are on screen (a console program started without CREATE_NO_WINDOW gets one whose title is its exe path; closing it kills the program)
+VISIBLE_CONSOLE_TITLES = r'''
+Add-Type -TypeDefinition @"
+using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class Wins {
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc p, IntPtr l);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    public static List<string> Console() {
+        var r = new List<string>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) return true;
+            var c = new StringBuilder(256); GetClassName(h, c, 256);
+            if (c.ToString() != "ConsoleWindowClass" && c.ToString() != "CASCADIA_HOSTING_WINDOW_CLASS") return true;
+            var t = new StringBuilder(512); GetWindowText(h, t, 512);
+            r.Add(t.ToString());
+            return true;
+        }, IntPtr.Zero);
+        return r;
+    }
+}
+"@
+ConvertTo-Json -InputObject @([Wins]::Console())
+'''
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("install_dir", help="the folder with the app exe, engine/ and mcp/")
@@ -104,6 +132,8 @@ def main() -> int:
         mine = [e for e in engines if e.get("ParentProcessId") == app.pid]
         check(len(mine) == 1, "one engine process is a child of the app", str(engines))
         engine_pid = mine[0]["ProcessId"] if mine else None
+        titles = as_list(powershell(VISIBLE_CONSOLE_TITLES))
+        check(not any("engine_server" in t for t in titles), "the engine has no console window of its own", str(titles))
         if mine:
             started = Path(mine[0]["ExecutablePath"]).resolve()
             if args.tree:

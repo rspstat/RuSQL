@@ -6,6 +6,8 @@ use std::net::TcpStream;
 use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 use std::process::{Child, Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use sha1::{Digest, Sha1};
 use tauri::{Emitter, Manager, State};
@@ -293,11 +295,12 @@ fn spawn_and_connect(
     // 그대로 물려받으면 BACKUP DATABASE 등이 만드는 상대경로 파일이 src-tauri/ 안에 떨어져
     // Tauri의 소스 파일 감시기가 이를 변경으로 인식해 앱 전체를 재시작해버리는 문제가 있었다.
     std::fs::create_dir_all(data_dir).map_err(|e| format!("data_dir 생성 실패: {}", e))?;
-    let child = Command::new(&exe)
-        .args(&args)
-        .current_dir(data_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    let mut command = Command::new(&exe);
+    command.args(&args).current_dir(data_dir).stdout(Stdio::null()).stderr(Stdio::null());
+    // CREATE_NO_WINDOW: engine_server.exe는 콘솔 프로그램이라 이 옵션이 없으면 Windows가 엔진마다 빈 콘솔 창을 띄운다(그 창을 닫으면 엔진이 죽는다)
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let child = command
         .spawn()
         .map_err(|e| format!("engine_server.exe 실행 실패 ({}): {}", exe.display(), e))?;
 
