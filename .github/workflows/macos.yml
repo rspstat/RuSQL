@@ -38,7 +38,7 @@ jobs:
       - name: Test (the whole suite)
         env:
           RUSQL_TEST_TRACE: "1"
-        run: ctest --test-dir code/build/backend --output-on-failure --timeout 1800
+        run: ctest --test-dir code/build/backend -V --timeout 1800
 
   app:
     name: App (.dmg) on ${{ matrix.os }}
