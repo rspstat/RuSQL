@@ -11,7 +11,11 @@
 1. `RuSQL_2.3.0_x64-setup.exe`로 설치하고 실행합니다.
 2. 처음에는 기본 연결인 `RuSQL Local`(사용자 root · 비밀번호 root · localhost · 7878)이 생성되어 있습니다. 그 연결을 눌러 들어갑니다. (다른 이름이 필요하면 **New Connection** → 이름만 적고 **Add**.)
 3. SQL 편집기에 `EXHIBITION_setup.sql` **전체를 붙여 넣고 Run All** → `✓ 25 query(s)` (약 3초). 한 번만 합니다. (이미 `expo`가 있으면 `CREATE DATABASE`가 실패하니 `DROP DATABASE expo;`로 지우고 다시 합니다.)
-4. Claude Desktop 연결: Server Manager에서 **Start Server**(RUNNING)를 눌러 두고, **오른쪽 막대 MCP Agent → Add to Claude Desktop (extension)** 을 누릅니다. `RuSQL.mcpb` 파일이 선택된 탐색기 창이 열립니다. 그 파일을 **더블클릭**하거나 **Claude Desktop 창으로 끌어다 놓으면** Claude의 설치 창이 뜨고(Store판은 더블클릭이 안 될 수 있어 끌어다 놓기가 확실합니다), **Install**을 누릅니다. 그다음 Claude Desktop **설정 → Extensions**에서 RuSQL이 켜져 있는지 봅니다. 확장 방식이 안 되면 같은 패널의 **Auto-connect Claude Desktop (config file)** 을 누르고, Claude Desktop을 작업 표시줄 오른쪽 아래 아이콘에서 **우클릭 → Quit**로 완전히 종료한 뒤 다시 실행합니다. 둘 중 **하나만** 씁니다(둘 다 쓰면 RuSQL이 두 번 등록됩니다). 확장으로 연결하면 Claude가 도구를 처음 쓸 때마다 허용을 물으니, 리허설 때 **Always allow**를 눌러 둡니다. Claude Desktop은 인터넷이 필요합니다.
+4. Claude Desktop 연결 (한 번): 먼저 Server Manager에서 **Start Server**(RUNNING)를 눌러 둡니다.
+    - **오른쪽 막대 MCP Agent → Add to Claude Desktop (extension)** 을 누르면 `RuSQL.mcpb`가 선택된 탐색기 창이 열립니다. 그 파일을 **Claude Desktop 창으로 끌어다 놓고**(Store판은 더블클릭이 안 될 수 있어 끌어다 놓기가 확실합니다) **Install**을 누릅니다. Claude Desktop **설정 → Extensions**에서 RuSQL이 켜져 있는지 봅니다.
+    - Claude가 도구를 처음 쓸 때마다 허용을 물으니, 리허설 때 **Always allow**를 눌러 둡니다(읽기 전용 도구 16개는 Claude Desktop이 "읽기 전용"으로 묶어 보여 주면 한 번에 허용할 수 있습니다).
+    - 안 되면 같은 패널의 **Auto-connect Claude Desktop (config file)** 을 누르고, Claude Desktop을 작업 표시줄 오른쪽 아래 아이콘에서 **우클릭 → Quit**로 완전히 종료한 뒤 다시 실행합니다. 둘 중 **하나만** 씁니다(확장 단추는 설정 파일 방식으로 써 둔 RuSQL 항목을 알아서 지웁니다).
+    - Claude Desktop은 인터넷이 필요합니다.
 5. **백업 영상**: 장면 7(Claude)을 한 번 하면서 화면을 녹화해 둡니다(Windows: `Win + Alt + R`). 인터넷이나 연결이 안 될 때 이 영상을 틉니다.
 6. 절전 · 화면 끄기 · 알림을 끄고, 충전기를 꽂아 둡니다. 시연은 **홈 화면(접속 전)** 에서 시작합니다.
 

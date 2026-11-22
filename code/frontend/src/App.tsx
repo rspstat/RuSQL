@@ -3665,8 +3665,9 @@ function App() {
                     <div className="srv-slide-section">How to Use</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
                       <div className="srv-slide-desc" style={{ margin: 0 }}>① Start the RuSQL server (from this tab)</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>② Add the extension to Claude Desktop with the first button, then press Install in Claude's window</div>
-                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Not showing up? Use the second button (config file), then quit Claude Desktop from its tray icon and start it again</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>② Press the first button. An Explorer window opens with RuSQL.mcpb selected: drag that file onto the Claude Desktop window (or double-click it), then press Install</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>③ Check Claude Desktop → Settings → Extensions: RuSQL is on. When Claude asks to use a RuSQL tool, choose Always allow</div>
+                      <div className="srv-slide-desc" style={{ margin: 0 }}>④ Not showing up? Use the second button instead (it writes Claude's config file: quit Claude Desktop from its tray icon and start it again). Use only one of the two</div>
                     </div>
 
                     <button

@@ -24,6 +24,7 @@ appdata, local = work / "appdata", work / "local"
 appdata.mkdir()
 local.mkdir()
 (local / "Packages" / "Claude_teststore").mkdir(parents=True)  # a Store Claude Desktop that was installed and never started
+(appdata / "Claude" / "Claude Extensions" / "local.mcpb.rspstat.rusql").mkdir(parents=True)  # ... and the RuSQL extension is installed in it: the answer must warn about the double registration
 env = dict(os.environ, APPDATA=str(appdata), LOCALAPPDATA=str(local), WEBVIEW2_USER_DATA_FOLDER=str(work / "wv2"),
            WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9338")
 env.pop("RUSQL_DATA_DIR", None)
@@ -60,6 +61,7 @@ try:
         check(store_cfg.is_file() and json.loads(store_cfg.read_text(encoding="utf-8"))["mcpServers"]["RuSQL"]["command"] == entry["command"], "the Store version's config holds RuSQL too (its folder was made)", str(store_cfg))
         check(str(cfg_path) in msg and str(store_cfg) in msg, "the answer lists every config file it wrote", msg[:300])
         check("Quit" in msg and "완전히 종료" in msg, "the answer says how to quit Claude Desktop for real (the tray icon -> Quit)", msg[-300:])
+        check("RuSQL 확장도 설치돼 있어" in msg, "with the extension installed, the answer warns that RuSQL is registered twice", msg[-500:])
         check(Path(entry["command"]).is_file(), "the Python it names exists", entry["command"])
         bundled = install / "python" / "python.exe"
         if bundled.is_file() and bundled.stat().st_size > 10_000:  # the installer carries a Python with mcp: it is the one to write, and it writes no .pyc into the install folder

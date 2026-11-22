@@ -81,6 +81,16 @@ try:
         if bundled.is_file():
             check(not any((install / "python").rglob("*.pyc")), "no .pyc file was written into the install folder's python\\", str(sum(1 for _ in (install / "python").rglob("*.pyc"))))
 
+        # not registered twice: a RuSQL entry the config-file button wrote earlier is removed when the extension is made, another server and other settings stay
+        cfg_dir = appdata / "Claude"
+        cfg_dir.mkdir()
+        cfg_file = cfg_dir / "claude_desktop_config.json"
+        cfg_file.write_text(json.dumps({"theme": "dark", "mcpServers": {"other": {"command": "x"}, "RuSQL": {"command": "python"}}}), encoding="utf-8")
+        msg2 = page.eval("window.__TAURI_INTERNALS__.invoke('setup_mcp_extension', %s)" % json.dumps({"host": "127.0.0.1", "port": 7878, "user": "root", "password": "root", "open": False}), await_promise=True)
+        after = json.loads(cfg_file.read_text(encoding="utf-8"))
+        check("RuSQL" not in after["mcpServers"] and after["mcpServers"]["other"]["command"] == "x" and after["theme"] == "dark", "the config file's RuSQL entry is removed, another server and the settings stay", str(after))
+        check(str(cfg_file) in msg2 and "두 번 등록되지 않도록" in msg2, "the answer names the config file it cleaned", msg2[:300])
+
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
@@ -90,11 +100,17 @@ try:
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
-                    return sorted(t.name for t in (await session.list_tools()).tools)
+                    return sorted((t.name, bool(t.annotations and t.annotations.readOnlyHint)) for t in (await session.list_tools()).tools)
 
         try:
-            names = asyncio.run(go())
-            check(len(names) == 37, "unpacked and started the way Claude Desktop does, the server lists 37 tools", str(len(names)))
+            tools = asyncio.run(go())
+            check(len(tools) == 37, "unpacked and started the way Claude Desktop does, the server lists 37 tools", str(len(tools)))
+            read_only = [n for n, ro in tools if ro]  # (Claude Desktop can group these as "read-only": the user allows them all at once)
+            check(len(read_only) == 16 and "list_databases" in read_only and "get_server_status" in read_only, "16 tools are marked read-only (readOnlyHint)", str(read_only))
+            can_write = {"execute_sql", "run_script", "confirm_dangerous_sql", "trace_query", "suggest_indexes", "get_table_stats", "kill_session", "import_csv", "export_csv",
+                         "add_connection", "update_connection", "delete_connection", "write_to_editor", "new_editor_tab", "close_editor_tab", "switch_editor_tab",
+                         "execute_in_editor", "launch_app", "login", "start_server", "stop_server"}
+            check(not (can_write & set(read_only)) and len(can_write) + len(read_only) == 37, "no tool that can write (or change the app / connections) is marked read-only", str(sorted(can_write & set(read_only))))
         except BaseException as ex:  # noqa: BLE001  (an ExceptionGroup when the server dies at start, e.g. No module named 'mcp')
             check(False, "unpacked and started the way Claude Desktop does, the server lists 37 tools", "%s: %s" % (type(ex).__name__, str(ex)[:200]))
 finally:

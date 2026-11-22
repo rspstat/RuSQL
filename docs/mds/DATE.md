@@ -3866,6 +3866,21 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 
 **한계**: Claude Desktop 자체(`.mcpb` 설치 창 · 확장 실행)는 이 PC에서 돌려 보지 못했다 — 공식 CLI와 MCP SDK로 같은 파일을 검증했을 뿐이다. 확장은 서명되지 않아(`mcpb`가 "Not signed" 경고) 설치 창에 서명 안내가 보일 수 있다. 확장은 도구를 처음 쓸 때마다 Claude가 허용을 묻는다(설정 파일 방식은 `alwaysAllow`가 있음) — 리허설에서 Always allow. 새 PC에서 한 번 눌러 봐야 한다. HWPX 산출물(D01~D08 · v29)과 그 스크린샷은 건드리지 않았다(MCP 패널 그림에는 옛 단추가 보인다).
 
+### 11월 23일 (두 번째) — MCP 연결 개선 세 가지 (새 PC에서 "지금 잘 됩니다" 뒤, 사용자 "1~3번 진행해도 됩니다")
+
+새 PC에서 확장 방식이 동작하는 것을 사용자가 확인한 뒤 "더 개선하고 싶다"고 해서 후보를 제시했고(1 두 번 등록 막기 · 2 안내를 패널에 항상 보이게 · 3 허용 질문 줄이기 · 4 리허설 · 5 백업 영상 · 6 문서), 사용자가 1~3번을 골랐다("2일 남았습니다").
+
+**1. 두 번 등록 막기** (`main.rs`): 설정 파일 방식과 확장 방식을 함께 쓰면 Claude Desktop에 RuSQL이 두 번 등록된다.
+- 확장 단추(`setup_mcp_extension`)는 Claude Desktop의 설정 폴더(`%APPDATA%\Claude`와 있는 Store판 `Packages\Claude_*\LocalCache\Roaming\Claude`)의 `claude_desktop_config.json`에서 **`mcpServers.RuSQL` 항목만** 지운다(다른 서버 · 설정은 그대로; 항목이 없으면 파일을 다시 쓰지 않고, JSON을 못 읽으면 건드리지 않고 "지우지 못한 설정 파일"로 알린다). 지운 파일은 답에 나온다.
+- 설정 파일 단추(`setup_mcp_config`)는 끝에서 설정 폴더의 `Claude Extensions` · `Claude Extensions Settings`에 이름에 rusql이 든 항목이 있으면 "RuSQL이 두 번 등록됩니다" 경고와 해결(확장 단추를 다시 누르거나 확장을 끄기)을 덧붙인다. 폴더 이름은 Claude Desktop이 정하므로 이름에 rusql이 있는지만 본다 — 이름이 다르면 경고만 빠진다(이 PC에는 설치된 확장이 없어 실제 폴더 이름은 보지 못했다).
+- 단위 시험 2개 추가(`remove_rusql_from_config_removes_only_the_rusql_entry` · `rusql_extension_installed_looks_for_rusql_in_the_extension_folders`; Rust 10개 통과). 설치본 시험: `test_mcpb.py`가 설정 파일에 다른 서버 · 설정과 RuSQL을 심어 두고 확장을 만들어 RuSQL만 지워지는 것을, `test_mcp_autoconnect.py`가 확장 폴더가 있을 때 경고가 나오는 것을 확인.
+
+**2. 안내를 패널에 항상 보이게** (`App.tsx`, MCP Agent 패널의 "How to use"): ② 첫 단추 → 탐색기에 `RuSQL.mcpb`가 선택된 채 열림 → Claude Desktop 창으로 끌어다 놓기(또는 더블클릭) → Install ③ Claude Desktop → 설정 → Extensions에서 RuSQL이 켜졌는지 보기 · 도구 허용을 물으면 Always allow ④ 안 보이면 둘째 단추(설정 파일: Claude를 트레이에서 완전히 종료 후 재시작), 둘 중 하나만.
+
+**3. 허용 질문 줄이기**: 확장에는 `alwaysAllow`가 없어 Claude가 도구마다 허용을 묻는다 — Claude 쪽 동작이라 직접 바꿀 수는 없고, 할 수 있는 만큼 했다: (a) 위 ③의 안내 · `EXHIBITION.md`의 "리허설 때 Always allow", (b) **MCP 도구 주석**: 도구 37개 중 DB · 연결 목록 · 앱을 바꾸지 않는 **16개**(`list_databases` · `list_tables` · `get_table_schema` · `get_indexes` · `sample_data` · `explain_query` · `list_locks` · `health_report` · `get_fk_graph` · `slow_queries` · `diff_schema` · `list_connections` · `list_editor_tabs` · `get_editor_tab_content` · `list_app_instances` · `get_server_status`)에 `@mcp.tool(annotations=_READ_ONLY)`(`ToolAnnotations(readOnlyHint=True)`)를 붙였다. Claude Desktop이 도구를 "읽기 전용"으로 묶어 보여 주면 사용자가 한 번에 허용할 수 있다. **판단 근거**: 도구 본문과 부르는 보조 함수를 `ast`로 잘라 쓰기 문장(`SET GLOBAL` · `ANALYZE TABLE` · `INSERT/UPDATE/DELETE` · `KILL` · 파일 쓰기)이 없는지 확인 — 걸린 것은 설명 글 · 거절 문구 · `SHOW CREATE TABLE`뿐이었다. **붙이지 않은 21개**: `execute_sql` · `run_script` · `confirm_dangerous_sql` · `trace_query`(쓰기 문장을 `BEGIN … ROLLBACK`으로 돌림) · `suggest_indexes`(임시 인덱스를 잠깐 만듦) · `get_table_stats`(`ANALYZE TABLE`로 통계를 갱신) · `kill_session` · `import_csv` · `export_csv` · 연결 · 편집기 · 앱 · 서버 제어 도구. `code/mcp/requirements.txt`는 `mcp[cli]>=1.8.0`(`ToolAnnotations`가 1.8부터). 데코레이터 모양이 바뀌어 도구 이름을 정규식으로 읽는 시험 둘(`test_libs.mjs` · `test_screens.py`)의 `@mcp\.tool\(\)`를 `@mcp\.tool\([^)\n]*\)`로 고쳤다. `test_mcpb.py`가 서버 응답에서 읽기 전용 표시 16개와 "쓸 수 있는 도구에는 없음"을 확인한다. **한계**: Claude Desktop 화면이 이 표시를 어떻게 쓰는지는 확인하지 못했다(표시는 MCP 표준이라 해가 없지만 효과는 새 PC에서 봐야 한다).
+
+**시험**: 위 단위 · 설치본 시험 외에 `test_libs.mjs` 35개 · `tsc --noEmit` · MCP 서버 단위 시험 57개(20 + 17 + 20) 통과. 문서: README · `AI.md`(연결 방식) · `FUNCTIONS.md` · `EXHIBITION.md` + PDF. HWPX는 건드리지 않았다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

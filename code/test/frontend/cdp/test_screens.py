@@ -102,7 +102,7 @@ def set_select(page: Page, selector: str, nth: int, value: str):
 
 def server_tools() -> list[str]:
     source = (ROOT / "mcp" / "mcp_server.py").read_text(encoding="utf-8")
-    return sorted(re.findall(r"@mcp\.tool\(\)\r?\ndef (\w+)\(", source))
+    return sorted(re.findall(r"@mcp\.tool\([^)\n]*\)\r?\ndef (\w+)\(", source))
 
 
 # ── the screens ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

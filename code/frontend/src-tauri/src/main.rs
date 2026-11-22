@@ -1334,8 +1334,62 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     if !failed.is_empty() {
         message.push_str(&format!("\n\n쓰지 못한 곳:\n{}", failed.iter().map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n")));
     }
+    if claude_config_dirs().iter().any(|dir| rusql_extension_installed(dir)) {
+        message.push_str("\n\n주의: Claude Desktop에 RuSQL 확장도 설치돼 있어 RuSQL이 두 번 등록됩니다. 하나만 쓰세요 -- 확장을 쓰려면 \"Add to Claude Desktop (extension)\" 단추를 다시 누르면 이 설정 파일의 항목이 지워지고, 이 설정 파일 방식을 쓰려면 Claude Desktop 설정 → 확장(Extensions)에서 RuSQL 확장을 끄거나 삭제하세요.");
+    }
     message.push_str("\n\nClaude Desktop을 완전히 종료한 뒤 다시 실행하세요. 창을 닫기만 하면 작업 표시줄 오른쪽 아래(숨겨진 아이콘)에 계속 떠 있어 설정을 다시 읽지 않습니다: 그 아이콘을 우클릭 → Quit.\n다시 실행한 뒤 Claude의 설정 → 개발자에서 RuSQL이 running으로 보이면 연결된 것입니다.");
     Ok(message)
+}
+
+// ─── 두 번 등록 막기 ──────────────────────────────────────────
+// 설정 파일 방식과 확장 방식을 함께 쓰면 Claude Desktop에 RuSQL이 두 번 등록된다. 확장 단추는 설정 파일에 써 둔 우리 항목을 지우고, 설정 파일 단추는 확장이 이미 있으면 알려 준다.
+// Claude Desktop의 설정 폴더: 일반 설치 %APPDATA%\Claude, Store판 Packages\Claude_*\LocalCache\Roaming\Claude (있는 것만).
+fn claude_config_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::Path::new(&appdata).join("Claude");
+        if dir.is_dir() {
+            dirs.push(dir);
+        }
+    }
+    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+        if let Ok(entries) = std::fs::read_dir(std::path::Path::new(&localappdata).join("Packages")) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with("Claude_") {
+                    let dir = entry.path().join("LocalCache").join("Roaming").join("Claude");
+                    if dir.is_dir() {
+                        dirs.push(dir);
+                    }
+                }
+            }
+        }
+    }
+    dirs
+}
+
+// 설정 파일에서 RuSQL 항목만 지운다(다른 서버와 설정은 그대로). 지웠으면 true; 파일이 없거나 항목이 없으면 false -- 파일을 건드리지 않는다. JSON을 읽을 수 없으면 Err(파일을 건드리지 않는다).
+fn remove_rusql_from_config(config_path: &std::path::Path) -> Result<bool, String> {
+    if !config_path.is_file() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+    let mut config: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let removed = config.get_mut("mcpServers").and_then(|s| s.as_object_mut()).and_then(|s| s.remove("RuSQL")).is_some();
+    if removed {
+        let json_str = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        std::fs::write(config_path, json_str.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(removed)
+}
+
+// Claude Desktop이 RuSQL 확장을 설치해 두었는가: 설정 폴더의 "Claude Extensions"(확장 파일) 또는 "Claude Extensions Settings"(확장 설정)에 이름에 rusql이 든 항목이 있다.
+// (폴더 이름은 Claude Desktop이 정하므로 이름에 rusql이 있는지만 본다: 틀려도 경고 한 줄이 빠질 뿐이다)
+fn rusql_extension_installed(config_dir: &std::path::Path) -> bool {
+    ["Claude Extensions", "Claude Extensions Settings"].iter().any(|folder| {
+        std::fs::read_dir(config_dir.join(folder))
+            .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().to_lowercase().contains("rusql")))
+            .unwrap_or(false)
+    })
 }
 
 // ─── Claude Desktop 확장(.mcpb) ───────────────────────────────
@@ -1415,7 +1469,25 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
     let out = dir.join("RuSQL.mcpb");
     write_mcpb_file(&out, &manifest, &server_script)?;
 
+    // 설정 파일 방식으로 써 둔 RuSQL 항목이 남아 있으면 확장과 함께 두 번 등록되므로 지운다
+    let mut removed: Vec<String> = Vec::new();
+    let mut not_removed: Vec<String> = Vec::new();
+    for dir in claude_config_dirs() {
+        let config_path = dir.join("claude_desktop_config.json");
+        match remove_rusql_from_config(&config_path) {
+            Ok(true) => removed.push(config_path.display().to_string()),
+            Ok(false) => {}
+            Err(e) => not_removed.push(format!("{} ({})", config_path.display(), e)),
+        }
+    }
+
     let mut message = format!("확장 파일을 만들었습니다:\n  {}\n\nPython: {}\n", out.display(), python_path);
+    if !removed.is_empty() {
+        message.push_str(&format!("\n설정 파일 방식으로 등록해 둔 RuSQL 항목을 지웠습니다(확장과 두 번 등록되지 않도록):\n{}\n", removed.iter().map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n")));
+    }
+    if !not_removed.is_empty() {
+        message.push_str(&format!("\n지우지 못한 설정 파일(RuSQL이 두 번 등록될 수 있습니다):\n{}\n", not_removed.iter().map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n")));
+    }
     if open {
         // 탐색기가 그 파일을 고른 채로 열린다. 파일을 바로 열지(`start`) 않는 까닭: .mcpb를 Claude Desktop에 연결해 두지 않은 PC(Store판 등)에서는 아무 일도 없거나 "연결 프로그램 선택" 창만
         // 뜬다 -- 파일 위치가 보여야 더블클릭 · 끌어다 놓기 · 설정의 파일 설치 중 되는 것을 고를 수 있다. (explorer는 성공해도 종료 코드가 1이라 결과는 spawn 성공만 본다)
@@ -1425,7 +1497,7 @@ fn setup_mcp_extension(host: String, port: u16, user: String, password: String, 
         message.push_str(if explorer.spawn().is_ok() { "\n탐색기가 위 파일을 고른 채로 열렸습니다. 다음 중 하나로 설치하세요:" } else { "\n탐색기를 열지 못했습니다. 위 경로의 파일을 다음 중 하나로 설치하세요:" });
         message.push_str("\n  ① 파일을 더블클릭 (Claude Desktop이 .mcpb에 연결돼 있으면 설치 창이 뜹니다)\n  ② 파일을 Claude Desktop 창으로 끌어다 놓기\n  ③ Claude Desktop 설정 → 확장(Extensions)의 파일 설치(Install Extension…)에서 위 파일 선택\n설치 창이 뜨면 [Install]을 누르고, 설정 → 확장에서 RuSQL이 켜져 있는지 확인하세요.");
     }
-    message.push_str("\n\n설정 파일 방식(Auto-connect Claude Desktop)과 함께 쓰면 RuSQL이 두 번 등록됩니다. 하나만 쓰세요. RuSQL을 업데이트했다면 이 버튼을 다시 눌러 확장을 갱신하세요.");
+    message.push_str("\n\n설정 파일 방식(Auto-connect Claude Desktop) 단추를 다시 누르면 이 확장과 RuSQL이 두 번 등록됩니다. 하나만 쓰세요. RuSQL을 업데이트했다면 이 단추를 다시 눌러 확장을 갱신하세요.");
     Ok(message)
 }
 
@@ -2191,6 +2263,48 @@ mod tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), manifest);
         assert!(archive.by_name("icon.png").unwrap().size() > 1000, "the icon is the real picture");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Registering RuSQL twice (config file + extension): the extension button removes only OUR entry from the config file, and leaves the file alone when there is nothing to remove or it cannot be read.
+    #[test]
+    fn remove_rusql_from_config_removes_only_the_rusql_entry() {
+        let dir = std::env::temp_dir().join(format!("rusql_mcp_remove_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("claude_desktop_config.json");
+
+        std::fs::write(&config_path, r#"{"theme": "dark", "mcpServers": {"other": {"command": "x"}, "RuSQL": {"command": "python"}}}"#).unwrap();
+        assert_eq!(remove_rusql_from_config(&config_path), Ok(true));
+        let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(after["mcpServers"].get("RuSQL").is_none(), "our entry is gone");
+        assert_eq!(after["mcpServers"]["other"]["command"], "x", "another server survives");
+        assert_eq!(after["theme"], "dark", "unrelated settings survive");
+
+        // nothing to remove now: the file is not rewritten (same bytes)
+        let bytes = std::fs::read(&config_path).unwrap();
+        assert_eq!(remove_rusql_from_config(&config_path), Ok(false));
+        assert_eq!(std::fs::read(&config_path).unwrap(), bytes);
+
+        // a file that is not JSON is left untouched and reported
+        let malformed = r#"{ "mcpServers": { "RuSQL": {"command": "x"} "#;
+        std::fs::write(&config_path, malformed).unwrap();
+        assert!(remove_rusql_from_config(&config_path).is_err());
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), malformed);
+
+        // no file at all: nothing to do
+        assert_eq!(remove_rusql_from_config(&dir.join("missing.json")), Ok(false));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rusql_extension_installed_looks_for_rusql_in_the_extension_folders() {
+        let dir = std::env::temp_dir().join(format!("rusql_mcp_ext_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!rusql_extension_installed(&dir), "no extension folders");
+        std::fs::create_dir_all(dir.join("Claude Extensions").join("local.dxt.anthropic.file-system")).unwrap();
+        assert!(!rusql_extension_installed(&dir), "another extension only");
+        std::fs::create_dir_all(dir.join("Claude Extensions").join("local.mcpb.rspstat.rusql")).unwrap();
+        assert!(rusql_extension_installed(&dir), "the RuSQL extension folder");
         std::fs::remove_dir_all(&dir).ok();
     }
 

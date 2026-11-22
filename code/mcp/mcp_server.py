@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 # 접속정보는 Claude Desktop 설정의 "env" 필드(또는 확장(.mcpb) 매니페스트의 env)로 오버라이드 가능 (RuSQL UI의 "Auto-connect
 # Claude Desktop" / "Add to Claude Desktop (extension)" 버튼이 지금 이 세션의 실제 host/port/계정으로 채워 씀 -- setup_mcp_config · setup_mcp_extension,
@@ -37,6 +38,9 @@ _CONNECT_RETRIES = 3
 _CONNECT_RETRY_DELAY_SEC = 0.5
 
 mcp = FastMCP("RuSQL v2.3.0")
+# 데이터베이스 · 연결 목록 · 앱을 바꾸지 않고 읽기만 하는 도구에 붙이는 표시(MCP의 readOnlyHint). Claude Desktop이 이 도구들을 "읽기 전용"으로 묶어 보여 주면 사용자가 한 번에 허용할 수 있다.
+# 쓰기 문장을 돌릴 수 있거나(execute_sql · run_script · trace_query · suggest_indexes의 임시 인덱스 · get_table_stats의 ANALYZE TABLE ...) 앱 · 연결을 바꾸는 도구에는 붙이지 않는다.
+_READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
 
 def _compute_native_password_token(password: str, nonce: bytes) -> bytes:
@@ -380,7 +384,7 @@ def run_script(statements: list[str], database: str = "", commit: bool = False, 
     return json.dumps(out, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_databases() -> str:
     """List all databases available in RuSQL. Returns a JSON array."""
     raw = _run("SHOW DATABASES")
@@ -388,7 +392,7 @@ def list_databases() -> str:
     return json.dumps(rows, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_tables(database: str = "") -> str:
     """List all tables in the specified database. Returns a JSON array."""
     raw = _run("SHOW TABLES", database)
@@ -396,13 +400,13 @@ def list_tables(database: str = "") -> str:
     return json.dumps(rows, ensure_ascii=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_table_schema(table: str, database: str = "") -> str:
     """Get the CREATE TABLE DDL for a specific table."""
     return _run(f"SHOW CREATE TABLE {table}", database)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def explain_query(sql: str, database: str = "") -> str:
     """Run EXPLAIN ANALYZE on a query and return structured execution plan info.
     Useful for diagnosing slow queries, checking index usage, and estimating row counts.
@@ -419,7 +423,7 @@ def explain_query(sql: str, database: str = "") -> str:
     return _run(explain_sql, database)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_indexes(table: str, database: str = "") -> str:
     """Return all indexes defined on a table as a JSON array.
     Includes index name, type (BTREE/HASH), columns, and whether it is unique."""
@@ -881,7 +885,7 @@ def list_locks_report() -> dict:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_locks() -> str:
     """Show the row locks of the server: the open transactions (state, how many rows each has locked, what it waits for), every row lock held (table, key, mode), who waits
     for whom, the transactions that block the others and wait for nobody (ending one of them frees the rest), and the recent deadlocks, as one JSON object with advice. Reads
@@ -949,7 +953,7 @@ def health_report_data() -> dict:
     return report
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def health_report() -> str:
     """One-call summary of the server's health, for "how is the server doing?": uptime, connections (now / most / total / failed logins), statements (total, per second, by
     kind), buffer pool (pages, hit ratio), redo log size, row-lock waits and deadlocks, open transactions and who blocks whom, every session and what it runs, what the last
@@ -1088,7 +1092,7 @@ def _fk_join_path(edges: list[dict], start: str, goal: str) -> list[dict] | None
     return None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_fk_graph(database: str = "", table: str = "", to_table: str = "") -> str:
     """The foreign key relationships of a database, for writing correct JOINs. Returns JSON: every foreign key as an edge (child table.column -> parent table.column, the
     constraint name, ON DELETE / ON UPDATE rules such as CASCADE and a ready JOIN condition "child.col = parent.col"), for each table what it refers to and what refers to
@@ -1171,7 +1175,7 @@ def trace_query(sql: str, database: str = "") -> str:
         return _fail(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def sample_data(table: str, n: int = 10, database: str = "") -> str:
     """Return up to N sample rows from a table as a JSON array.
     Useful for understanding data distribution before writing queries."""
@@ -1225,7 +1229,7 @@ def slow_queries_report(limit: int = 20, min_seconds: float = 0.0) -> dict:
     return out
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def slow_queries(limit: int = 20, min_seconds: float = 0.0) -> str:
     """The slow queries: the statements that ran for at least long_query_time (the engine's slow query log, information_schema.slow_log, the last 1000 statements while
     slow_query_log is ON), grouped by statement text and sorted by the time they took in all, as JSON: how many runs, the total and slowest seconds, the rows sent, the database.
@@ -1431,7 +1435,7 @@ def diff_schema_report(database_a: str, database_b: str) -> dict:
             "note": "Column entries are [type, nullable, default, extra]; indexes [unique, columns]; foreign keys [columns, parent table, parent columns, rules]. SHOW CREATE TABLE gives the DDL of a table."}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def diff_schema(database_a: str, database_b: str) -> str:
     """Compare the structure of two databases: the tables only one of them has, and for the tables both have the columns (type, NULL, default), indexes and foreign keys that
     differ. Reads information_schema only; nothing is changed. The desktop client's "Compare Schema" window also writes the migration SQL."""
@@ -1503,7 +1507,7 @@ def _save_connections(connections: list[dict]) -> None:
     tmp_path.replace(_CONNECTIONS_FILE)  # 원자적 교체 — UI가 절반만 쓰인 JSON을 읽는 일이 없게
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_connections() -> str:
     """List all connections saved in the RuSQL UI's home screen. Returns a JSON array
     with id/name/host/port/user/dataDir (passwords are redacted, never returned)."""
@@ -1738,7 +1742,7 @@ def switch_editor_tab(tab: str, instance: str = "") -> str:
     return _send_ui_command("switch_to_tab", tab, instance=instance)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_editor_tabs(instance: str = "") -> str:
     """List the names of all open tabs in the RuSQL editor, in order. Returns a JSON
     array. Requires the RuSQL app to be open and logged in. If more than one window is
@@ -1746,7 +1750,7 @@ def list_editor_tabs(instance: str = "") -> str:
     return _send_ui_command("list_tabs", "", instance=instance)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_editor_tab_content(tab: str = "", instance: str = "") -> str:
     """Get the current SQL text in the given RuSQL editor tab (or the active tab if
     `tab` is omitted). Requires the RuSQL app to be open and logged in. If more than one
@@ -1806,7 +1810,7 @@ def _load_app_instances() -> list[dict]:
     return [i for i in raw if now - i.get("lastHeartbeat", 0) < _INSTANCE_STALE_SEC]
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_app_instances() -> str:
     """List every currently-running RuSQL app window, each with its instance id, whether
     it's logged in, and which database it's connected to (if any). Returns a JSON array.
@@ -1873,7 +1877,7 @@ def stop_server(instance: str = "") -> str:
     return _send_ui_command("stop_server", "", timeout=15.0, instance=instance)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_server_status(instance: str = "") -> str:
     """Get the RuSQL Server Manager's current status for the given window (or any window if
     `instance` is omitted): whether the public listener is running, its port, connected

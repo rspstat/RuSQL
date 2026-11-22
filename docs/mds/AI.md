@@ -111,4 +111,6 @@ XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 
 
 **남는 것**: `archive/AI/`(데이터 생성 코드·데이터셋·Colab 노트북)는 **탐색 실험의 기록으로만** 저장소에 보존한다. 제품 어디에서도 참조하지 않는다. 2026-10-05에 삭제하지 않고 저장소 루트의 `archive/` 폴더로 옮겨 보관하기로 했다(`archive/AI/`).
 
+**연결 방식 (2026-11-23)**: Claude Desktop이 RuSQL MCP 서버를 쓰는 길은 둘이다 — 앱 MCP Agent 패널의 **Add to Claude Desktop (extension)**(`RuSQL.mcpb` 확장을 만들어 탐색기로 보여 주고 사용자가 Claude Desktop에 넣음; 새로 설치한 Microsoft Store판이 설정 파일을 읽지 않는 문제를 피함)와 **Auto-connect Claude Desktop (config file)**(`claude_desktop_config.json`에 씀). 둘 중 하나만 쓴다 — 확장 단추는 설정 파일의 RuSQL 항목을 지우고, 설정 파일 단추는 확장이 있으면 경고한다. 도구 37개 중 데이터베이스 · 연결 목록 · 앱을 바꾸지 않는 16개에는 MCP `readOnlyHint`를 붙였다(Claude Desktop이 "읽기 전용"으로 묶으면 한 번에 허용할 수 있다; Claude 화면의 실제 동작은 확인하지 못함).
+
 **문서·UI 반영 상태**: `DATE.md`(10월 1일 항목), `README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널을 "Claude via MCP"로 교체)에 반영. 캡스톤 산출물 D01~D08은 이미 AI 연동을 MCP 기반으로만 기술해서 변경이 필요 없었다. 사이드바의 빈 "AI" 탭(`AiView.tsx`)은 원래 사설 모델 UI 자리였으므로 **같은 날(2026-10-01) 제거했다**(활동 바 아이콘·`AiView.tsx`·`.ai-view` CSS). **결정됨 (2026-10-05)**: 폴더는 삭제하지 않고 `archive/AI/`로 옮겨 보존한다(코드·테스트·MCP·UI에서 참조하는 곳이 없어 경로 변경만 문서에 반영).
