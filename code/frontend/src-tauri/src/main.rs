@@ -1971,8 +1971,16 @@ fn main() {
             sync_login_state,
             setup_mcp_config,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // 창을 닫으면 프로세스가 바로 끝나 AppState의 Drop이 돌지 않는다. 그러면 엔진 프로세스가 남아 engine_server.exe가 잠긴 채로
+            // 다음 설치가 "Error opening file for writing"으로 실패하므로, 끝나기 직전에 엔진을 내려받아 종료한다.
+            if let tauri::RunEvent::Exit = event {
+                let engine = app.state::<AppState>().db.lock().unwrap_or_else(|e| e.into_inner()).take();
+                drop(engine); // EngineConn의 Drop이 엔진 프로세스를 종료한다
+            }
+        });
 }
 
 #[cfg(test)]

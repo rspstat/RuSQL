@@ -3827,6 +3827,17 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **찾은 것(고치지 않음)**: 코퍼스를 만들다 `CREATE TABLE c AS SELECT id, name FROM src`로 만든 표의 `DESCRIBE`가 원본이 NOT NULL인 열(기본키 `id`)을 MySQL은 `NO`, 여기는 `YES`로 보인다는 것을 알았다. `WITH` 없는 문장도 같은 기존 차이라 `RECOMMAND.md` 6번 표에 한 줄 올렸고 코퍼스에서는 빼 두었다.
 **정직한 한계**: ① 위치 캐시는 삽입이 하던 대로 기본키가 있는 표만 채운다(복합 기본키는 첫 열 기준이고, 인덱스 시작은 단일 열 기본키만 쓰는 것도 전과 같다). ② 캐시의 크기는 삽입으로 채운 표와 같다 — 행마다 키 문자열과 위치 하나(표를 읽는 메모리에 더해짐). ③ `CREATE VIEW … AS WITH`의 `SHOW CREATE VIEW`는 쓴 원문 그대로 보인다(진짜 MySQL은 `with `c` as (select `src`.`id` AS `id` …`처럼 전체를 다시 써서 보임). ④ `INSERT … SELECT … ON DUPLICATE KEY UPDATE`에서 원본 표와 대상 표에 같은 이름의 열이 있는데 `UPDATE` 쪽에 한정 없이 쓰면 MySQL은 1052로 거절하고 여기는 대상 표의 열로 읽는다(`up_dst.v`처럼 한정하면 같음) — `RECOMMAND.md` 6번 표.
 
+### 11월 22일 — 설치 파일 다듬기, 실명 정리, 앱이 닫힐 때 엔진도 끔 (전시 2일 전, 사용자가 새 PC에서 설치해 보고 "전부 잘 됩니다" 뒤 요청)
+
+**설치 파일**: 설치 아이콘 · 왼쪽 그림 · 위 띠 그림이 NSIS 기본 그림이던 것을 RuSQL 로고(여우)로 바꿨다 — `tauri.conf.json`의 `nsis.installerIcon` · `uninstallerIcon` · `sidebarImage`(`installer/sidebar.bmp` 164×314, 로고만) · `headerImage`(`installer/header.bmp` 150×57)와 `bundle.licenseFile`(`installer/license.txt`, MIT). 설치 마법사는 영어 하나로 하고(`languages: ["English"]`) 환영 · 마침 문구는 `installer/installer-hooks.nsh`의 `MUI_WELCOMEPAGE_*` · `MUI_FINISHPAGE_*`로 오픈소스 설치 파일 말투로 썼다. 설치 파일과 `LICENSE`, 이 문서의 소개글 파일 이름에서 실명을 뺐다(`rspstat`; 과거 커밋 기록 · HWPX는 그대로). 릴리스 `v2.3.0`(GitHub)에 설치 파일을 올렸고 설명은 설명 · SmartScreen 안내 · SHA-256만 남겼다.
+
+**새 PC에서 난 오류 — `Error opening for file writing` (`engine\engine_server.exe`)**: 앱 창을 닫아도 앱이 띄운 엔진 프로세스가 남아 있었다(`EngineConn`의 `Drop`이 프로세스가 끝날 때는 돌지 않음 — 이 PC에서 앱을 닫은 뒤에도 `engine_server.exe`가 살아 있는 것을 확인). 실행 중인 파일은 덮어쓸 수도 지울 수도 없어서 같은 폴더에 다시 설치(또는 제거)하면 실패한다. 두 겹으로 막았다.
+- **앱**: `main.rs`가 `.run()` 대신 `.build()?.run(|app, event| …)`로 `RunEvent::Exit`에서 `AppState.db`의 `EngineConn`을 꺼내 버린다(`Drop`이 엔진 프로세스를 종료·대기). 시험: `test_installed_layout.py`에 "closing the app stops the engine it started"를 더했다 — 창 닫기와 같은 `taskkill`(`/F` · `/T` 없이)로 앱을 닫은 뒤 엔진 PID가 사라졌는지 본다. 고치기 전 앱에서는 **실패**, 고친 앱에서는 통과(전체 20개).
+- **설치 파일**: `NSIS_HOOK_PREINSTALL` · `PREUNINSTALL`이 설치 폴더(`$INSTDIR\engine`) 안의 `engine_server.exe`를 먼저 종료한다(앱이 강제 종료되었거나 이미 깔려 있는 옛 버전이 남긴 엔진용). 첫 시도(`Get-Process … .Path`)는 **아무것도 못 껐다** — 설치 프로그램이 32비트라 거기서 띄운 PowerShell도 32비트이고, 32비트 프로세스는 64비트 프로세스의 경로를 읽지 못한다. `Get-CimInstance Win32_Process`의 `ExecutablePath`로 바꾸고서야 동작했다. 임시 폴더에 조용히(`/S /D=`) 설치해 확인: 엔진이 남은 상태에서 덮어 설치 · 제거 모두 엔진을 끄고 끝난다.
+
+**남은 한계**: 앱이 `taskkill /F` · 충돌로 죽으면 엔진은 남는다(설치 파일의 훅이 그 경우를 막는다). 긴 질의가 `AppState.db` 잠금을 쥐고 있는 동안 창을 닫으면 그 질의가 끝날 때까지 종료가 기다린다. 설치 중 "Uninstall before installing"을 고르면 옛 제거 프로그램이 돌아 이 훅이 적용되지 않는다(기본 선택인 "Add or reinstall"은 적용됨).
+- 도구 함정: 셸의 작업 폴더가 `target/release/nsis/x64` 안에 있으면 그 폴더가 잠겨 `tauri build`가 `os error 32`로 실패한다(저장소 루트에서 빌드). Git Bash의 `tar -C C:\…`는 드라이브의 `:`를 원격 호스트로 읽는다(`tar -xzOf 파일 경로`로 한 파일씩 꺼냄). NSIS는 BOM 없는 파일을 ANSI로 읽으므로 한글이 든 `.nsh`는 BOM이 있어야 하고, 라이선스 파일은 Tauri가 BOM을 붙이므로 없어야 한다(둘이면 첫 글자가 깨져 보임).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

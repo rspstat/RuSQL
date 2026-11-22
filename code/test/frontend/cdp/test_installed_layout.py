@@ -103,6 +103,7 @@ def main() -> int:
         engines = as_list(powershell("Get-CimInstance Win32_Process -Filter \"Name='engine_server.exe'\" | Select-Object ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json"))
         mine = [e for e in engines if e.get("ParentProcessId") == app.pid]
         check(len(mine) == 1, "one engine process is a child of the app", str(engines))
+        engine_pid = mine[0]["ProcessId"] if mine else None
         if mine:
             started = Path(mine[0]["ExecutablePath"]).resolve()
             if args.tree:
@@ -133,6 +134,16 @@ def main() -> int:
         check(True, "the background thread runs (app_instances.json is written)")
         real_after = real_connections.read_bytes() if real_connections.exists() else None
         check(real_before == real_after, "the code/ tree's own data/connections.json was not touched")
+
+        # closing the window must stop the engine the app started: a left-over engine_server.exe keeps its file locked, so the next install fails with "Error opening file for writing"
+        if engine_pid:
+            subprocess.run(["taskkill", "/PID", str(app.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # a plain close (no /F, no /T), like the window's X
+            wait_for(lambda: app.poll() is not None, 30, what="the app to close")
+            time.sleep(1)
+            left = [e for e in as_list(powershell("Get-CimInstance Win32_Process -Filter \"Name='engine_server.exe'\" | Select-Object ProcessId,ExecutablePath | ConvertTo-Json")) if e.get("ProcessId") == engine_pid]
+            check(not left, "closing the app stops the engine it started", str(left))
+            if left:
+                subprocess.run(["taskkill", "/F", "/PID", str(engine_pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # (exact PID of the one we saw)
     except Exception as e:  # (anything unexpected is a failure with its text)
         check(False, "no exception", f"{type(e).__name__}: {e}")
     finally:
