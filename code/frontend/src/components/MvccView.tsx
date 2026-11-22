@@ -12,7 +12,7 @@ import "./MvccView.css";
 
 const LANG_KEY = "rusql_diagram_lang";
 function loadLang(): Lang {
-  try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
+  try { return localStorage.getItem(LANG_KEY) === "ko" ? "ko" : "en"; } catch { return "en"; }
 }
 
 type Who = "A" | "B";

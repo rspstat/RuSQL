@@ -13,7 +13,7 @@ import "./BTreeView.css";
 
 const LANG_KEY = "rusql_diagram_lang";
 function loadLang(): Lang {
-  try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
+  try { return localStorage.getItem(LANG_KEY) === "ko" ? "ko" : "en"; } catch { return "en"; }
 }
 
 const KEY_W = 52, KEY_H = 48, PAD = 8, GAP = 28, LEVEL_H = 190, MARGIN = 36, GUTTER = 96;

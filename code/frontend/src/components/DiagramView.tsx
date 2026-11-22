@@ -20,9 +20,9 @@ type View = "layers" | "cylinders";
 const LANG_KEY = "rusql_diagram_lang";
 const VIEW_KEY = "rusql_diagram_view";
 
-// The left button of each toggle is the default: Korean for the language, cylinders for the view.
+// The left button of each toggle is the default: English for the language, cylinders for the view.
 function loadLang(): Lang {
-  try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
+  try { return localStorage.getItem(LANG_KEY) === "ko" ? "ko" : "en"; } catch { return "en"; }
 }
 
 function loadView(): View {
@@ -357,8 +357,8 @@ function DiagramBody({ lang, choose, view, chooseView }: {
             <h1 className="dg-title">{t(L("System Architecture & Flow", "시스템 아키텍처 및 흐름"))}</h1>
             <div className="dg-controls">
               <div className="dg-seg" role="group" aria-label="Language">
-                <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => choose("ko")}>한국어</button>
                 <button className={lang === "en" ? "active" : ""} aria-pressed={lang === "en"} onClick={() => choose("en")}>EN</button>
+                <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => choose("ko")}>한국어</button>
               </div>
               <div className="dg-seg dg-seg-icons" role="group" aria-label={t(L("View", "보기"))}>
                 <button className={view === "cylinders" ? "active" : ""} aria-pressed={view === "cylinders"} title={cylindersLabel} aria-label={cylindersLabel}

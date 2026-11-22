@@ -26,7 +26,7 @@ const ZOOM_MIN = 30, ZOOM_MAX = 200; // percent, like the zoom slider of the ERD
 const fitZoom = () => Math.max(ZOOM_MIN, Math.min(100, Math.floor(((window.innerWidth - 80) / WIDTH) * 100)));
 
 function loadLang(): Lang {
-  try { return localStorage.getItem(LANG_KEY) === "en" ? "en" : "ko"; } catch { return "ko"; }
+  try { return localStorage.getItem(LANG_KEY) === "ko" ? "ko" : "en"; } catch { return "en"; }
 }
 
 const KIND_COLOR: Record<EcoNode["kind"], string> = {
@@ -355,8 +355,8 @@ export default function EcosystemView({ connections, onBack }: { connections: Ec
             <span>{lang === "ko" ? "모든 연결 · 데이터베이스 · 테이블을 한눈에" : "Every connection, database and table at a glance"}</span>
           </div>
           <div className="dg-seg" role="group" aria-label="Language">
-            <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => choose("ko")}>한국어</button>
             <button className={lang === "en" ? "active" : ""} aria-pressed={lang === "en"} onClick={() => choose("en")}>EN</button>
+            <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => choose("ko")}>한국어</button>
           </div>
         </div>
         <Picture connections={connections} lang={lang} />
