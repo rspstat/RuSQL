@@ -264,41 +264,6 @@ def compare_schema_names_what_differs(page: Page):
 
 
 @scenario
-def the_home_screen_dots_show_which_connections_server_is_on(page: Page):
-    def invoke(command: str, **arguments):
-        return page.eval("window.__TAURI_INTERNALS__.invoke(%s, %s)" % (json.dumps(command), json.dumps(arguments)), await_promise=True)
-
-    def dot_class(where: str) -> str:  # the class of the dot of the test connection: in the sidebar list, or on its card
-        pick = {"sidebar": "[...document.querySelectorAll('.home-sidebar-item[data-drag-id]')].find(e => e.title === %s)",
-                "card": "[...document.querySelectorAll('.home-conn-card')].find(e => e.querySelector('.home-conn-name').innerText === %s)"}[where] % json.dumps(CONNECTION)
-        return page.eval("(() => { const e = %s; const d = e && e.querySelector('.home-srv-dot'); return d ? d.className : ''; })()" % pick)
-
-    def to_home():
-        page.click(".menu-logout-btn")
-        page.wait("document.querySelectorAll('.home-quick-btn').length === 4", 20, "the home screen")
-
-    def sign_in():
-        page.click(".home-sidebar-item", CONNECTION)
-        page.wait("document.querySelector('.menu-logout-btn') !== null && document.querySelector('.home-quick-btn') === null", 60, "the signed-in app")
-
-    # no server is on: red dots, in the list and on the card
-    to_home()
-    page.wait("document.querySelector('.home-srv-dot') !== null", 10, "the dots")
-    assert "off" in dot_class("sidebar") and "off" in dot_class("card"), (dot_class("sidebar"), dot_class("card"))
-    # the server is started for this connection (a port of its own): after Logout the engine keeps running, and the dots say so
-    sign_in()
-    invoke("start_server", connId="cdp-test", port=17931, mysqlPort=0)
-    to_home()
-    page.wait("document.querySelectorAll('.home-srv-dot.on').length === 2", 15, "the green dots (the list and the card)")
-    assert "on" in dot_class("sidebar").split() and "on" in dot_class("card").split(), (dot_class("sidebar"), dot_class("card"))
-    assert page.eval("document.querySelector('.home-sidebar-item .home-srv-dot.on').title") == "TCP server on :17931"
-    assert page.eval("document.querySelectorAll('.home-srv-dot.on').length") == 2, "only the connection that serves is green"
-    # signing in starts a fresh engine without a server: nothing is on any more (the old 'running' note must not survive)
-    sign_in()
-    assert invoke("get_running_servers") == {}, invoke("get_running_servers")
-
-
-@scenario
 def the_ecosystem_window_replaces_the_home_screen(page: Page):
     # 100 rows are deleted and 100 replaced (an UPDATE writes a new row version): the table file lists far more versions than rows, and the window must show the live rows
     page.click('[title="SQL Editor"]')

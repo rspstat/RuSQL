@@ -11,7 +11,7 @@
 1. `RuSQL_2.3.0_x64-setup.exe`로 설치하고 실행합니다.
 2. 처음에는 기본 연결인 `RuSQL Local`(사용자 root · 비밀번호 root · localhost · 7878)이 생성되어 있습니다. 그 연결을 눌러 들어갑니다. (다른 이름이 필요하면 **New Connection** → 이름만 적고 **Add**.)
 3. SQL 편집기에 `EXHIBITION_setup.sql` **전체를 붙여 넣고 Run All** → `✓ 25 query(s)` (약 3초). 한 번만 합니다. (이미 `expo`가 있으면 `CREATE DATABASE`가 실패하니 `DROP DATABASE expo;`로 지우고 다시 합니다.)
-4. Claude Desktop 연결: 먼저 이 PC에 **Python과 `mcp` 패키지**가 있어야 합니다(`pip install mcp` — 설치 파일에는 Python이 들어 있지 않고, Claude Desktop이 `python mcp_server.py`를 띄웁니다). **Server Manager → 오른쪽 막대 MCP Agent → Auto-connect Claude Desktop** 을 누르고 **Claude Desktop을 다시 시작**합니다. Server Manager에서 **Start Server**(RUNNING)까지 눌러 둡니다. 홈 화면(Logout 뒤)에서는 그 연결의 점(왼쪽 목록의 오른쪽 끝, 카드의 오른쪽 위)이 **초록**이면 서버가 켜진 것이고 **빨강**이면 꺼진 것입니다. Claude Desktop은 인터넷이 필요합니다.
+4. Claude Desktop 연결: **Server Manager → 오른쪽 막대 MCP Agent → Auto-connect Claude Desktop** 을 누르고 **Claude Desktop을 다시 시작**합니다. Server Manager에서 **Start Server**(RUNNING)까지 눌러 둡니다. Claude Desktop은 인터넷이 필요합니다.
 5. **백업 영상**: 장면 7(Claude)을 한 번 하면서 화면을 녹화해 둡니다(Windows: `Win + Alt + R`). 인터넷이나 연결이 안 될 때 이 영상을 틉니다.
 6. 절전 · 화면 끄기 · 알림을 끄고, 충전기를 꽂아 둡니다. 시연은 **홈 화면(접속 전)** 에서 시작합니다.
 
@@ -91,7 +91,6 @@ ROLLBACK;
 - **장면 4의 Journey는 방금 실행한 문장에 눌러도 됩니다**(전에는 1단계만 나왔던 것을 2026-11-21에 고침, 리허설에서 11단계 확인). 이 PC에 **옛 설치 파일로 깐 앱**이 있으면 새 `RuSQL_2.3.0_x64-setup.exe`로 다시 설치해야 이 수정이 들어갑니다.
 - Claude가 편집기를 움직이려면 **앱이 로그인된 상태**이고 **Server Manager가 RUNNING**이어야 합니다.
 - 처음에는 기본 연결인 `RuSQL Local`이 생성되어 있습니다(위 준비 2번).
-- View Topology · Diagram · B+Tree · MVCC 페이지는 **영어로 먼저 열립니다**(오른쪽 위 `EN | 한국어` 버튼으로 바꾸며, 고른 언어는 이 PC에 기억됩니다).
 
 ## 자주 받는 질문 (한 줄 답)
 

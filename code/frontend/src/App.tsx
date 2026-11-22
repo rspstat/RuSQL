@@ -194,13 +194,6 @@ function ExplainPlan({ lines, elapsed, advice }: { lines: string[]; elapsed: num
   );
 }
 
-// 홈 화면의 점: 초록 = 이 연결의 TCP 서버가 켜져 있음(마우스를 올리면 포트), 빨강 = 꺼져 있음
-function ServerDot({ port }: { port?: number }) {
-  const on = port !== undefined;
-  const text = on ? `TCP server on :${port}` : "TCP server off";
-  return <span className={`home-srv-dot ${on ? "on" : "off"}`} title={text} aria-label={text} />;
-}
-
 // ─── 메인 컴포넌트 ────────────────────────────────────────────
 function App() {
   // 현재 연결 ID (localStorage 키 네임스페이스용, ref는 클로저에서 안전하게 참조)
@@ -813,17 +806,6 @@ function App() {
     const timer = setInterval(poll, 1500);
     return () => clearInterval(timer);
   }, [activeView]);
-
-  // ─── 홈 화면: 어느 연결의 TCP 서버가 켜져 있는지 (연결 id -> 포트; 이 창의 것과 다른 창의 것) ──────
-  const [runningServers, setRunningServers] = useState<Record<string, number>>({});
-  useEffect(() => {
-    if (loggedIn) return;
-    let alive = true;
-    const poll = () => invoke<Record<string, number>>("get_running_servers").then(r => { if (alive) setRunningServers(r); }).catch(() => {});
-    poll();
-    const timer = setInterval(poll, 2000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [loggedIn]);
 
   // ─── 로그 자동 스크롤 ─────────────────────────────────────
   useEffect(() => {
@@ -1843,7 +1825,6 @@ function App() {
                   onClick={e => { e.stopPropagation(); toggleFavorite(conn.id); }}
                 >{conn.favorite ? "★" : "☆"}</span>
                 {conn.autoLogin && <span className="home-sidebar-badge">Auto</span>}
-                <ServerDot port={runningServers[conn.id]} />
               </div>
             ))}
             <div className="home-sidebar-add" onClick={() => setShowNewConn(true)}>
@@ -1980,7 +1961,6 @@ function App() {
                       {conn.autoLogin && <span className="home-conn-chip" style={{ color: "#4ec9b0" }}>Auto Login</span>}
                     </div>
                   </div>
-                  <ServerDot port={runningServers[conn.id]} />
                   <button
                     className={`home-conn-star${conn.favorite ? " on" : ""}`}
                     title={conn.favorite ? "Remove from favorites" : "Add to favorites"}

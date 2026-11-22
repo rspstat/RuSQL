@@ -3838,26 +3838,6 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **남은 한계**: 앱이 `taskkill /F` · 충돌로 죽으면 엔진은 남는다(설치 파일의 훅이 그 경우를 막는다). 긴 질의가 `AppState.db` 잠금을 쥐고 있는 동안 창을 닫으면 그 질의가 끝날 때까지 종료가 기다린다. 설치 중 "Uninstall before installing"을 고르면 옛 제거 프로그램이 돌아 이 훅이 적용되지 않는다(기본 선택인 "Add or reinstall"은 적용됨).
 - 도구 함정: 셸의 작업 폴더가 `target/release/nsis/x64` 안에 있으면 그 폴더가 잠겨 `tauri build`가 `os error 32`로 실패한다(저장소 루트에서 빌드). Git Bash의 `tar -C C:\…`는 드라이브의 `:`를 원격 호스트로 읽는다(`tar -xzOf 파일 경로`로 한 파일씩 꺼냄). NSIS는 BOM 없는 파일을 ANSI로 읽으므로 한글이 든 `.nsh`는 BOM이 있어야 하고, 라이선스 파일은 Tauri가 BOM을 붙이므로 없어야 한다(둘이면 첫 글자가 깨져 보임).
 
-### 11월 22일 (두 번째) — 화면은 영어로 먼저, 엔진 콘솔 창 숨김, 연결별 서버 점, MCP 점검 (전시 2일 전, 사용자 요청 모음)
-
-**① 한국어/영어 전환이 있는 화면은 영어가 기본**: View Topology · Diagram · B+Tree · MVCC(와 숨겨 둔 호환성) 페이지가 `localStorage`의 `rusql_diagram_lang`을 함께 쓰는데, 저장된 값이 `ko`일 때만 한국어이고 아니면 영어다. 버튼은 `EN | 한국어` 순서(왼쪽이 EN)로 바꿨다(`DiagramView` · `EcosystemView` · `PageKit`). 라벨은 그대로 "한국어". 이미 한국어를 눌러 둔 PC는 그 선택이 남는다. 실제 앱(디버그 + Vite)에서 네 화면의 버튼 순서 · 눌린 쪽 · 영어 글을 확인했다.
-
-**② 엔진 콘솔 창 숨김**: 연결에 들어가면 빈 콘솔 창이 하나 떴다 — `spawn_and_connect`가 `engine_server.exe`(콘솔 프로그램)를 `CREATE_NO_WINDOW` 없이 띄워서였고, 그 창을 닫으면 엔진이 죽는다. `creation_flags(0x0800_0000)`를 넣었다. 시험: `test_installed_layout.py`에 "the engine has no console window of its own"(화면에 보이는 `ConsoleWindowClass`/`CASCADIA_HOSTING_WINDOW_CLASS` 창 중 제목에 `engine_server`가 있는 것이 없는지) — 고치기 전 빌드에서 **실패**, 뒤에 통과(21개). 보이지 않는 `conhost.exe`는 그래도 하나 생긴다(정상).
-
-**③ 설치 화면 위쪽 그림**: "RuSQL" 글자를 일반 글꼴이 아니라 로고 그림의 글자(여우 + 로고 글자를 나란히, 3배로 그려 줄임)로 바꾸고 크기를 줄이고(폭 88 px) 설명 글 쪽으로 8 px 옮겼다.
-
-**④ 홈 화면의 서버 점(초록 = TCP 서버 켜짐 · 빨강 = 꺼짐)**: 서버는 연결마다 켠다(`start_server`가 그 연결의 엔진을 정한 포트로 다시 띄움). 그런데 **Logout은 엔진을 끄지 않아서** 홈 화면으로 돌아와도 서버가 켜져 있을 수 있고, 어느 연결의 것인지 볼 방법이 없었다. 왼쪽 CONNECTIONS 목록의 항목 오른쪽 끝과 연결 카드의 오른쪽 위 모서리에 점을 달았다(마우스를 올리면 `TCP server on :포트` / `TCP server off`; 카드의 ★ · 삭제 버튼은 점을 피해 12 px 왼쪽으로).
-- **어떻게 아나**: 새 Tauri 명령 `get_running_servers`(연결 id → 포트). 이 창의 것(`own_server`: `start_server`가 적은 항목 중 엔진 프로세스가 살아 있는 것 — 질의가 잠금을 쥐고 있으면 살아 있는 것으로 봄)과, **다른 RuSQL 창**의 것(`app_instances.json` 하트비트 항목에 새로 넣은 `serverConnId` · `serverPort`; 15초 넘게 소식이 없는 창은 뺌, 옛 항목은 `serde(default)`로 읽힘)을 합친다(`running_servers`, 순수 함수). 홈 화면에서 2초마다 묻는다.
-- **함께 고친 것**: `authenticate`(로그인)가 엔진을 새로 띄우면서 `servers`의 "켜짐" 기록을 지우지 않아, 같은 연결로 다시 로그인하면 Server Manager가 **RUNNING으로 거짓말**하던 것을 — 새 엔진은 서버 없이(빈 포트, MySQL 없이) 시작하므로 — 로그인 때 기록을 비우게 했다(점이 이 기록을 믿으므로 필수).
-- **시험**: Rust 단위 시험 2개(`running_servers`: 이 창 · 살아 있는 다른 창 · 죽은 창 · 서버 없는 창 / 옛 `app_instances.json`이 읽힘) 포함 9개 통과. 화면 시험 15번째 장면 `the_home_screen_dots_show_which_connections_server_is_on`(서버 없음 = 빨강 → 서버 시작 뒤 Logout = 초록 · 툴팁의 포트 · 켜진 연결만 초록 → 다시 로그인 = `get_running_servers`가 빔). 설치본(새 프로필)에서도 같은 흐름을 확인.
-- **한계**: RuSQL 창이 아닌 곳에서 띄운 서버(따로 켠 `engine_server.exe` 등)와 다른 PC의 서버는 알 수 없다(점은 "이 PC의 RuSQL 창이 서버를 켜 둔 연결"을 뜻한다).
-
-**⑤ MCP 점검**: 기존 시험(`code/test/mcp/` 단위 57 + 진짜 엔진 `live_check.py` 29)은 모두 통과. 설치본 기준으로 새로 확인한 것 — 도구 37개가 파일 · 실행 중인 서버 · `alwaysAllow`에서 일치하고(전부 실제 도구, 삭제 · 자격증명 변경 · 확인 우회 같은 위험한 도구는 목록에 없음), 설치 폴더의 `mcp_server.py`를 설치 폴더의 엔진에 stdio로 붙여 `execute_sql` · `list_databases` · `list_tables` · `get_table_schema` · `sample_data` · `explain_query` · `health_report` · `list_locks` · `get_table_stats` · `get_indexes` · `list_app_instances`가 서로 쓴 것을 읽고, `DROP DATABASE`는 확인 단계 없이는 거절된다(`test_installed_mcp.py`, 17개).
-- **찾은 오류**: **Auto-connect Claude Desktop이 `mcp` 패키지가 없는 Python을 설정 파일에 쓸 수 있었다.** 단추가 `where python`으로 찾은 파이썬마다 `python -c "import mcp"`를 돌려 통과한 것을 쓰는데, 앱의 작업 폴더가 설치 폴더이면(설치 폴더에서 바로 실행할 때 — 설치 시험이 그렇게 시작하며, NSIS 바로가기도 작업 폴더를 설치 폴더로 적는 것이 기본이다) 그 안의 `mcp/` 폴더(`mcp_server.py`가 든 폴더)를 파이썬이 패키지로 읽어 **mcp가 없는 파이썬도 통과**시켰다 — 이 PC에서 `C:\msys64\ucrt64\bin\python.exe`가 그렇게 뽑혔고, Claude Desktop이 그것으로 `mcp_server.py`를 띄우면 `No module named 'mcp'`로 죽는다. 이제 `mcp_server.py`가 실제로 가져오는 `from mcp.server.fastmcp import FastMCP`를 폴더가 없는 곳(임시 폴더)에서 가져와 본다(`where` · 파이썬 확인 프로세스도 `CREATE_NO_WINDOW`로 콘솔 창이 깜박이지 않게). 시험 `test_mcp_autoconnect.py`(앱을 자기 APPDATA · LOCALAPPDATA로 띄워 이 단추를 누르고, 쓴 설정을 읽어 확인하고, 그 설정 그대로 stdio로 서버를 띄워 도구 37개를 나열 — 진짜 Claude Desktop 설정은 건드리지 않음): 고치기 전 빌드에서 **실패**(`No module named 'mcp'`), 뒤에 통과.
-- **알아 둘 것**: 설치 파일에는 Python이 들어 있지 않다. 시연 PC에 Python과 `pip install mcp`가 필요하다(README · `EXHIBITION.md` 준비 4번에 적음). 설정에는 단추를 누를 때의 포트가 적히므로 서버를 켜는 포트를 바꾸면 단추를 다시 눌러야 한다.
-
-**문서**: README(홈 화면의 점, MCP에 필요한 Python, 새 시험 둘, 화면 시험 15개), `EXHIBITION.md`(준비 4번의 Python · 초록 점, 영어 기본) + `EXHIBITION_시연순서.pdf`, Diagram 페이지(앱 줄에 홈 화면의 점; EN · KO). HWPX는 건드리지 않았다.
-
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
