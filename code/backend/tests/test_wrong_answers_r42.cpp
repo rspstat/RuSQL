@@ -2871,7 +2871,12 @@ TEST_CASE("R59: a statement that ran for at least long_query_time is counted, an
     // QUERY_TIME is the seconds the statement took, with six decimals: a cross join of 300 rows (90,000 pairs) is far over a threshold of 0.05 s and far under a minute
     ok(ex, "CREATE TABLE big (id INT PRIMARY KEY)");
     std::string big_values;
-    for (int i = 1; i <= 300; i++) big_values += std::string(i > 1 ? "," : "") + "(" + std::to_string(i) + ")";
+#ifdef _WIN32
+    const int big_rows = 300;
+#else
+    const int big_rows = 1500; // (300 rows are done in under 50 ms on a Linux machine: the statement must run longer than the threshold)
+#endif
+    for (int i = 1; i <= big_rows; i++) big_values += std::string(i > 1 ? "," : "") + "(" + std::to_string(i) + ")";
     ok(ex, "INSERT INTO big VALUES " + big_values);
     ok(ex, "SET GLOBAL long_query_time = 0.05");
     ok(ex, "SELECT COUNT(*) FROM big a, big b WHERE a.id + b.id = 7");

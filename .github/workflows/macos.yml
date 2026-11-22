@@ -83,7 +83,7 @@ jobs:
       - name: Install from the .dmg the way a user does (copy the app out of it)
         run: |
           DMG=$(ls code/frontend/src-tauri/target/release/bundle/dmg/*.dmg | head -1)
-          hdiutil attach "$DMG" -nobrowse -mountpoint /tmp/rusql-dmg
+          yes | hdiutil attach "$DMG" -nobrowse -mountpoint /tmp/rusql-dmg
           ls -la /tmp/rusql-dmg
           cp -R /tmp/rusql-dmg/RuSQL.app /Applications/
           hdiutil detach /tmp/rusql-dmg

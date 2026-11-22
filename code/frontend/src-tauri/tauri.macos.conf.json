@@ -2,6 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "targets": ["app", "dmg"],
+    "licenseFile": null,
     "resources": {
       "engine/engine_server.exe": null,
       "engine/msvcp140.dll": null,
