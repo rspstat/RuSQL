@@ -93,7 +93,8 @@ jobs:
           echo "--- signature"
           codesign -dv "$APP" 2>&1 || true
           codesign --verify --deep --strict "$APP" 2>&1 || true
-          lipo -archs "$APP/Contents/MacOS/rusql-ui" "$APP/Contents/Resources/engine/engine_server"
+          lipo -archs "$APP/Contents/MacOS/rusql-ui"
+          lipo -archs "$APP/Contents/Resources/engine/engine_server"
           plutil -p "$APP/Contents/Info.plist" | grep -i "version\|identifier\|minimum"
       - name: Smoke test of what the app carries (engine, MySQL protocol, bundled Python, MCP server)
         run: |
