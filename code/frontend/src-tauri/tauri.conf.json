@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build && npm run stage-engine",
+    "beforeBuildCommand": "npm run build && npm run stage-engine && npm run stage-python",
     "frontendDist": "../dist"
   },
   "app": {
@@ -39,6 +39,7 @@
       "engine/msvcp140.dll": "engine/msvcp140.dll",
       "engine/vcruntime140.dll": "engine/vcruntime140.dll",
       "engine/vcruntime140_1.dll": "engine/vcruntime140_1.dll",
+      "pyenv/python/": "python/",
       "../../mcp/mcp_server.py": "mcp/mcp_server.py",
       "../../mcp/requirements.txt": "mcp/requirements.txt"
     },

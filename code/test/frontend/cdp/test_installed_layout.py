@@ -95,6 +95,7 @@ def main() -> int:
         for name in RUNTIME:
             check((install / "engine" / name).is_file(), f"... and {name} next to it")
         check((install / "mcp" / "mcp_server.py").is_file(), "the folder carries mcp/mcp_server.py")
+        check((install / "python" / "python.exe").is_file() and (install / "python" / "Lib" / "site-packages" / "mcp").is_dir(), "the folder carries its own Python with the mcp package (python/)")
 
     work = Path(tempfile.mkdtemp(prefix="rusql_installed_"))
     appdata = work / "appdata"

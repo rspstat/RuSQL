@@ -53,12 +53,15 @@ mysql -h 127.0.0.1 -P 3306 -u root --skip-auto-rehash
 # UI mode
 cd code/frontend && npm run tauri dev
 
-# Installer for another PC (NSIS): needs the Release engine built first; it carries engine_server.exe, the three Visual C++ runtime DLLs it imports and the MCP script
+# Installer for another PC (NSIS): needs the Release engine built first; it carries engine_server.exe, the three Visual C++ runtime DLLs it imports, the MCP script and a Python with the mcp package
+# (python.org's embeddable Python, put together by scripts/stage-python.mjs on the first build: it needs the internet and a Python with pip on this PC once)
 cmake --build code/build --config Release --target engine_server
 cd code/frontend && npm run tauri build   # -> src-tauri/target/release/bundle/nsis/RuSQL_<version>_x64-setup.exe
 ```
 
 An installed app starts the engine of its own install folder (`engine/`) and keeps its data and connection list in `%APPDATA%\RuSQL\data`; run from inside the source tree (`tauri dev`, `target/release/rusql-ui.exe`) it uses `code/build/` and `code/data` as before. Check an install folder (or a folder made by extracting the setup file) on any PC: `py -3 code/test/frontend/cdp/test_installed_layout.py <folder>`.
+
+The MCP server needs no Python on the PC: the install folder has its own (`python/`, with the `mcp` package), and the Server Manager's **Auto-connect Claude Desktop** button writes that one into Claude Desktop's config (without it, the button looks for a Python on the PATH that really has `mcp`); restart Claude Desktop afterwards. Check an install folder: `py -3 code/test/frontend/cdp/test_mcp_autoconnect.py <folder>` (add `--no-system-python` to hide every Python of the PATH from the app).
 
 <br/>
 

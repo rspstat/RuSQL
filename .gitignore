@@ -16,6 +16,8 @@ data/
 
 # the engine and its runtime DLLs the installer carries (made by code/frontend/scripts/stage-engine.mjs)
 code/frontend/src-tauri/engine/
+# the Python and the mcp package the installer carries (made by code/frontend/scripts/stage-python.mjs)
+code/frontend/src-tauri/pyenv/
 *.log
 
 # C++ port build output

@@ -26,6 +26,8 @@ local.mkdir()
 env = dict(os.environ, APPDATA=str(appdata), LOCALAPPDATA=str(local), WEBVIEW2_USER_DATA_FOLDER=str(work / "wv2"),
            WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9338")
 env.pop("RUSQL_DATA_DIR", None)
+if "--no-system-python" in sys.argv:  # the PC of the exhibition may have no Python: take every folder with a Python out of the PATH the app sees
+    env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep) if "python" not in p.lower() and "msys64" not in p.lower())
 failures = []
 
 
@@ -52,12 +54,17 @@ try:
     if cfg_path.is_file():
         entry = json.loads(cfg_path.read_text(encoding="utf-8"))["mcpServers"]["RuSQL"]
         check(Path(entry["command"]).is_file(), "the Python it names exists", entry["command"])
-        check(entry["args"][0] == "-u" and Path(entry["args"][1]) == install / "mcp" / "mcp_server.py", "it starts the mcp_server.py of the INSTALL folder", str(entry["args"]))
+        bundled = install / "python" / "python.exe"
+        if bundled.is_file() and bundled.stat().st_size > 10_000:  # the installer carries a Python with mcp: it is the one to write, and it writes no .pyc into the install folder
+            check(Path(entry["command"]) == bundled and entry["args"][0] == "-B", "it names the Python of the INSTALL folder (python\\python.exe -B)", str(entry["command"]) + " " + str(entry["args"]))
+        check(entry["args"][-2] == "-u" and Path(entry["args"][-1]) == install / "mcp" / "mcp_server.py", "it starts the mcp_server.py of the INSTALL folder", str(entry["args"]))
         e = entry["env"]
         check(e["RUSQL_HOST"] == "127.0.0.1" and e["RUSQL_PORT"] == "7878" and e["RUSQL_USER"] == "root", "host, port and user are passed in env", str(e))
         check(Path(e["RUSQL_APP_PATH"]) == install / "rusql-ui.exe", "RUSQL_APP_PATH is the installed app (launch_app can start it)", e["RUSQL_APP_PATH"])
         check(Path(e["RUSQL_DATA_DIR"]) == appdata / "RuSQL" / "data", "RUSQL_DATA_DIR is the app's own data folder", e["RUSQL_DATA_DIR"])
         check(len(entry["alwaysAllow"]) >= 20, "the always-allowed list is there", str(len(entry["alwaysAllow"])))
+        if bundled.is_file():  # (neither the app's own check of the Python nor the server may write .pyc files into the install folder: the uninstaller would leave them)
+            check(not any((install / "python").rglob("*.pyc")), "no .pyc file was written into the install folder's python\\ by the button", str(sum(1 for _ in (install / "python").rglob("*.pyc"))))
 
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client

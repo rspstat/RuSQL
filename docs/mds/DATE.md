@@ -3838,6 +3838,18 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 **남은 한계**: 앱이 `taskkill /F` · 충돌로 죽으면 엔진은 남는다(설치 파일의 훅이 그 경우를 막는다). 긴 질의가 `AppState.db` 잠금을 쥐고 있는 동안 창을 닫으면 그 질의가 끝날 때까지 종료가 기다린다. 설치 중 "Uninstall before installing"을 고르면 옛 제거 프로그램이 돌아 이 훅이 적용되지 않는다(기본 선택인 "Add or reinstall"은 적용됨).
 - 도구 함정: 셸의 작업 폴더가 `target/release/nsis/x64` 안에 있으면 그 폴더가 잠겨 `tauri build`가 `os error 32`로 실패한다(저장소 루트에서 빌드). Git Bash의 `tar -C C:\…`는 드라이브의 `:`를 원격 호스트로 읽는다(`tar -xzOf 파일 경로`로 한 파일씩 꺼냄). NSIS는 BOM 없는 파일을 ANSI로 읽으므로 한글이 든 `.nsh`는 BOM이 있어야 하고, 라이선스 파일은 Tauri가 BOM을 붙이므로 없어야 한다(둘이면 첫 글자가 깨져 보임).
 
+### 11월 22일 (두 번째) — MCP를 Python이 없는 PC에서도 (사용자 "새 pc에서도 그냥 mcp를 사용할 수 있어야 한다", 선택지 A)
+
+**문제**: Claude Desktop은 `python mcp_server.py`로 MCP 서버를 띄우는데, 설치 파일에 Python이 없어서 새 PC에는 Python과 `pip install mcp`가 있어야 했다. 또 "Auto-connect Claude Desktop" 단추가 `python -c "import mcp"`로 Python을 고르는데, 작업 폴더에 `mcp/` 폴더(설치 폴더에는 `mcp/mcp_server.py`가 있다)가 있으면 그 폴더를 패키지로 읽어 **mcp가 없는 Python도 통과**했다(이 PC에서 `C:\msys64\ucrt64\bin\python.exe`가 뽑힘 → Claude Desktop에서 `No module named 'mcp'`).
+
+**고침**: 
+- 설치 파일이 **자기 Python**을 싣는다: `scripts/stage-python.mjs`(`tauri build`의 `beforeBuildCommand`)가 python.org의 내장 Python 3.12.10(`python.exe`의 서명이 Python Software Foundation인지 확인)과 `mcp 1.27.2`(이 PC의 pip가 3.12용 휠만 받아 옴 — 받은 것을 실행하지 않음)를 `src-tauri/pyenv/python/`에 만들고, `bundle.resources`가 설치 폴더의 `python/`으로 복사한다(1,607개 파일 · 60 MB, 설치 파일은 6.3 → 25.6 MB). 첫 빌드만 인터넷과 pip가 있는 Python이 필요하고 다음은 도장(`.rusql-stage`)을 보고 건너뛴다. `python312._pth`에 `Lib\site-packages`와 `import site`(pywin32의 .pth)를 넣었다. `.gitignore`에 `pyenv/`.
+- 단추(`find_python_with_mcp`)는 **설치 폴더의 `python\python.exe`를 먼저** 보고(엔진과 같은 조건: 설치본에서만, 자리표시 파일은 무시), 그다음 PATH의 Python을 본다. 확인은 `mcp_server.py`가 실제로 가져오는 `from mcp.server.fastmcp import FastMCP`를 **임시 폴더에서** 한다. 설치 폴더의 Python에는 `-B`를 붙여(확인할 때도, 설정의 `args`에도) `.pyc`가 설치 폴더에 쓰이지 않게 했다 — 쓰이면 제거할 때 지워지지 않는 파일이 남는다. `where`와 확인 프로세스는 `CREATE_NO_WINDOW`.
+- 설치 · 제거 훅(`RusqlStopEngine`)이 `$INSTDIR\python\`의 `python.exe`(Claude Desktop이 계속 켜 두는 MCP 서버)도 종료한다 — 안 그러면 "Error opening file for writing".
+
+**시험**(설치 파일을 풀어서): `test_installed_layout.py`에 "its own Python with the mcp package" 추가(22개 통과); `test_mcp_autoconnect.py`(앱을 자기 APPDATA로 띄워 단추를 누르고, 쓴 설정 그대로 서버를 띄워 도구 37개를 나열; `--no-system-python`이면 앱이 보는 PATH에서 Python이 있는 폴더를 모두 뺀다) — **Python이 하나도 없는 PATH에서도** 통과, `.pyc` 0개; 설치 폴더의 Python으로 서버를 진짜 엔진에 붙여 도구 17가지 확인(`execute_sql` · `list_*` · `get_table_schema` · `explain_query` · `health_report` ... , `DROP DATABASE`는 확인 단계 없이는 거절); 임시 폴더에 조용히 설치 → 설치 폴더의 `python.exe`가 도는 채로 덮어 설치(훅이 끄고 성공) → 그 상태로 제거(`python\` · `engine\` 모두 사라지고 `uninstall.exe`만 남음). 고치기 전 빌드에서는 단추 시험이 **실패**(`No module named 'mcp'`).
+- **한계**: 이 PC에는 Python이 있어서 "Python이 전혀 없는 PC"는 PATH를 비워 흉내 낸 것이다 — 새 PC에서 한 번 더 확인해야 한다(Claude Desktop 설치 · 로그인 · 인터넷은 PC마다 필요).
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 

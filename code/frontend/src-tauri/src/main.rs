@@ -170,6 +170,14 @@ fn data_root() -> std::path::PathBuf {
     code_dir().join("data")
 }
 
+// 번들된 Python: 실행 파일 옆 python/python.exe -- scripts/stage-python.mjs가 python.org의 내장 Python과 mcp 패키지를 넣는다(설치 PC에 Python이 없어도 MCP 서버가 뜨게). 설치본에서만
+// 쓰고(엔진과 같은 조건), build.rs가 만든 자리표시 파일(10 KB 미만)은 없는 것으로 본다.
+fn bundled_python_path() -> Option<std::path::PathBuf> {
+    bundled_engine_path()?;
+    let path = exe_dir()?.join("python").join("python.exe");
+    path.metadata().map(|m| m.len() > 10_000).unwrap_or(false).then_some(path)
+}
+
 fn mcp_server_script() -> std::path::PathBuf {
     if bundled_engine_path().is_some() {
         if let Some(dir) = exe_dir() {
@@ -1182,27 +1190,27 @@ fn csv_parse_row(line: &str) -> Vec<String> {
 
 // ─── MCP 자동 설정 ───────────────────────────────────────────
 fn find_python_with_mcp() -> Result<String, String> {
+    // 설치 폴더에 든 Python(mcp 포함)이 먼저, 그다음 PATH의 파이썬들
+    let mut candidates: Vec<String> = bundled_python_path().map(|p| p.to_string_lossy().into_owned()).into_iter().collect();
     let mut where_cmd = std::process::Command::new("where");
     where_cmd.arg("python");
     #[cfg(windows)]
     where_cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: 콘솔 창이 깜박이지 않게
-    let where_out = where_cmd
-        .output()
-        .map_err(|_| "Python을 찾을 수 없습니다.".to_string())?;
+    if let Ok(where_out) = where_cmd.output() {
+        candidates.extend(String::from_utf8_lossy(&where_out.stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()));
+    }
 
-    let paths_str = String::from_utf8_lossy(&where_out.stdout);
-    for path in paths_str.lines() {
-        let path = path.trim();
-        if path.is_empty() { continue; }
+    for path in &candidates {
         // `import mcp`만으로는 부족하다: 현재 폴더에 mcp라는 폴더가 있으면(설치 폴더에는 mcp/mcp_server.py가 있다) 파이썬이 그 폴더를 패키지로 읽어 mcp가 없는 파이썬도
         // 통과시키고, Claude Desktop이 그 파이썬으로 mcp_server.py를 띄우면 "No module named 'mcp'"로 죽는다. mcp_server.py가 실제로 가져오는 것을, 폴더가 없는 곳에서 가져와 본다.
         let mut probe = std::process::Command::new(path);
-        probe.args(["-c", "from mcp.server.fastmcp import FastMCP"]).current_dir(std::env::temp_dir());
+        // (-B: 설치 폴더의 Python이 .pyc를 설치 폴더에 쓰지 않게 -- 제거할 때 지워지지 않는 파일이 남는다)
+        probe.args(["-B", "-c", "from mcp.server.fastmcp import FastMCP"]).current_dir(std::env::temp_dir());
         #[cfg(windows)]
         probe.creation_flags(0x0800_0000);
         if let Ok(test) = probe.output() {
             if test.status.success() {
-                return Ok(path.to_string());
+                return Ok(path.clone());
             }
         }
     }
@@ -1247,9 +1255,16 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
     // RUSQL_APP_PATH는 launch_app 도구가 앱이 안 켜져 있을 때 무엇을 실행할지 알려주는 값 —
     // 지금 이 커맨드를 실행 중인 프로세스 자신의 경로(현재 세션의 실제 설치 위치)를 그대로 준다.
     let app_path = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    // 설치 폴더의 Python은 .pyc를 설치 폴더에 쓰지 않게(-B) 한다: 제거할 때 지워지지 않는 파일이 남는다
+    let mut python_args: Vec<String> = Vec::new();
+    if bundled_python_path().map_or(false, |p| p.to_string_lossy() == python_path) {
+        python_args.push("-B".to_string());
+    }
+    python_args.push("-u".to_string());
+    python_args.push(mcp_server_path.to_string_lossy().into_owned());
     let mcp_entry = serde_json::json!({
         "command": python_path,
-        "args": ["-u", mcp_server_path.to_string_lossy().as_ref()],
+        "args": python_args,
         "env": {
             "RUSQL_HOST": host,
             "RUSQL_PORT": port.to_string(),

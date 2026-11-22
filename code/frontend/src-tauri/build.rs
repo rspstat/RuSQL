@@ -11,6 +11,12 @@ fn main() {
             let _ = std::fs::write(&path, b"");
         }
     }
+    // (the Python of the installer, scripts/stage-python.mjs: only a place-holder for development, so that the resource folder exists)
+    let python = std::path::Path::new("pyenv").join("python");
+    let _ = std::fs::create_dir_all(&python);
+    if !python.join("python.exe").exists() {
+        let _ = std::fs::write(python.join("python.exe"), b"");
+    }
     println!("cargo:rerun-if-changed=engine");
     tauri_build::build()
 }
