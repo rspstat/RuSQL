@@ -23,6 +23,7 @@ work = Path(tempfile.mkdtemp(prefix="rusql_autoconn_"))
 appdata, local = work / "appdata", work / "local"
 appdata.mkdir()
 local.mkdir()
+(local / "Packages" / "Claude_teststore").mkdir(parents=True)  # a Store Claude Desktop that was installed and never started
 env = dict(os.environ, APPDATA=str(appdata), LOCALAPPDATA=str(local), WEBVIEW2_USER_DATA_FOLDER=str(work / "wv2"),
            WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9338")
 env.pop("RUSQL_DATA_DIR", None)
@@ -45,14 +46,20 @@ try:
     wait_for(lambda: port_open(9338), 60, what="DevTools port")
     time.sleep(2)
     page = Page(9338)
+    msg = ""
     try:
-        page.eval("window.__TAURI_INTERNALS__.invoke('setup_mcp_config', %s)" % json.dumps({"host": "127.0.0.1", "port": 7878, "user": "root", "password": "root"}), await_promise=True)
+        msg = page.eval("window.__TAURI_INTERNALS__.invoke('setup_mcp_config', %s)" % json.dumps({"host": "127.0.0.1", "port": 7878, "user": "root", "password": "root"}), await_promise=True)
     except Exception as e:  # noqa: BLE001
         check(False, "setup_mcp_config answers", str(e)[:300])
     cfg_path = appdata / "Claude" / "claude_desktop_config.json"
+    store_cfg = local / "Packages" / "Claude_teststore" / "LocalCache" / "Roaming" / "Claude" / "claude_desktop_config.json"
     check(cfg_path.is_file(), "the config file is written under %APPDATA%\\Claude", str(cfg_path))
     if cfg_path.is_file():
         entry = json.loads(cfg_path.read_text(encoding="utf-8"))["mcpServers"]["RuSQL"]
+        # the Microsoft Store version of Claude Desktop reads its own copy (it was installed, never started: its settings folder did not exist, the button makes it); the answer must say where it wrote
+        check(store_cfg.is_file() and json.loads(store_cfg.read_text(encoding="utf-8"))["mcpServers"]["RuSQL"]["command"] == entry["command"], "the Store version's config holds RuSQL too (its folder was made)", str(store_cfg))
+        check(str(cfg_path) in msg and str(store_cfg) in msg, "the answer lists every config file it wrote", msg[:300])
+        check("Quit" in msg and "완전히 종료" in msg, "the answer says how to quit Claude Desktop for real (the tray icon -> Quit)", msg[-300:])
         check(Path(entry["command"]).is_file(), "the Python it names exists", entry["command"])
         bundled = install / "python" / "python.exe"
         if bundled.is_file() and bundled.stat().st_size > 10_000:  # the installer carries a Python with mcp: it is the one to write, and it writes no .pyc into the install folder

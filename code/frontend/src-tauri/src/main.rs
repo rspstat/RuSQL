@@ -1289,30 +1289,53 @@ fn setup_mcp_config(host: String, port: u16, user: String, password: String) -> 
         ]
     });
 
+    // 쓴 설정 파일(경로)과 쓰지 못한 곳(경로 + 이유)을 모아 결과 글에 그대로 보여 준다 -- 어느 파일에 들어갔는지 모르면 안 될 때 원인을 찾을 수 없다
+    let mut written: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut write_checked = |config_path: std::path::PathBuf| {
+        let result = write_mcp_into(&config_path, &mcp_entry).and_then(|_| {
+            // 다시 읽어 RuSQL 항목이 정말 들어갔는지 확인
+            let back = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+            let json: serde_json::Value = serde_json::from_str(&back).map_err(|e| e.to_string())?;
+            if json["mcpServers"]["RuSQL"]["command"] == mcp_entry["command"] { Ok(()) } else { Err("쓴 뒤 다시 읽었더니 RuSQL 항목이 없습니다".to_string()) }
+        });
+        match result {
+            Ok(()) => written.push(config_path.display().to_string()),
+            Err(e) => failed.push(format!("{} ({})", config_path.display(), e)),
+        }
+    };
+
     // 1. 일반 설치 버전 경로
     let appdata = std::env::var("APPDATA")
         .map_err(|_| "APPDATA 환경변수를 찾을 수 없습니다.".to_string())?;
     let real_dir = std::path::Path::new(&appdata).join("Claude");
     std::fs::create_dir_all(&real_dir).map_err(|e| e.to_string())?;
-    write_mcp_into(&real_dir.join("claude_desktop_config.json"), &mcp_entry)?;
+    write_checked(real_dir.join("claude_desktop_config.json"));
 
-    // 2. Windows Store 버전 가상화 경로 (있으면 추가로 씀)
+    // 2. Windows Store 버전 가상화 경로: Store판 Claude가 깔려 있으면(Packages\Claude_*) 그 설정 폴더에도 쓴다. 한 번도 실행하지 않아 폴더가 아직 없으면 만든다.
     if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
         let packages = std::path::Path::new(&localappdata).join("Packages");
         if let Ok(entries) = std::fs::read_dir(&packages) {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with("Claude_") {
-                    let store_dir = entry.path()
-                        .join("LocalCache").join("Roaming").join("Claude");
-                    if store_dir.exists() {
-                        let _ = write_mcp_into(&store_dir.join("claude_desktop_config.json"), &mcp_entry);
+                    let store_dir = entry.path().join("LocalCache").join("Roaming").join("Claude");
+                    if std::fs::create_dir_all(&store_dir).is_ok() {
+                        write_checked(store_dir.join("claude_desktop_config.json"));
                     }
                 }
             }
         }
     }
 
-    Ok(format!("연결 완료! Claude Desktop을 재시작하세요.\n\nPython: {}", python_path))
+    if written.is_empty() {
+        return Err(format!("Claude Desktop 설정 파일에 쓰지 못했습니다:\n{}", failed.join("\n")));
+    }
+    let mut message = format!("연결 완료!\n\nPython: {}\n\n등록한 설정 파일:\n{}", python_path, written.iter().map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n"));
+    if !failed.is_empty() {
+        message.push_str(&format!("\n\n쓰지 못한 곳:\n{}", failed.iter().map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n")));
+    }
+    message.push_str("\n\nClaude Desktop을 완전히 종료한 뒤 다시 실행하세요. 창을 닫기만 하면 작업 표시줄 오른쪽 아래(숨겨진 아이콘)에 계속 떠 있어 설정을 다시 읽지 않습니다: 그 아이콘을 우클릭 → Quit.\n다시 실행한 뒤 Claude의 설정 → 개발자에서 RuSQL이 running으로 보이면 연결된 것입니다.");
+    Ok(message)
 }
 
 // ─── 생태계 보기: 저장된 모든 연결의 데이터 폴더를 디스크에서 읽는다 ─────────────────────────

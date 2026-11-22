@@ -358,7 +358,7 @@ function DiagramBody({ lang, choose, view, chooseView }: {
             <div className="dg-controls">
               <div className="dg-seg" role="group" aria-label="Language">
                 <button className={lang === "en" ? "active" : ""} aria-pressed={lang === "en"} onClick={() => choose("en")}>EN</button>
-                <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => choose("ko")}>한국어</button>
+                <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => choose("ko")}>KR</button>
               </div>
               <div className="dg-seg dg-seg-icons" role="group" aria-label={t(L("View", "보기"))}>
                 <button className={view === "cylinders" ? "active" : ""} aria-pressed={view === "cylinders"} title={cylindersLabel} aria-label={cylindersLabel}

@@ -153,11 +153,11 @@ def main() -> int:
             step("17", lambda: panel("CLI Guide", "17_CLI접속안내.png", "document.querySelector('.srv-slide-panel') !== null"))
 
             def page_view(title: str, name: str, pause: float, stop_at=None):
-                # (the documents are in Korean: the page is switched to 한국어; a scripted page is moved to step `stop_at` (negative: from the end) and plays on from there)
+                # (the documents are in Korean: the page is switched to KR (Korean); a scripted page is moved to step `stop_at` (negative: from the end) and plays on from there)
                 def run():
                     page.click(f'[title="{title}"]')
                     time.sleep(pause)
-                    page.eval("(() => { const b = [...document.querySelectorAll('button')].find(x => x.innerText.trim() === '한국어'); if (b && b.getAttribute('aria-pressed') !== 'true') b.click(); })()")
+                    page.eval("(() => { const b = [...document.querySelectorAll('button')].find(x => x.innerText.trim() === 'KR'); if (b && b.getAttribute('aria-pressed') !== 'true') b.click(); })()")
                     time.sleep(0.8)
                     if stop_at is not None:
                         page.eval(f"""(() => {{ const t = [...document.querySelectorAll('.pk-track i')]; const i = {stop_at} < 0 ? t.length + {stop_at} : {stop_at}; t[i].click();

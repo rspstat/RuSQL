@@ -27,7 +27,7 @@ export function PageHero({ accent, icon, title, lead, lang, onLang, children }: 
         </div>
         <div className="pk-seg" role="group" aria-label="Language">
           <button className={lang === "en" ? "active" : ""} aria-pressed={lang === "en"} onClick={() => onLang("en")}>EN</button>
-          <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => onLang("ko")}>한국어</button>
+          <button className={lang === "ko" ? "active" : ""} aria-pressed={lang === "ko"} onClick={() => onLang("ko")}>KR</button>
         </div>
       </div>
       {children}
