@@ -1,7 +1,7 @@
 // DiagramView.tsx
 // "Diagram" activity-bar page: one picture of the whole system -- who talks to RuSQL, the
 // path a SQL statement takes through engine_server -> engine_core -> transactions ->
-// storage -> durability, and where AI fits (Claude via MCP; no private NL-to-SQL model, see
+// storage -> durability, and where AI fits (Claude via MCP, see
 // docs/mds/AI.md). Content mirrors README.md "Architecture" and docs/mds (FUNCTIONS.md).
 // Every visible string is an English/Korean pair; the EN/KO
 // toggle at the top switches them all at once and is remembered across visits. A second
@@ -180,8 +180,8 @@ const AI: Item[] = [
     ),
   },
   {
-    t: L("No private model", "사설 모델 없음"),
-    s: L("a small NL-to-SQL model would duplicate MCP, so RuSQL has none", "소형 NL→SQL 모델은 MCP와 중복이라 두지 않음"),
+    t: L("No API key needed", "API 키 불필요"),
+    s: L("reasoning runs in Claude Desktop, so RuSQL needs no AI key", "추론은 Claude Desktop이 맡으므로 RuSQL에는 AI 키를 설정할 필요가 없음"),
   },
 ];
 
