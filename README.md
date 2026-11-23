@@ -70,7 +70,7 @@ ctest --test-dir code/build/backend --output-on-failure      # the whole engine 
 cd code/frontend && npm ci && npm run tauri build            # -> src-tauri/target/release/bundle/dmg/RuSQL_<version>_<arch>.dmg
 ```
 
-`.github/workflows/macos.yml` does this on GitHub's macOS (Apple Silicon and Intel) and Linux machines and then runs `code/test/mac/smoke_bundle.py` against the installed app (engine, MySQL handshake, bundled Python, the 37 MCP tools). The first `npm run tauri build` on a Mac downloads a relocatable Python (python-build-standalone, checked against a pinned SHA-256) and installs `mcp` into it.
+`.github/workflows/macos.yml` does this on GitHub's macOS (Apple Silicon and Intel) and Linux machines and then runs `code/test/mac/smoke_bundle.py` against the installed app (engine, MySQL handshake, bundled Python, the 37 MCP tools). Nobody has clicked through the macOS app by hand yet: the checks above and the screenshots are all that was run on those machines, so the dialogs, the editor, the keyboard shortcuts and the Claude Desktop connection on a Mac are still untested. The first `npm run tauri build` on a Mac downloads a relocatable Python (python-build-standalone, checked against a pinned SHA-256) and installs `mcp` into it.
 
 The MCP server needs no Python on the PC: the install folder has its own (`python/`, with the `mcp` package). The Server Manager's **MCP Agent** panel connects it to Claude Desktop in two ways (use one of them; both together register RuSQL twice):
 

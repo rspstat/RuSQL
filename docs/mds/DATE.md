@@ -3890,6 +3890,35 @@ READ COMMITTED는 어느 쪽이든 최신을 읽으므로 차이가 없다.
 - **방법과 검증**: 사용자가 한글에서 손본 v29를 제자리에서 고쳤다(XML의 글자만; 고친 문단의 줄 배치 정보만 지움, 다시 만들지 않음). 처음 문구로는 표 4-1의 칸이 2줄에서 4줄로 늘어 "그림 4-1" 캡션이 24쪽으로 밀려서 칸을 3줄 안으로 줄였다. 한글로 열어 PDF로 만들어 전과 견줬다 — v30 **48쪽** · D06 **25쪽**(그대로), 글이 달라진 쪽은 의도한 7쪽(1 · 4 · 17 · 18 · 20 · 22 · 23)뿐이고 쪽 끝선이 바뀐 곳은 18쪽 하나(여유 안에서 2줄). zip 항목은 v30에서 4개(`section0.xml` · `image12.png` · `PrvText.txt` · `content.hpf`), D06에서 1개(`rusql12.png`)만 바뀌었다.
 - **그대로 둔 것**: D06의 "AI MCP 패널에서 Claude Desktop 연결을 자동으로 구성한다"(아직 맞는 문장) · 앱 홈 화면의 "built-in AI assistant" 문장 · 제/개정 이력 표(D03 · D04는 이번에 고치지 않음) · 옛 기록(이 문서의 지난 항목, `RECOMMAND.md` 5-1, `SUMMARY.md`)에 적힌 "v29".
 
+### 11월 23일 (네 번째) — macOS(Apple Silicon · Intel) 지원 (전시 하루 전, 사용자 "mac에서도 릴리즈된 설치 파일을 실행하고, windows에서 처럼 똑같이 사용할 수 있도록 하는 것을 목표로 합니다")
+
+팀원이 Mac을 쓰고 이 PC에는 Mac이 없다. 사용자가 정한 틀: 코드 작성에만 집중 · 버전은 **v2.3.0 고정**(문서의 버전도 그대로) · 문서 갱신 · Windows가 망가지지 않았는지 시험 · Mac에서 잘 돌지는 예상 점검 · 끝나면 커밋&푸시 · 릴리즈 · 태그 이동. 작업은 `mac-port` 가지에서 하고 끝에 `main`에 합쳤다.
+
+**Windows에만 묶여 있던 곳과 바꾼 것**
+- **엔진 네트워크**(`net_compat.hpp` 새 파일): Winsock 호출을 `SOCKET`·`INVALID_SOCKET`·`close_socket` 같은 얇은 껍데기 뒤로 옮겼다. Windows 쪽 호출은 그대로이고 POSIX 쪽만 새로 만들었다(`SIGPIPE` 무시, `accept` 재시도). 연결 스레드는 Mac의 보조 스레드 기본 스택이 512 KB라 `pthread`로 8 MB를 주고 띄운다.
+- **MSVC 전용 CRT 호출**(`platform_compat.hpp`) · **`std::from_chars(double)`**(`float_chars.hpp`, 없는 표준 라이브러리에서는 대체 구현) · 서버·클라이언트·CLI의 `main`(종료 신호 처리). `std::to_chars(double)`은 macOS 13.3부터 있어 배포 최소 버전을 **macOS 13.3**으로 잡았다.
+- **앱(Tauri)**: `main.rs`의 경로·프로세스 분기, WKWebView에 없는 기능을 Rust 명령으로 대체(`save_download` = 저장 대화상자 · `native_confirm` · `native_alert` = osascript, `<a download>`와 JS `confirm/alert`이 안 되므로), Gatekeeper 격리 상태에서 실행되면 안내하고 끝내는 `refuse_translocated`, `tauri.macos.conf.json`(`.app` + `.dmg`, 라이선스 창 없음, 최소 13.3, ad-hoc 서명), 엔진 · Python 3.12(python-build-standalone, SHA-256 고정) · MCP를 `Contents/Resources`에 넣는 `stage-engine.mjs` · `stage-python.mjs`, 글꼴 Menlo, `platform.ts`(⌘ 단축키 표시).
+- **MCP**(`mcp_server.py`): `launch_app`이 macOS에서 `open -n`으로 앱을 연다.
+- **CI**(`.github/workflows/macos.yml`): Apple Silicon(`macos-15`) · Intel(`macos-15-intel`) · `ubuntu-24.04`에서 엔진을 빌드해 시험을 돌리고, 두 Mac 종류로 `.dmg`를 만들어 설치 · 실행 · 화면 캡처까지 한다(공개 저장소라 무료 러너).
+
+**실제로 찾은 문제 (코드에서 고친 것)**
+1. **`parallel_sort`가 macOS에서 멈춤**: KILL·시간 제한이 걸리면 비교 함수가 모든 쌍을 "같다"고 답하게 했는데, MSVC · libstdc++의 `std::sort`는 그래도 끝나지만 **libc++(macOS)** 는 "더 작은 원소에서 멈춘다"는 가정으로 돌아 정렬 구간 밖까지 읽는다 — 시험이 영원히 멈췄다. 이제 중단되면 조각 안에서만 잡는 전용 예외를 던져 정렬을 빠져나온다(남은 것은 문장과 함께 버려짐). 세 환경 모두에서 확인.
+2. `PAGE_SIZE`가 POSIX 헤더의 매크로와 겹침 → `PAGE_BYTES`.
+3. 연결 스레드 스택 512 KB(위).
+4. 시간·크기 한계를 재는 시험 3개가 Linux 러너에서 Windows와 다른 속도로 어긋남 → 비 Windows에서만 한계를 조정.
+5. `.dmg` 라이선스 동의 창이 `hdiutil attach`를 막음 → 라이선스 창을 뺌.
+6. `std::to_chars(double)` 최소 버전(위).
+
+**시험 (수치)**
+- **엔진 시험 전체**: Windows(최종 코드) **1,065 케이스 · 1,527,506 검증 모두 통과**(300초) · CI의 Apple Silicon · Intel · Ubuntu 세 곳에서도 같은 시험이 모두 통과(마지막 CI 실행 `45084907418`, 커밋 `22f4fe9`, 5개 작업 모두 성공).
+- **Mac 앱 번들**: CI에서 `.dmg`를 열어 앱을 복사 · 실행하고 `code/test/mac/smoke_bundle.py`로 16/16(번들 파일 존재 · 엔진 두 포트 접속과 MySQL 핸드셰이크 · 번들 Python이 `mcp`를 불러옴 · MCP 서버가 도구 37개와 읽기 전용 16개를 알림 · `execute_sql`·`list_databases`·`health_report` 응답 · 데이터 폴더에 파일이 써짐 · 번들에 `.pyc`가 안 생김 · 종료 신호에 엔진이 멈춤), 앱 화면 캡처도 두 CPU 모두 확인.
+- **Windows가 망가지지 않았는지**: 엔진 시험(위) · MySQL 8.4.9와의 응답 비교(말뭉치 8개 + `two_sessions.py`, 차이 0 — 이 비교는 마지막 `parallel_sort` 수정 직전 빌드로 돌렸고, 수정 뒤에는 엔진 시험 전체를 다시 돌림) · **최종 코드로 설치 파일을 다시 만들어**(`RuSQL_2.3.0_x64-setup.exe`, 26,985,162 B) 풀어서 설치 폴더 시험 `test_installed_layout.py` 22개 · `test_mcpb.py` 20개 · `test_mcp_autoconnect.py` 14개(둘 다 `--no-system-python`으로도 통과) · 화면 시험 `test_screens.py` 14개 · Rust 단위 시험 11개 · `test_libs.mjs` 35개 · `tsc --noEmit` · MCP 서버 단위 시험 57개가 모두 통과(실패 0).
+- 로컬에서는 MSYS2 gcc(POSIX 환경)로도 같은 코드를 컴파일해 엔진 시험을 돌려 Linux 계열 오류를 미리 잡았다.
+
+**한계 (확인하지 못한 것)**: 실제 Mac에서 사람이 눌러 본 적은 **없다**. 로그인 · 편집기 · "Finder에서 보기" · osascript 대화상자 · ⌘ 단축키 · 저장 대화상자 · Claude Desktop(Mac)의 확장 연결 · Mac에서의 성능은 CI의 자동 확인(번들 실행 · 16개 검사 · 화면 캡처) 밖이다. 앱은 **ad-hoc 서명**이라 처음 열 때 Gatekeeper가 막으면 "시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기"(또는 `xattr -dr com.apple.quarantine`)가 필요하다. 최소 macOS 13.3. Mac용 설치 파일은 Apple Silicon(`aarch64`)과 Intel(`x64`) 두 개다.
+
+**문서**: README(macOS 절) · `instructions.md` 7절 · `FUNCTIONS.md` · `AI.md`와 HWPX **D01**(비기능 요구 NFR-014 · 3쪽) · **D08**(7쪽) · 통합 문서 **v30**(48쪽 그대로)을 제자리에서 고쳤다(한글로 열어 PDF로 견줘 쪽수와 바뀐 쪽 확인). D02~D07은 건드리지 않았다. 사용자가 `docs/deliverables/…/sub/`에서 지운 파일 4개는 커밋하지 않았다.
+
 ## 요약: 1학기 대비 2학기에 달라진 것
 
 
