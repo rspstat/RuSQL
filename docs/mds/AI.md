@@ -1,118 +1,32 @@
-# RuSQL — AI 방향 논의 (졸업작품 캡스톤)
+# AI 연동 — Claude Desktop + MCP
 
-> 이 문서는 RuSQL을 활용한 AI 관련 캡스톤 작업 방향을 논의한 기록이다. **2026-09-21 기준 AI 트랙
-> 최종 스코프가 확정되었음** (아래 "현재 상태" 참고) — 세션이 재개될 때마다 그래도 "현재 상태"부터
-> 다시 확인할 것(그 이후 사용자가 마음을 바꿨을 수 있음). 2026-09-07엔 로컬 추론 배포까지 계획했었으나
-> 2026-09-21에 철회하고 데이터 생성+파인튜닝+평가까지로 스코프를 좁혔다 — 아래 "로컬 추론 배포 계획
-> 철회" 참고.
->
-> **2026-10-01 최종 결정 — 사설 AI(NL→SQL 파인튜닝 모델)는 RuSQL의 제품 기능에서 제외한다.**
-> 자연어→SQL은 Claude + MCP 하나로 일원화한다. 아래 본문(특히 "파인튜닝 방향 확정"·"현재 상태")은
-> 당시 결정의 기록으로 남겨두되 이 결정으로 **대체(superseded)** 되었다 — 맨 아래 "최종 결정
-> (2026-10-01)" 절이 현재 유효한 내용이다.
+RuSQL의 AI 기능은 Claude Desktop을 MCP(Model Context Protocol)로 연결해 제공한다. 사용자가 자연어로 말하면 Claude가 SQL을 만들고, RuSQL의 AI MCP 도구가 그것을 실행하거나 관리 도구의 화면을 조작한다. AI 추론은 Claude Desktop이 맡으므로 RuSQL에는 API 키가 필요 없다.
 
-## 배경
+## 구조
 
-- RuSQL은 사용자의 **대학 졸업작품(졸업작품)**이다. 마감은 2026-08-24 기준 약 3개월 후(2026년 11월 말경).
-- 사용자의 개인적 목표는 **AI 모델을 직접 만들어보는 경험**이다 — API 호출로 기존 모델을 소비하는 것이 아니라, 실제로 학습시키는 경험을 원한다("AI 모델을 만드는 경험을 하고 싶어서"). 따라서 "ChatGPT/Claude API를 붙이자" 같은 제안은 이 목표를 만족시키지 못한다.
-- 이와 별개로, 이미 순수 엔진 고도화 작업(SSI predicate lock 완성, MCV 카디널리티 추정 등)은 진행·완료되었다 — 아래 "AI 방향과는 별개로 진행된 엔진 작업" 참고. **이 두 트랙은 서로 다른 결정이다**: 엔진을 고도화했다고 해서 AI 방향 결정이 끝난 것은 아니다.
+```
+Claude Desktop ⇄ stdio (JSON-RPC) ⇄ rusql-mcp (Python · FastMCP) ⇄ TCP 7878 ⇄ engine_server
+                                      └ ui_commands.json + Tauri 이벤트 ⇄ 관리 도구(rusql-ui)
+```
 
-## 검토했던 후보 3가지
+## AI MCP 도구
 
-### 1. 학습형 쿼리 옵티마이저 (Learned Query Optimizer)
-RuSQL의 플래너 카디널리티 추정(현재는 히스토그램/MCV 같은 고전적 통계 기반)을 실제로 학습된 작은 모델(회귀/GBM부터 시작, 반드시 딥러닝일 필요는 없음)로 교체·보강.
+도구는 다섯 묶음이다: SQL 실행·CSV(`execute_sql` · `run_script` · `import_csv` · `export_csv`), 조회·진단(스키마, 실행 계획, 인덱스 제안, 락, 느린 쿼리, 세션 종료, 스키마 비교 등), 연결 관리, 편집기 제어(탭 만들기·전환·쿼리 실행), 서버·앱 제어. 그 밖에 resources 2개와 prompts 3개가 있다. 데이터베이스 · 연결 목록 · 앱을 바꾸지 않는 도구에는 MCP `readOnlyHint`를 붙였다.
 
-- **장점**: "AI 모델을 직접 학습시키는 경험"과 "엔진 자체 개선"이 정확히 같은 작업이 됨 — 기존 플래너/실행기 투자를 그대로 재사용. 학습 데이터도 RuSQL 자체의 쿼리 실행(예측 대비 실제 카디널리티)에서 공짜로 나옴 — 외부 데이터셋을 구하거나 큐레이션할 필요가 없음. 학계에도 실제 근거 있음(learned query optimization/learned index가 활발한 DB 시스템 연구 분야, 예: Kraska et al.).
-- **단점**: GPU 없이도 가능(작은 회귀/GBM은 CPU로 충분)하지만, 그만큼 "AI 만들었다"는 느낌이 상대적으로 약할 수 있음.
-- 러프한 기간 추정: 계측/데이터 수집 ~3-4주, 모델 학습/반복 ~2-3주, 엔진 통합 ~3-4주, 나머지는 버퍼 — 3개월 안에 여유 있게 들어감.
+## 안전장치
 
-### 2. 처음부터 만드는 미니 신경망 (예: MNIST 스타일 분류기) + RuSQL을 실험 추적 저장소로 사용
-RuSQL 자체는 AI 모델의 일부가 아니라, 학습 실험의 메트릭(epoch/loss/accuracy 등)을 기록하는 데이터스토어 역할.
+- DROP · TRUNCATE · WHERE 없는 UPDATE/DELETE는 `confirm_dangerous_sql`로 확인하기 전에는 거절한다.
+- `run_script`는 영향받는 행을 미리 보여 주고 `commit=True`일 때만 저장한다.
+- `kill_session`은 먼저 묻고 끊고, `suggest_indexes`는 UPDATE · DELETE를 실행하지 않고 추정으로만 시험한다.
 
-- **장점**: 난이도가 가장 낮음 — 공개 데이터셋(MNIST 등)을 쓰므로 "데이터를 어디서 구하나" 문제가 이미 해결돼 있음.
-- **단점**: RuSQL과의 연결이 얕음(로깅 싱크 역할일 뿐) — "학습 메커니즘"은 배우지만 "데이터 엔지니어링"은 덜 배움.
+## 연결 방식 (2026-11-23)
 
-### 3. NL→SQL 파인튜닝
-작은 오픈소스 모델을 RuSQL 자체의 스키마/쿼리 로그로 파인튜닝해 자연어→SQL 번역 기능 구현.
+Claude Desktop이 RuSQL MCP 서버를 쓰는 길은 둘이다 — 앱 MCP Agent 패널의 **Add to Claude Desktop (extension)**(`RuSQL.mcpb` 확장을 만들어 탐색기로 보여 주고 사용자가 Claude Desktop에 넣음; 새로 설치한 Microsoft Store판이 설정 파일을 읽지 않는 문제를 피함)와 **Auto-connect Claude Desktop (config file)**(`claude_desktop_config.json`에 씀). 둘 중 하나만 쓴다 — 확장 단추는 설정 파일의 RuSQL 항목을 지우고, 설정 파일 단추는 확장이 있으면 경고한다. 데이터베이스 · 연결 목록 · 앱을 바꾸지 않는 도구에는 MCP `readOnlyHint`를 붙였다(Claude Desktop이 "읽기 전용"으로 묶으면 한 번에 허용할 수 있다; Claude 화면의 실제 동작은 확인하지 못함).
 
-- **장점**: 이 세션 초반에 만든 사이드바의 **빈 "AI 탭" 플레이스홀더**가 정확히 이 기능의 자리 — UI까지 통합된 완결된 데모가 가능("직접 만든 RDBMS + 그 스키마 전용으로 직접 파인튜닝한 모델 + UI 통합").
-- **단점(원래)**: 세 옵션 중 데이터가 가장 부족한 옵션 — {질문, SQL} 쌍을 합성 데이터로 만들어야 하고(스키마 변형 + 질문 패러프레이징), 파인튜닝 자체도 GPU가 필요.
-- **업데이트 (2026-08-26)**: 사용자가 **Colab Pro를 보유** — GPU 접근(작은 1B~3B급 모델의 LoRA/QLoRA 파인튜닝에 충분) 문제가 해결됨. 데이터 생성도 RuSQL의 스키마/문법 기준으로 Claude가 직접 도울 수 있는 영역이라 원래 평가보다 부담이 줄었음. **이 시점 기준으로 세 옵션 중 가장 유력한 후보로 재평가됨.**
+## macOS에서 (2026-11-23)
 
-## 사용자가 명시적으로 제외한 것
+같은 두 단추가 맥에서도 돈다. 확장 단추는 `~/Library/Application Support/RuSQL/RuSQL.mcpb`를 만들어 Finder(`open -R`)로 보여 주고(manifest의 플랫폼은 `darwin`, Python은 `RuSQL.app/Contents/Resources/python/bin/python3`), 설정 파일 단추는 `~/Library/Application Support/Claude/claude_desktop_config.json`에 쓴다(Store판 경로는 Windows에만 있다); Claude Desktop은 ⌘Q로 완전히 종료한다. 앱이 `.dmg`나 다운로드 폴더에서 바로 열려 임시 위치(`/AppTranslocation/`)에서 돌면 그 경로가 곧 사라지므로 두 단추가 거절한다 — 응용 프로그램 폴더로 옮겨 다시 실행한다. `launch_app`은 앱 꾸러미 안의 실행 파일 경로를 받으면 `open -n`으로 연다. 번들 Python + MCP 서버 + 엔진은 설치한 `.dmg` 앱에서 Actions가 확인한다(`code/test/mac/smoke_bundle.py`: 도구 목록 · 읽기 전용 표시 · SQL 실행). Mac의 Claude Desktop 자체(확장 설치 창)는 확인하지 못했다.
 
-- **로컬/자체호스팅 LLM을 C++ 엔진에 직접 임베딩**하는 것 — "가벼운 커스텀 RDBMS"라는 프로젝트 정체성과 안 맞음(수 GB 모델 가중치가 무거움).
-- API 호출로 기존 모델 소비하는 방향 전반 — 목표(직접 만드는 경험) 자체를 만족 못 시킴.
+## 반영 위치
 
-## AI 방향과는 별개로 진행된 엔진 작업 (2026-08-26)
-
-캡스톤의 AI 센터피스 결정과는 무관하게, "엔진 측에서 강화할 수 있는 것"을 별도로 요청받아 진행:
-
-- **SSI predicate lock 완성**: 잠금 없는 일반 SELECT의 phantom 탐지 갭을 PostgreSQL SIREAD 스타일 non-blocking 메커니즘으로 마무리. 상세는 `FUNCTIONS.md`의 "Predicate Lock" 항목 참고.
-- **MCV(최빈값) 카디널리티 추정**: 플래너의 등호 조회 selectivity를 히스토그램 평균 대신 최빈값 정확한 카운트로 개선. 상세는 `FUNCTIONS.md`의 "MCV" 항목 참고.
-
-XA 분산 트랜잭션과 샤딩은 여전히 스코프 밖(단일 프로세스 엔진이라는 정체성과 안 맞고, AI 학습 경험에도 기여하지 않음).
-
-## 현재 상태 (2026-09-21 기준 — AI 트랙 최종 스코프 확정 → 2026-10-01에 맨 아래 "최종 결정"으로 대체됨)
-
-**AI 트랙의 최종 결과물은 "합성 데이터 생성 → LoRA 파인튜닝 → held-out 평가(93.7%)"까지이며, 로컬 추론을 RuSQL 앱에 배포하는 것은 하지 않는다.**
-
-### 파인튜닝 방향 확정 (2026-09-07)
-
-**③ NL→SQL 파인튜닝으로 확정.** 결정 과정(2026-09-07 세션):
-
-- 남은 기간 재점검: 마감(~2026-11-24)까지 약 11주. ①번(학습형 옵티마이저)의 원래 추정(계측 3-4주+학습 2-3주+통합 3-4주 = 8-11주)은 이제 버퍼가 거의 없어 리스크가 큼. ③번은 4-6주 추정으로 버퍼가 충분함.
-- MCP 연동과의 관계: RuSQL은 이미 MCP 서버로 Claude Desktop 같은 외부 LLM이 자연어로 DB를 조작할 수 있게 해준다(기능적으로는 "자연어→SQL"이 이미 동작함). 사용자가 "이미 되는데 굳이 또 만들 필요가 있나?"라고 재확인 질문 — 답은: MCP 연동은 "기존 모델을 API로 소비"하는 것이라 이 프로젝트가 처음부터 배제한 것과 정확히 같은 범주이고, **AI/ML을 직접 다뤄본 기술적 깊이를 보여주는 것**이 캡스톤 심사 기준에 더 부합한다고 판단해 파인튜닝 쪽으로 재확인함(MCP 연동은 그대로 유지 — "기존 모델 연동 + 직접 학습시킨 전용 모델" 둘 다 있는 게 더 강한 이야기). 이 판단(파인튜닝 자체를 하는 것)은 유효하며 철회되지 않았음 — 아래에서 철회된 것은 그 결과물을 **앱에 배포하는 것**뿐임. **[2026-10-01 번복: 이 판단도 철회됨 — 맨 아래 "최종 결정" 참고]**
-
-### 로컬 추론 배포 계획 철회 (2026-09-21)
-
-2026-09-07 세션에서는 배포 아키텍처까지 확정했었다: 로컬 추론, GPU 있으면 가속·없으면 CPU 폴백(1~3B 모델을 int4 양자화(GGUF) + `llama.cpp` 스타일 CPU 추론 런타임을 Tauri 앱에 내장, 최종 릴리즈에 모델 가중치를 설치 파일에 번들해 완전 오프라인 동작). 사용자의 실제 GPU는 RTX 2070 Super.
-
-이 계획을 2026-09-21에 재검토 후 철회. 철회 사유:
-- 캡스톤 심사(교수님)는 AI 모델 자체보다 **RDBMS 자체의 성능·기능 완성도**를 더 중요하게 볼 것이라는 사용자의 판단. RuSQL은 이미 `DIFF.md` 기준 MySQL/PostgreSQL/Oracle 대비 18개 카테고리 비교표와 실측 벤치마크(인덱스 조회가 풀스캔 대비 45.8배 등)를 갖춘 상태라, 남은 기간을 이 방향에 쓰는 쪽이 기대값이 높다고 판단.
-- MCP 서버가 이미 Claude Desktop 등 외부 LLM을 통해 자연어 조작 + UI 제어(에디터에 쓰기/탭 조작/쿼리 실행, 2026-09-19 완료)까지 지원하므로, 로컬 추론을 앱에 추가로 배포해도 실사용 관점에서 새로 얻는 가치가 크지 않다고 판단.
-- held-out 평가 93.7%는 최상 조건(학습에 전혀 안 쓰인 스키마 기준) 수치이고, 한국어 실패율(12.0%)이 영어(0.7%)보다 훨씬 높음 — 발표 현장에서 즉석 질문에 소형 양자화 모델이 틀린 SQL을 낼 라이브 데모 리스크가 있어, RDBMS 자체 데모보다 오히려 역효과일 수 있다고 판단.
-
-결론: 남은 개발 기간은 로컬 추론 배포 대신 RDBMS 견고화·벤치마크·데모 준비 쪽으로 재배분한다. GGUF 변환/런타임 임베딩/`AiView.tsx` 연결 등 배포 관련 세부 계획은 전부 폐기.
-
-### 완료된 작업
-1. ~~베이스 모델 선택~~ **완료 (2026-09-07)**: Qwen2.5-Coder-1.5B-Instruct 확정(Apache 2.0 라이선스, 코드/SQL 특화 사전학습, CPU 추론에 적합한 크기, Instruct 변형이라 LoRA는 도메인 특화만 추가하면 됨). Qwen2.5-Coder-3B-Instruct는 이후 품질 비교용 후보로 남겨둠.
-2. ~~데이터 생성 설계~~ **완료 (2026-09-12, 확장판)**: `archive/AI/data_generation/`에 합성 데이터 생성 파이프라인 구현 완료.
-   - 스키마 20개(도메인당 3~4 테이블, FK 포함) — `schemas.py`. 그중 3개(`real_estate`, `airline`, `insurance`)는 학습에서 완전히 제외하고 test 셋 전용(일반화 검증용 held-out 스키마). 최초 17개에서 `coffee_shop`/`veterinary_clinic`/`conference` 3개를 학습 도메인으로 추가.
-   - 쿼리 의도(intent) 16종 — `templates.py`: 전체 조회, 텍스트/enum 등호 필터, 숫자 비교 필터, 정렬+LIMIT, 전체 개수, 필터 후 개수, 숫자 집계(SUM/AVG/MAX/MIN), GROUP BY 집계, JOIN+필터, JOIN+GROUP BY 개수, LIKE 패턴 검색, 다중 AND 조건, IS NULL/IS NOT NULL, DISTINCT, BETWEEN 범위, LIMIT 없는 ORDER BY. 최초 10종에서 6종 추가.
-   - 한국어 조사(이/가, 은/는, 을/를, 과/와, 으로/로) 배치침 기반 자동 선택 — `korean.py`. 영어 테이블 라벨의 단/복수 자동 변환 — `term_dict.py`의 `pluralize_en`/`label_en_plural`.
-   - 한/영 이중언어, 스키마 조건부(프롬프트에 대상 스키마 DDL 포함) 질문-SQL 쌍 생성 — `generate.py`.
-   - 생성 결과(시드 42, 아래 품질 버그 수정 후 재생성된 최종본 — 현재 `archive/AI/data_generation/dataset/`에 커밋된 실제 파일 기준): train 2993행/val 157행(17개 학습 도메인) + test 568행(held-out 3개 도메인) = 총 3718행. 목표치(3000~6000행) 달성. (최초 생성 시점엔 test 572행/총 3722행으로 기록됐었으나, 아래 3가지 버그 수정 후 재생성되며 568/3718로 바뀜 — 정확한 변동 원인은 별도 확인 안 함.)
-   - **1차 생성 후 발견 및 수정한 품질 버그** (실제 생성물을 `Read` 도구로 직접 읽어 검증하며 발견 — 터미널 출력이 아니라 파일 자체를 확인):
-     1. 68개 테이블/컬럼 식별자가 `term_dict.py`의 한/영 용어 사전에 아예 없어서 한글 문장에 영어 원문이 그대로 섞여 나옴(예: "총액이 50보다 큰 **orders**를 보여줘") — 스키마 전체를 스캔해 누락된 식별자를 모두 사전에 추가.
-     2. 영어 문장이 단수 라벨을 복수 문맥에 그대로 써서 문법 오류(예: "Which customer have..." → "customers"가 맞음) — `pluralize_en()` 추가, 바른 문맥에만 적용(고정 관사/every 등은 단수 유지).
-     3. 한국어 조사가 여러 곳에서 받침 여부와 무관하게 하드코딩(예: "티켓를", "이름가", "주행거리으로") — 전부 `i_ga`/`eul_reul`/`ro_euro` 헬퍼 호출로 교체.
-     4. DISTINCT 질문에서 컬럼 라벨에 이미 포함된 단어가 중복 출력(예: "회원권 종류 **종류**를"). — 문구를 재구성해 중복 제거.
-   - 수정 후 재검증: 여러 랜덤 샘플을 `Read` 도구로 직접 재확인해 한/영 문장 품질 이상 없음 확인.
-3. Colab Pro에서 LoRA/QLoRA 파인튜닝. **완료 (2026-09-18) — 실제 학습·평가 성공.**
-   - `archive/AI/finetuning/rusql_nl2sql_finetune.ipynb`: 의존성 설치 → Drive 마운트 → 설정값 → 공유 프롬프트 포맷 → Qwen2.5-Coder-1.5B-Instruct 로드+LoRA 부착 → 데이터셋 로드/포맷팅 → trl `SFTTrainer`로 학습 → held-out test 셋(`real_estate`/`airline`/`insurance`) 평가, 순서. 데이터셋은 `archive/AI/data_generation/dataset/`에서 Google Drive(`MyDrive/projects/RuSQL/dataset/`)로 한 번 업로드해두면 런타임 리셋에도 안전. 어댑터도 Drive(`MyDrive/projects/RuSQL/rusql-nl2sql-lora`)에 저장.
-   - **실행 중 겪은 문제와 수정**: (1) `bitsandbytes` 4bit 양자화가 `transformers==4.46.3`과 버전 불일치 → `0.44.1`→`0.46.1`로 상향. (2) T4(16GB)에서 배치 크기 8 + max_seq_len 1024로 학습 시 CUDA OOM(Qwen2.5 vocab이 커서 loss 계산의 logits 텐서가 큼) → `BATCH_SIZE` 8→2 + `GRAD_ACCUM` 2→8(실효 배치 동일), `MAX_SEQ_LEN` 1024→512, `gradient_checkpointing=True`+`model.enable_input_require_grads()` 추가로 해결.
-   - **1차 학습 결과**: held-out(학습에 전혀 안 쓰인 3개 스키마) 572문항 기준 **정확 일치 87.9%**. 실패 케이스를 도메인별/언어별로 쪼개 분석한 결과(영어 실패율 2.8% vs 한국어 21.7%로 큰 격차) 실패의 상당수가 모델 문제가 아니라 **데이터 생성기 자체의 모호성 버그**였음을 발견 — (a) `term_dict.py`에서 `property`/`listing`(real_estate)이 완전히 같은 한글 라벨("매물")을 공유해 질문 자체가 구분 불가능했음(→ `listing`에 "매물 등록"으로 별도 라벨 부여, 스키마 내 라벨 충돌 자동 검사 로직도 추가해 다른 충돌 없음 확인), (b) `flight` 테이블처럼 같은 참조 테이블(`airport`)을 가리키는 FK가 2개(`origin_id`/`destination_id`)인 경우 질문 문구가 어느 쪽인지 명시하지 않아 정답이 사실상 랜덤이었음(→ FK 컬럼 자체의 라벨로 명확화), (c) `gen_order_no_limit`의 두 번째 문구 변형이 정렬 방향(ASC/DESC)을 아예 언급 안 해서 답을 알 수 없었음(→ 방향 명시 추가). 세 가지 다 고치고 데이터셋 재생성 완료.
-   - **2차 재학습 결과 (2026-09-19, 위 3가지 버그 수정된 데이터셋으로 재학습)**: held-out 568문항 기준 **정확/정규화 일치 93.7% (532/568)** — 1차 대비 대폭 개선. 도메인별 실패율: `airline` 7.0%→**1.9%**, `real_estate` ~14.5~15.1%→**1.1%**로 거의 해소. `insurance`는 13.6%로 거의 그대로 — 실패 상당수가 `policy`(보험 증권)↔`claim`(보험금 청구) 테이블 혼동인데, 두 라벨이 한글로도 명확히 다름에도 발생해 데이터 버그가 아니라 **모델의 진짜 일반화 한계**로 결론(참고: 라벨 충돌이었던 real_estate `listing`/`property`와는 다른 종류의 실패). 언어별로는 영어 0.7% vs 한국어 12.0%로 격차가 여전히 남아있음. 일부 "실패"는 모델이 JOIN 대신 동등한 서브쿼리를 낸 경우처럼 문자열 완전일치 채점 방식 자체의 한계로 인한 false negative라 실제 정확도는 이보다 다소 높을 것으로 추정.
-   - test 셋 평가는 SQL을 실제로 실행해서 채점하는 게 아니라 문자열 일치(정확/정규화) 기준 — Colab에서 RuSQL 엔진에 접근할 수 없어서 대략적인 진행 지표로만 사용.
-
-**AI 트랙은 위 3단계(베이스 모델 선택 → 데이터 생성 → 파인튜닝/평가)로 마무리한다.** 원래 다음 단계로 계획했던 "로컬 추론 통합"(GGUF 양자화 + CPU/GPU 런타임을 Tauri 앱에 내장 + `AiView.tsx` 연결)과 "평가/스코프 방어"(배포된 소형 모델의 오답 위험 완화)는 위 "로컬 추론 배포 계획 철회" 절의 사유로 진행하지 않는다.
-
-## 최종 결정 (2026-10-01) — 사설 AI NL→SQL 기능 제외, AI는 Claude + MCP로 일원화
-
-**결정**: 자체 파인튜닝한 소형 모델로 자연어→SQL을 하는 기능은 RuSQL의 제품 범위에 넣지 않는다. 앱·서버·MCP 어디에도 연결하지 않으며, 사용자가 자연어로 DB를 다루는 경로는 **Claude Desktop + MCP 서버(25개 도구) 하나**뿐이다.
-
-**근거** (사용자 판단):
-1. **MCP가 같은 일을 이미 전부 한다.** `execute_sql`(위험 SQL 안전장치 포함)·스키마 조회·`explain_query`·에디터/탭 제어까지 자연어 요청을 SQL 실행과 화면 조작으로 바꾸는 경로가 이미 완성돼 있다. 사설 모델은 같은 자리(자연어→SQL)를 한 번 더 차지할 뿐이다.
-2. **Claude가 사설 모델보다 더 잘한다.** 1.5B급 LoRA 모델은 템플릿 기반 합성 데이터로 학습한 것이라 복잡한 쿼리·한국어·처음 보는 스키마에서 범용 LLM을 못 따라간다 — 이 프로젝트의 자체 평가도 그 방향을 보여준다(held-out 93.7%는 최상 조건 수치, 한국어 실패율 12.0% vs 영어 0.7%, `policy`↔`claim` 같은 진짜 일반화 실패가 남음).
-3. **두 경로가 상충한다.** 같은 기능이 두 곳에 있으면 사용자에게 어느 쪽을 써야 하는지 설명해야 하고, 틀린 SQL을 내는 쪽(소형 모델)이 앱의 신뢰도를 깎는다. 2026-09-21에 로컬 추론 *배포*를 철회한 논리를 파인튜닝 결과물 자체로 끝까지 밀어붙인 결정이다.
-
-**이전 결정과의 관계**: 2026-09-07의 "MCP(기존 모델 연동) + 직접 학습시킨 전용 모델, 둘 다 있는 게 더 강한 이야기"라는 판단을 **번복**한다. 학습 경험이라는 개인 목표는 이미 달성됐다 — 데이터 생성 파이프라인 설계, Colab에서의 LoRA/QLoRA 학습, 실패 분석을 통한 데이터 버그 3건 수정, held-out 평가까지 실제로 수행했다(위 "완료된 작업" 기록은 사실 그대로 유지).
-
-**남는 것**: `archive/AI/`(데이터 생성 코드·데이터셋·Colab 노트북)는 **탐색 실험의 기록으로만** 저장소에 보존한다. 제품 어디에서도 참조하지 않는다. 2026-10-05에 삭제하지 않고 저장소 루트의 `archive/` 폴더로 옮겨 보관하기로 했다(`archive/AI/`).
-
-**연결 방식 (2026-11-23)**: Claude Desktop이 RuSQL MCP 서버를 쓰는 길은 둘이다 — 앱 MCP Agent 패널의 **Add to Claude Desktop (extension)**(`RuSQL.mcpb` 확장을 만들어 탐색기로 보여 주고 사용자가 Claude Desktop에 넣음; 새로 설치한 Microsoft Store판이 설정 파일을 읽지 않는 문제를 피함)와 **Auto-connect Claude Desktop (config file)**(`claude_desktop_config.json`에 씀). 둘 중 하나만 쓴다 — 확장 단추는 설정 파일의 RuSQL 항목을 지우고, 설정 파일 단추는 확장이 있으면 경고한다. 도구 37개 중 데이터베이스 · 연결 목록 · 앱을 바꾸지 않는 16개에는 MCP `readOnlyHint`를 붙였다(Claude Desktop이 "읽기 전용"으로 묶으면 한 번에 허용할 수 있다; Claude 화면의 실제 동작은 확인하지 못함).
-
-**macOS에서 (2026-11-23)**: 같은 두 단추가 맥에서도 돈다. 확장 단추는 `~/Library/Application Support/RuSQL/RuSQL.mcpb`를 만들어 Finder(`open -R`)로 보여 주고(manifest의 플랫폼은 `darwin`, Python은 `RuSQL.app/Contents/Resources/python/bin/python3`), 설정 파일 단추는 `~/Library/Application Support/Claude/claude_desktop_config.json`에 쓴다(Store판 경로는 Windows에만 있다); Claude Desktop은 ⌘Q로 완전히 종료한다. 앱이 `.dmg`나 다운로드 폴더에서 바로 열려 임시 위치(`/AppTranslocation/`)에서 돌면 그 경로가 곧 사라지므로 두 단추가 거절한다 — 응용 프로그램 폴더로 옮겨 다시 실행한다. `launch_app`은 앱 꾸러미 안의 실행 파일 경로를 받으면 `open -n`으로 연다. 번들 Python + MCP 서버 + 엔진은 설치한 `.dmg` 앱에서 Actions가 확인한다(`code/test/mac/smoke_bundle.py`: 도구 37개 · 읽기 전용 표시 16개 · SQL 실행). Mac의 Claude Desktop 자체(확장 설치 창)는 확인하지 못했다.
-
-**문서·UI 반영 상태**: `DATE.md`(10월 1일 항목), `README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널을 "Claude via MCP"로 교체)에 반영. 캡스톤 산출물 D01~D08은 이미 AI 연동을 MCP 기반으로만 기술해서 변경이 필요 없었다. 사이드바의 빈 "AI" 탭(`AiView.tsx`)은 원래 사설 모델 UI 자리였으므로 **같은 날(2026-10-01) 제거했다**(활동 바 아이콘·`AiView.tsx`·`.ai-view` CSS). **결정됨 (2026-10-05)**: 폴더는 삭제하지 않고 `archive/AI/`로 옮겨 보존한다(코드·테스트·MCP·UI에서 참조하는 곳이 없어 경로 변경만 문서에 반영).
+`README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널), 산출물 D01~D08.

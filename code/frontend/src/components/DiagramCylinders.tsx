@@ -29,8 +29,8 @@ const NODES: Node[] = [
   },
   {
     id: "mcp", x: 95, y: 350, w: 140, h: 84, c: C.client, name: "Claude + MCP",
-    desc: L("Claude Desktop drives RuSQL through a Python MCP server (37 tools, TCP :7878). Claude writes the SQL and RuSQL runs it, with a confirmation step for dangerous statements.",
-            "Claude Desktop이 Python MCP 서버(도구 37개, TCP :7878)로 RuSQL을 조작. SQL은 Claude가 작성하고 RuSQL이 실행하며, 위험한 문장은 확인을 거침."),
+    desc: L("Claude Desktop drives RuSQL through a Python MCP server (AI MCP tools, TCP :7878). Claude writes the SQL and RuSQL runs it, with a confirmation step for dangerous statements.",
+            "Claude Desktop이 Python MCP 서버(AI MCP 도구, TCP :7878)로 RuSQL을 조작. SQL은 Claude가 작성하고 RuSQL이 실행하며, 위험한 문장은 확인을 거침."),
   },
   {
     id: "client", x: 95, y: 475, w: 140, h: 84, c: C.client, name: "engine_client",

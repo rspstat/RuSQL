@@ -48,7 +48,7 @@
 
 - **데스크톱 앱(Tauri/React)**: 홈 화면(연결 카드, 검색, 즐겨찾기·최근 연결, 모든 연결 · 데이터베이스 · 테이블을 원통 애니메이션으로 보여 주는 "View Topology" 버튼의 생태계 창), SQL 에디터(스키마를 아는 자동완성, `EXPLAIN` 계획을 상자와 화살표로 그린 그림과 `EXPLAIN ANALYZE`의 단계별 시간 막대, 결과를 JSON으로 내보내기와 막대·꺾은선·파이 차트, 두 데이터베이스의 스키마 비교와 마이그레이션 SQL, 문장 하나가 지나는 단계를 재생하는 Journey, `EXPLAIN` 아래에서 인덱스를 제안하고 임시로 만들어 전·후 시간을 재 보는 카드), ERD 편집기(외래키 관계를 DDL 미리보기와 함께 편집, 열을 끌어서 연결), 서버 매니저(세션·트랜잭션·락 실시간 패널: KILL 버튼, 다른 트랜잭션을 막는 세션과 오래 도는 문장 강조, 느린 쿼리 로그 켜기와 목록, 크래시 복구에 걸린 시간과 되살린 변경 수를 보여 주는 복구 카드, 초당 문장 수·세션·락 대기·redo 크기·버퍼 풀의 추세 그래프를 그리는 Metrics 패널).
 - **보여 주기 위한 페이지**: Diagram(전체 구조), **B+Tree**(키가 들어가며 노드가 쪼개지고 트리가 자라는 모습이 스스로 재생됨), **MVCC**(UPDATE가 새 버전을 만들고 세션마다 다른 버전이 보이는 짧은 이야기가 스스로 재생됨; 엔진의 실제 버전은 `information_schema.row_versions`), MySQL 호환성(진짜 MySQL과 코퍼스별 일치율).
-- **Claude 연동(MCP)**: 37개 도구(느린 쿼리를 모아 보여 주는 `slow_queries`, 확인한 뒤에만 세션을 끊는 `kill_session`, CSV 가져오기·내보내기, 두 데이터베이스를 비교하는 `diff_schema`)와 resources 2개·prompts 3개. `run_script`는 영향받는 행을 미리 보여 주고 확인한 뒤에만 커밋, `suggest_indexes`는 엔진의 `SUGGEST INDEX`가 문장과 통계를 읽은 답(하위 질의·CTE·UNION·OR도, 앱의 인덱스 제안 카드와 같은 답)으로 `CREATE INDEX`를 제안(기본은 만들지 않고, `verify`는 임시로 만들어 전·후 `EXPLAIN ANALYZE`를 재고 지움; UPDATE·DELETE는 실행하지 않고 `EXPLAIN` 추정으로), `health_report`는 "서버 상태 어때?"에 한 번에 답하고(연결·문장·락·교착·복구와 주의할 점), `list_locks`·`trace_query`·`get_table_stats`·`get_fk_graph`는 락 대기, 문장의 단계별 시간, 열 통계, 조인 경로를 JSON으로 준다.
+- **Claude 연동(MCP)**: AI MCP 도구(느린 쿼리를 모아 보여 주는 `slow_queries`, 확인한 뒤에만 세션을 끊는 `kill_session`, CSV 가져오기·내보내기, 두 데이터베이스를 비교하는 `diff_schema`)와 resources 2개·prompts 3개. `run_script`는 영향받는 행을 미리 보여 주고 확인한 뒤에만 커밋, `suggest_indexes`는 엔진의 `SUGGEST INDEX`가 문장과 통계를 읽은 답(하위 질의·CTE·UNION·OR도, 앱의 인덱스 제안 카드와 같은 답)으로 `CREATE INDEX`를 제안(기본은 만들지 않고, `verify`는 임시로 만들어 전·후 `EXPLAIN ANALYZE`를 재고 지움; UPDATE·DELETE는 실행하지 않고 `EXPLAIN` 추정으로), `health_report`는 "서버 상태 어때?"에 한 번에 답하고(연결·문장·락·교착·복구와 주의할 점), `list_locks`·`trace_query`·`get_table_stats`·`get_fk_graph`는 락 대기, 문장의 단계별 시간, 열 통계, 조인 경로를 JSON으로 준다.
 
 ## 성능: 같은 결과를 더 빨리
 
@@ -257,13 +257,12 @@
 
 성능·정합성 작업의 커밋들에서 찾은 기존 버그는 모두 219건입니다(전체 목록은 `DATE.md`).
 
-## 한계와 앞으로
+## 앞으로의 과제
 
-- 이번 학기 성능 작업은 **의도적으로 여기서 동결**했습니다. 남은 것은 상수 배수 수준(100,000행에서 `ANALYZE`·`INSERT … SELECT`·`UNION ALL`이 1.5~1.7초)이며 `RECOMMAND.md`에 후보로 기록했습니다.
-- 쓰는 문장 안의 상관 서브쿼리, `NATURAL`/`USING` 조인은 아직 중첩 루프입니다.
-- 설계상 범위 밖: XA 분산 트랜잭션, 페이지 단위 버퍼 풀, WAL 복제.
-- 알려진 한계(`RECOMMAND.md`): **`GRANT` · `REVOKE`가 기록만 하고 어떤 문장도 권한을 확인하지 않는 것**(R77에서 찾음, 7번 표의 첫 항목), `COLLATE` 절이 없는 것, 저장 함수 · 준비된 문장 · `CALL`이 돌려주는 숫자가 MySQL 프로토콜에서 글자 형인 것, `AVG`를 식에서 쓸 때 MySQL의 9자리(`AVG(v) * 3` = `5.0000`) 대신 보이는 값으로 이어 계산하는 것, select 안의 대입 `SELECT @x := 식`이 없는 것, 기본키 없는 표의 `UPDATE` 뒤 행 순서와 조인의 둘째 표 이하 순서가 InnoDB와 다른 것, `ORDER BY` · `GROUP BY` 식과 집계 인자 안의 서브쿼리(오류로 거절), `IN (서브쿼리)`와 `CHECK`의 글자와 숫자 비교가 예전 규칙인 것, `UNION`의 마지막이 FROM 없는 `SELECT`일 때 `ORDER BY`가 문법 오류인 것, 대소문자를 구분하는 열(`COLLATE utf8mb4_bin` · `BINARY`)이 없는 것, 명령줄 상자 표에서 값 양 끝의 공백이 `\s`로 보이는 것(MySQL 클라이언트에는 프로토콜 계층이 되돌려 줌).
-- AI는 사설 모델 대신 **Claude + MCP**로 일원화했습니다(`AI.md`).
+- 이번 학기 성능 작업은 여기서 마무리했습니다. 100,000행에서 `ANALYZE`·`INSERT … SELECT`·`UNION ALL`이 1.5~1.7초 수준이며, 추가 최적화 후보는 `RECOMMAND.md`에 정리했습니다.
+- 다음 확장 후보: 쓰는 문장 안의 상관 서브쿼리와 `NATURAL`/`USING` 조인의 해시 실행, XA 분산 트랜잭션, 페이지 단위 버퍼 풀, WAL 복제.
+- MySQL과의 작은 차이와 더 넣을 문법은 `RECOMMAND.md`에 분류별로 정리해 두었습니다.
+- AI는 **Claude + MCP**로 연동합니다(`AI.md`).
 
 ## 직접 확인해 보기
 

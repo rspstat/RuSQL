@@ -13,7 +13,7 @@
 3. SQL 편집기에 `EXHIBITION_setup.sql` **전체를 붙여 넣고 Run All** → `✓ 25 query(s)` (약 3초). 한 번만 합니다. (이미 `expo`가 있으면 `CREATE DATABASE`가 실패하니 `DROP DATABASE expo;`로 지우고 다시 합니다.)
 4. Claude Desktop 연결 (한 번): 먼저 Server Manager에서 **Start Server**(RUNNING)를 눌러 둡니다.
     - **오른쪽 막대 MCP Agent → Add to Claude Desktop (extension)** 을 누르면 `RuSQL.mcpb`가 선택된 탐색기 창이 열립니다. 그 파일을 **Claude Desktop 창으로 끌어다 놓고**(Store판은 더블클릭이 안 될 수 있어 끌어다 놓기가 확실합니다) **Install**을 누릅니다. Claude Desktop **설정 → Extensions**에서 RuSQL이 켜져 있는지 봅니다.
-    - Claude가 도구를 처음 쓸 때마다 허용을 물으니, 리허설 때 **Always allow**를 눌러 둡니다(읽기 전용 도구 16개는 Claude Desktop이 "읽기 전용"으로 묶어 보여 주면 한 번에 허용할 수 있습니다).
+    - Claude가 도구를 처음 쓸 때마다 허용을 물으니, 리허설 때 **Always allow**를 눌러 둡니다(읽기 전용 도구는 Claude Desktop이 "읽기 전용"으로 묶어 보여 주면 한 번에 허용할 수 있습니다).
     - 안 되면 같은 패널의 **Auto-connect Claude Desktop (config file)** 을 누르고, Claude Desktop을 작업 표시줄 오른쪽 아래 아이콘에서 **우클릭 → Quit**로 완전히 종료한 뒤 다시 실행합니다. 둘 중 **하나만** 씁니다(확장 단추는 설정 파일 방식으로 써 둔 RuSQL 항목을 알아서 지웁니다).
     - Claude Desktop은 인터넷이 필요합니다.
 5. **백업 영상**: 장면 7(Claude)을 한 번 하면서 화면을 녹화해 둡니다(Windows: `Win + Alt + R`). 인터넷이나 연결이 안 될 때 이 영상을 틉니다.
@@ -29,7 +29,7 @@
 | 3:00 | *4. 문장의 여행* (30초, 선택) | 새 문장을 쓰고 **전체 선택** → 도구 막대의 **Journey** | "한 문장이 지나가는 단계를 느린 화면으로 다시 봅니다." | 11단계(Parse → 락 → 스캔 → … → 결과) |
 | 3:30 | **5. 세션 · 락** (40초) | `BEGIN; UPDATE …` **Run All** → **Server Manager → Sessions** → 편집기로 돌아가 `ROLLBACK;` | "열린 트랜잭션과 쥐고 있는 행 락이 보이고, 막힌 세션은 `Stop statement`로 멈출 수 있습니다." | `txn … RUNNING · 3 row lock(s) · expo.orders #1 #2 #3` |
 | 4:10 | *6. B+Tree · MVCC* (30초, 선택) | 왼쪽 활동 막대의 **B+Tree**, **MVCC** 아이콘 | "인덱스가 쪼개지는 모습과, 쓰는 쪽과 읽는 쪽이 서로 안 기다리는 모습입니다." | 스스로 재생되는 그림(한국어 / EN 전환) |
-| 4:40 | **7. Claude + MCP** (1분) | Claude Desktop에 아래 질문 두 개를 말함 | "AI는 Claude Desktop을 MCP로 연결합니다. RuSQL이 도구 37개를 내줍니다." | 도시별 5행, 편집기에 새 탭이 열려 실행됨 |
+| 4:40 | **7. Claude + MCP** (1분) | Claude Desktop에 아래 질문 두 개를 말함 | "AI는 Claude Desktop을 MCP로 연결합니다. RuSQL이 AI MCP 도구를 내줍니다." | 도시별 5행, 편집기에 새 탭이 열려 실행됨 |
 
 ## 복사해서 쓸 SQL
 
@@ -98,7 +98,7 @@ ROLLBACK;
 
 ## 자주 받는 질문 (한 줄 답)
 
-- **AI는 어디에 있나요?** 앱 안에 AI 모델이 있는 것이 아니라 Claude Desktop을 MCP로 연결합니다. RuSQL이 데이터베이스 · 편집기 · 서버를 다루는 도구 37개를 내줍니다.
+- **AI는 어디에 있나요?** Claude Desktop을 MCP로 연결합니다. RuSQL이 데이터베이스 · 편집기 · 서버를 다루는 AI MCP 도구를 내주고, AI 추론은 Claude Desktop이 맡아 API 키가 필요 없습니다.
 - **MySQL과 호환되나요?** 진짜 MySQL 8.4.9에 같은 문장 7,740개(코퍼스 80개)를 보내 결과를 비교해 차이가 0입니다. mysql 클라이언트나 DBeaver로 접속됩니다.
 - **얼마나 검증했나요?** 자동 테스트 1,065케이스(확인 약 152만 개), 실제 MySQL과의 대조, 무작위 문장 퍼저로 확인합니다.
-- **무엇은 안 하나요?** XA 분산 트랜잭션, 페이지 단위 버퍼 풀 교체, WAL 기반 복제는 범위에서 뺐습니다.
+- **앞으로 무엇을 더 하나요?** 단일 서버 엔진을 넘어서는 XA 분산 트랜잭션, 페이지 단위 버퍼 풀 교체, WAL 기반 복제가 다음 확장 과제입니다.

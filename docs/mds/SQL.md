@@ -1,7 +1,7 @@
 # RuSQL 지원 SQL 문법 전체 목록
 
 RuSQL이 실제로 받아서 실행하는 SQL 문법을 한 줄씩 정리한 문서입니다. 줄마다 `문법 : 맡은 기능` 형식이고, 문법 앞뒤의 `[ ]`는 생략할 수 있다는 뜻입니다.
-목록의 모든 문법은 실행 중인 엔진에 한 줄씩 넣어 보고 받아들여지는 것만 적었습니다. 받아들이지 않는 문법은 맨 끝 **16. 지원하지 않는 문법**에 따로 모았습니다.
+목록의 모든 문법은 실행 중인 엔진에 한 줄씩 넣어 보고 받아들여지는 것만 적었습니다. 아직 받아들이지 않는 문법은 맨 끝 **16. 다음에 넣을 문법**에 따로 모았습니다.
 
 - **네이티브 프로토콜**(앱 · MCP · CLI)과 **MySQL 프로토콜**(mysql 클라이언트 · 드라이버)은 같은 엔진을 씁니다. 한쪽에서만 되는 문법은 **14. MySQL 프로토콜에서만 되는 문법**에 있습니다.
 - 이름(DB · 테이블 · 컬럼)은 대소문자를 구분하지 않고, `` `이름` ``으로 감싸면 예약어도 이름으로 쓸 수 있고, `db.table` · `db.table.column`으로 DB를 붙여 쓸 수 있습니다.
@@ -564,11 +564,11 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 
 ---
 
-## 16. 지원하지 않는 문법
+## 16. 다음에 넣을 문법
 
-받아들이지 않고 오류를 돌려주는 문법입니다(MySQL에는 있음). 새 문법은 필요할 때 다음 라운드에서 하나씩 추가합니다.
+아직 받아들이지 않고 오류를 돌려주는 문법으로(MySQL에는 있음), 다음 라운드에서 필요한 것부터 하나씩 넣습니다.
 
-- **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `BINARY` · `VARBINARY` · `BIT` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
+- **테이블 정의** : `GENERATED ALWAYS AS (...)` 생성 컬럼, `DEFAULT (식)`, `CREATE TEMPORARY TABLE`, `FULLTEXT` 인덱스, 인덱스 접두 길이 `col(n)`, 여러 컬럼 외래 키, 표현식 인덱스, `ZEROFILL`, `SERIAL` · `GEOMETRY` 타입, `ALTER TABLE ADD/DROP PRIMARY KEY`, `ALTER TABLE CONVERT TO CHARACTER SET`, 파티션 `KEY` · `COLUMNS` · `REORGANIZE` · `TRUNCATE PARTITION`, `DROP TABLE ... CASCADE`, `CREATE INDEX IF NOT EXISTS`, `ALTER DATABASE`
 - **뷰** : `CREATE VIEW v (컬럼 목록) AS ...`, 조인 뷰의 `UPDATE` · `INSERT`(MySQL은 한 표의 열만 쓰면 받음)
 - **데이터 쓰기** : `INSERT ... DEFAULT VALUES`, `INSERT ... AS 별칭`, `INSERT/UPDATE/DELETE LOW_PRIORITY · QUICK`, `UPDATE IGNORE`, `UPDATE ... JOIN (파생 테이블)`, `DELETE FROM ... USING`, `LOAD DATA`, `SELECT ... INTO OUTFILE`
 - **조회** : `NATURAL LEFT | RIGHT JOIN`, `TABLE t`, `VALUES ROW(...)`, `PARTITION (p)` 선택, `NULLS FIRST | LAST`, `OFFSET n ROWS`, `FOR UPDATE OF 테이블`, `NATURAL LEFT JOIN`, `IN (SELECT ... UNION SELECT ...)`, `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`
@@ -577,6 +577,6 @@ mysql 클라이언트 · 드라이버 · 도구가 보내는 문장을 받아주
 - **프로시저** : `RESIGNAL` · `GET DIAGNOSTICS`, `DECLARE ... HANDLER`, 커서(`DECLARE CURSOR`), 본문의 `CASE ... END CASE`, `CREATE PROCEDURE IF NOT EXISTS`, `CREATE OR REPLACE PROCEDURE`, `CREATE TRIGGER IF NOT EXISTS`, 여러 문장 함수 본문(`BEGIN ... RETURN ... END`)
 - **권한 · 사용자** : 프로시저 · 함수 수준의 `GRANT EXECUTE`는 받지만 `SHOW GRANTS`의 모양만 같고 MySQL의 모든 경우를 다 따라가지는 않음, `FLUSH PRIVILEGES`(필요 없음: 권한은 문장마다 바로 반영됨), 비밀번호 정책 · 계정 잠금 · 만료
 - **조회 · 관리** : `SHOW TABLES IN db`, `SHOW FULL PROCESSLIST`, `SHOW ENGINE INNODB STATUS`, `SHOW MASTER STATUS`, `SHOW SLAVE STATUS`, `SHOW PRIVILEGES`, `SHOW ERRORS`, `SHOW OPEN TABLES`, `EXPLAIN FORMAT=JSON`, `EXPLAIN EXTENDED`, `EXPLAIN INSERT | UPDATE | DELETE`의 실행 계획(안내만 나옴), `information_schema.routines`, `information_schema.triggers`, `FLUSH`, `HELP`, `DELIMITER`, `XA`, `LOCK TABLES t AS 별칭`, `DROP PREPARE`
-- **복제 · 분산** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
+- **복제 · 분산 (확장 후보)** : 복제(replication), XA 분산 트랜잭션, 실제 페이지 단위 버퍼 풀, 이벤트 스케줄러(`CREATE EVENT`)
 
 > 이 문서는 RuSQL 엔진이 받아들이는 문법을 실제로 실행해 확인한 목록입니다. 새 문법을 넣거나 빼면 이 문서도 같이 고칩니다.
