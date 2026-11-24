@@ -29,4 +29,4 @@ Claude Desktop이 RuSQL MCP 서버를 쓰는 길은 둘이다 — 앱 MCP Agent 
 
 ## 반영 위치
 
-`README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널), 산출물 D01~D08.
+`README.md`(AI Integration), `FUNCTIONS.md`, `DIFF.md`의 AI 연동 행, 앱의 Diagram 페이지(AI 패널).
